@@ -4780,7 +4780,7 @@ public:
   /// @return the symbol table section if found
   Elf_Scn*
   find_symbol_table_section() const
-  {return find_symbol_table_section();}
+  {return const_cast<Elf_Scn*>(abigail::elf::reader::find_symbol_table_section());}
 
   /// Lookup an elf symbol, referred to by its index, from the .symtab
   /// section.
