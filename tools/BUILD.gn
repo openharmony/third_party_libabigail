@@ -29,6 +29,7 @@ ohos_executable("abidiff") {
   subsystem_name = "thirdparty"
   part_name = "libabigail"
   install_images = [ "system" ]
+  license_file = "../LICENSE.txt"
 }
 
 # Build abidw
@@ -47,6 +48,7 @@ ohos_executable("abidw") {
   subsystem_name = "thirdparty"
   part_name = "libabigail"
   install_images = [ "system" ]
+  license_file = "../LICENSE.txt"
 }
 
 # Build abicompat
@@ -65,4 +67,5 @@ ohos_executable("abicompat") {
   subsystem_name = "thirdparty"
   part_name = "libabigail"
   install_images = [ "system" ]
+  license_file = "../LICENSE.txt"
 }
