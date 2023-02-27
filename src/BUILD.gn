@@ -59,6 +59,8 @@ ohos_static_library("libabigail_static") {
 
   defines = [ "ABIGAIL_ROOT_SYSTEM_LIBDIR=\"lib\"" ]
 
+  license_file = "../LICENSE.txt"
+
   subsystem_name = "thirdparty"
   part_name = "libabigail"
 }
@@ -71,4 +73,5 @@ ohos_shared_library("libabigail") {
     output_extension = "so"
   }
   install_images = [ "system" ]
+  license_file = "../LICENSE.txt"
 }
