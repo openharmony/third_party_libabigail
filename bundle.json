@@ -2,15 +2,15 @@
     "name": "@ohos/libabigail",
     "description": "The libabigail package aims at constructing, manipulating, serializing and de-serializing ABI-relevant artifacts.",
     "version": "2.2",
-    "license": "Apache V2",
+    "license": "Apache License 2.0",
     "publishAs": "code-segment",
     "segment": {
         "destPath": "third_party/libabigail"
     },
     "dirs": {},
     "scripts": {},
-	"licensePath": "LICENSE.txt",
-	"readmePath": {
+    "licensePath": "LICENSE.txt",
+    "readmePath": {
         "en": "README"
     },
     "component": {
