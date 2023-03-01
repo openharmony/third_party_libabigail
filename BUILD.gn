@@ -22,10 +22,6 @@ config("libabigail_defaults") {
 
 group("libabigail-tools_host_toolchain") {
   deps = [
-    "//third_party/elfutils:libdw($host_toolchain)",
-    "//third_party/elfutils:libelf($host_toolchain)",
-    "//third_party/libabigail/src:libabigail($host_toolchain)",
-    "//third_party/libabigail/tools:abicompat($host_toolchain)",
     "//third_party/libabigail/tools:abidiff($host_toolchain)",
     "//third_party/libabigail/tools:abidw($host_toolchain)",
   ]

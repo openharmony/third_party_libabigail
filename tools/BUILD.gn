@@ -25,10 +25,9 @@ ohos_executable("abidiff") {
 
   deps = [ "//third_party/libabigail/src:libabigail_static" ]
 
-  install_enable = true
+  install_enable = false
   subsystem_name = "thirdparty"
   part_name = "libabigail"
-  install_images = [ "system" ]
   license_file = "../LICENSE.txt"
 }
 
@@ -44,28 +43,8 @@ ohos_executable("abidw") {
 
   deps = [ "//third_party/libabigail/src:libabigail_static" ]
 
-  install_enable = true
+  install_enable = false
   subsystem_name = "thirdparty"
   part_name = "libabigail"
-  install_images = [ "system" ]
-  license_file = "../LICENSE.txt"
-}
-
-# Build abicompat
-ohos_executable("abicompat") {
-  configs = [ "//third_party/libabigail:libabigail_defaults" ]
-  sources = [ "abicompat.cc" ]
-
-  include_dirs = [
-    "//third_party/libabigail",
-    "//third_party/libabigail/include",
-  ]
-
-  deps = [ "//third_party/libabigail/src:libabigail_static" ]
-
-  install_enable = true
-  subsystem_name = "thirdparty"
-  part_name = "libabigail"
-  install_images = [ "system" ]
   license_file = "../LICENSE.txt"
 }
