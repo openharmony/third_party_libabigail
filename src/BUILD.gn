@@ -53,8 +53,7 @@ ohos_static_library("libabigail_static") {
 
   deps = [
     "//third_party/elfutils:libdw_static",
-    "//third_party/elfutils:libelf_static",
-    "//third_party/libxml2:libxml2",
+    "//third_party/libxml2:static_libxml2",
   ]
 
   defines = [ "ABIGAIL_ROOT_SYSTEM_LIBDIR=\"lib\"" ]
@@ -63,15 +62,4 @@ ohos_static_library("libabigail_static") {
 
   subsystem_name = "thirdparty"
   part_name = "libabigail"
-}
-
-ohos_shared_library("libabigail") {
-  deps = [ ":libabigail_static" ]
-  subsystem_name = "thirdparty"
-  part_name = "libabigail"
-  if (is_ohos) {
-    output_extension = "so"
-  }
-  install_images = [ "system" ]
-  license_file = "../LICENSE.txt"
 }
