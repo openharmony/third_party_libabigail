@@ -24,6 +24,7 @@ ohos_executable("abidiff") {
   ]
 
   deps = [ "//third_party/libabigail/src:libabigail_static" ]
+  external_deps = [ "elfutils:libdw_static" ]
 
   install_enable = false
   subsystem_name = "thirdparty"
@@ -42,6 +43,7 @@ ohos_executable("abidw") {
   ]
 
   deps = [ "//third_party/libabigail/src:libabigail_static" ]
+  external_deps = [ "elfutils:libdw_static" ]
 
   install_enable = false
   subsystem_name = "thirdparty"
