@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 /// @file
 ///
@@ -62,8 +62,8 @@ static bool	read_is_artificial(xmlNodePtr, bool&);
 static bool	read_tracking_non_reachable_types(xmlNodePtr, bool&);
 static bool	read_is_non_reachable_type(xmlNodePtr, bool&);
 static bool	read_naming_typedef_id_string(xmlNodePtr, string&);
-#ifdef WITH_DEBUG_SELF_COMPARISON
 static bool	read_type_id_string(xmlNodePtr, string&);
+#ifdef WITH_DEBUG_SELF_COMPARISON
 static bool	maybe_map_type_with_type_id(const type_base_sptr&,
 					    xmlNodePtr);
 static bool	maybe_map_type_with_type_id(const type_base_sptr&,
@@ -98,6 +98,12 @@ read_symbol_db_from_input(reader&			rdr,
 static translation_unit_sptr
 read_translation_unit_from_input(fe_iface& rdr);
 
+static decl_base_sptr
+build_ir_node_for_void_type(reader& rdr);
+
+static decl_base_sptr
+build_ir_node_for_void_pointer_type(reader& rdr);
+
 /// The ABIXML reader object.
 ///
 /// This abstracts the context in which the current ABI
@@ -108,6 +114,9 @@ read_translation_unit_from_input(fe_iface& rdr);
 class reader : public fe_iface
 {
 public:
+
+  typedef unordered_map<string, vector<type_base_sptr> >
+  types_map_type;
 
   typedef unordered_map<string,
 			vector<type_base_sptr> >::const_iterator
@@ -136,7 +145,7 @@ public:
 	 get_artifact_used_by_relation_map(reader& rdr);
 
 private:
-  unordered_map<string, vector<type_base_sptr> >	m_types_map;
+  types_map_type					m_types_map;
   unordered_map<string, shared_ptr<function_tdecl> >	m_fn_tmpl_map;
   unordered_map<string, shared_ptr<class_tdecl> >	m_class_tmpl_map;
   vector<type_base_sptr>				m_types_to_canonicalize;
@@ -164,6 +173,13 @@ public:
       m_drop_undefined_syms()
   {
   }
+
+  /// Test if logging was requested.
+  ///
+  /// @return true iff logging was requested.
+  bool
+  do_log() const
+  {return options().do_log;}
 
   /// Getter for the flag that tells us if we are tracking types that
   /// are not reachable from global functions and variables.
@@ -327,6 +343,12 @@ public:
   scope_decl_sptr
   get_scope_for_node(xmlNodePtr node,
 		     access_specifier& access);
+
+  scope_decl_sptr
+  get_scope_for_node(xmlNodePtr node);
+
+  scope_decl*
+  get_scope_ptr_for_node(xmlNodePtr node);
 
   // This is defined later, after build_type() is declared, because it
   // uses it.
@@ -571,7 +593,7 @@ public:
 
   /// Associate an ID with a type.
   ///
-  /// @param type the type to associate witht he ID.
+  /// @param type the type to associate with the ID.
   ///
   /// @param id the ID to associate to the type.
   ///
@@ -721,19 +743,34 @@ public:
   {record_artifacts_as_used_in_fn_type(fn_type.get());}
 #endif
 
+  /// This function must be called on each declaration that is created
+  /// during the parsing.  It adds the declaration to the scope that
+  /// its XML node belongs to and updates the state of the parsing
+  /// context accordingly.
+  ///
+  /// @param decl the newly created declaration.
+  ///
+  /// @param node the xml node @p decl originated from.
+  void
+  push_decl_to_scope(const decl_base_sptr& decl, xmlNodePtr node)
+  {
+    scope_decl* scope = nullptr;
+    scope = get_scope_ptr_for_node(node);
+    return push_decl_to_scope(decl, scope);
+  }
+
   /// This function must be called on each declaration that is created during
   /// the parsing.  It adds the declaration to the current scope, and updates
   /// the state of the parsing context accordingly.
   ///
   /// @param decl the newly created declaration.
   void
-  push_decl_to_current_scope(decl_base_sptr decl,
-			     bool add_to_current_scope)
+  push_decl_to_scope(const decl_base_sptr& decl,
+		     scope_decl* scope)
   {
     ABG_ASSERT(decl);
-
-    if (add_to_current_scope)
-      add_decl_to_scope(decl, get_cur_scope());
+    if (scope)
+      add_decl_to_scope(decl, scope);
     if (!decl->get_translation_unit())
       decl->set_translation_unit(get_translation_unit());
     ABG_ASSERT(decl->get_translation_unit());
@@ -748,21 +785,49 @@ public:
   ///
   /// @param id the unique ID to be associated to t
   ///
+  /// @param scope the scope to add the type to.
+  ///
   /// @return true upon successful completion.
   ///
   bool
-  push_and_key_type_decl(shared_ptr<type_base> t, const string& id,
-			 bool add_to_current_scope)
+  push_and_key_type_decl(const type_base_sptr& t,
+			 const string& id,
+			 scope_decl* scope)
   {
-    shared_ptr<decl_base> decl = dynamic_pointer_cast<decl_base>(t);
+    decl_base_sptr decl = get_type_declaration(t);
     ABG_ASSERT(decl);
 
-    push_decl_to_current_scope(decl, add_to_current_scope);
+    push_decl_to_scope(decl, scope);
     if (!t->get_translation_unit())
       t->set_translation_unit(get_translation_unit());
     ABG_ASSERT(t->get_translation_unit());
     key_type_decl(t, id);
     return true;
+  }
+
+  /// This function must be called on each type decl that is created
+  /// during the parsing.  It adds the type decl to the current scope
+  /// and associates a unique ID to it.
+  ///
+  /// @param t the type to consider.
+  ///
+  /// @param node the XML it originates from.
+  ///
+  /// @return true upon successful completion.
+  ///
+  bool
+  push_and_key_type_decl(const type_base_sptr& t,
+			 const xmlNodePtr node,
+			 bool add_to_current_scope)
+  {
+    string id;
+    if (!read_type_id_string(node, id))
+      return false;
+
+    scope_decl* scope = nullptr;
+    if (add_to_current_scope && !is_unique_type(t))
+      scope = get_scope_ptr_for_node(node);
+    return push_and_key_type_decl(t, id, scope);
   }
 
   /// Getter for the object that determines if a given declaration
@@ -844,8 +909,8 @@ public:
   void
   maybe_check_abixml_canonical_type_stability(type_base_sptr& t)
   {
-    if (!get_environment()->self_comparison_debug_is_on()
-	|| get_environment()->get_type_id_canonical_type_map().empty())
+    if (!get_environment().self_comparison_debug_is_on()
+	|| get_environment().get_type_id_canonical_type_map().empty())
       return ;
 
     if (class_decl_sptr c = is_class_type(t))
@@ -857,15 +922,15 @@ public:
     // Let's get the type-id of this type as recorded in the
     // originating abixml file.
     string type_id =
-      get_environment()->get_type_id_from_pointer(reinterpret_cast<uintptr_t>(t.get()));
+      get_environment().get_type_id_from_pointer(reinterpret_cast<uintptr_t>(t.get()));
 
     if (!type_id.empty())
       {
 	// Now let's get the canonical type that initially led to the
 	// serialization of a type with this type-id, when the abixml
 	// was being serialized.
-	auto j = get_environment()->get_type_id_canonical_type_map().find(type_id);
-	if (j == get_environment()->get_type_id_canonical_type_map().end())
+	auto j = get_environment().get_type_id_canonical_type_map().find(type_id);
+	if (j == get_environment().get_type_id_canonical_type_map().end())
 	  {
 	    if (t->get_naked_canonical_type())
 	      std::cerr << "error: no type with type-id: '"
@@ -874,13 +939,13 @@ public:
 	  }
 	else if (j->second
 		 != reinterpret_cast<uintptr_t>(t->get_canonical_type().get()))
-	  // So thecanonical type of 't' (at abixml de-serialization
+	  // So the canonical type of 't' (at abixml de-serialization
 	  // time) is different from the canonical type that led to
 	  // the serialization of 't' at abixml serialization time.
 	  // Report this because it needs further debugging.
 	  std::cerr << "error: canonical type for type '"
-		    << t->get_pretty_representation(/*internal=*/false,
-						    /*qualified=*/false)
+		    << t->get_pretty_representation(/*internal=*/true,
+						    /*qualified=*/true)
 		    << "' of type-id '" << type_id
 		    << "' changed from '" << std::hex
 		    << j->second << "' to '" << std::hex
@@ -1100,9 +1165,8 @@ public:
 	  return nil;
 
 #ifdef WITH_DEBUG_SELF_COMPARISON
-	if (get_environment()->self_comparison_debug_is_on())
-	  get_environment()->
-	    set_self_comparison_debug_input(corpus());
+	if (get_environment().self_comparison_debug_is_on())
+	  get_environment().set_self_comparison_debug_input(corpus());
 #endif
 
 	if (!corpus_group())
@@ -1161,9 +1225,8 @@ public:
     else
       {
 #ifdef WITH_DEBUG_SELF_COMPARISON
-	if (get_environment()->self_comparison_debug_is_on())
-	  get_environment()->
-	    set_self_comparison_debug_input(corpus());
+	if (get_environment().self_comparison_debug_is_on())
+	  get_environment().set_self_comparison_debug_input(corpus());
 #endif
 
 	if (!corpus_group())
@@ -1233,7 +1296,22 @@ public:
       }
 
 
+    tools_utils::timer t;
+    if (do_log())
+      {
+	std::cerr << "perform late type canonicalization ...\n";
+	t.start();
+      }
+
     perform_late_type_canonicalizing();
+
+    if (do_log())
+      {
+	t.stop();
+	std::cerr << "late type canonicalization DONE@"
+		  << corpus()->get_path()
+		  << ":" << t << "\n";
+      }
 
     get_environment().canonicalization_is_done(true);
 
@@ -1319,11 +1397,11 @@ build_function_parameter (reader&, const xmlNodePtr);
 
 static function_decl_sptr
 build_function_decl(reader&, const xmlNodePtr,
-		    class_or_union_sptr, bool);
+		    class_or_union_sptr, bool, bool);
 
 static function_decl_sptr
 build_function_decl_if_not_suppressed(reader&, const xmlNodePtr,
-				      class_or_union_sptr, bool);
+				      class_or_union_sptr, bool, bool);
 
 static bool
 function_is_suppressed(const reader& rdr,
@@ -1355,7 +1433,7 @@ static shared_ptr<function_type>
 build_function_type(reader&, const xmlNodePtr, bool);
 
 static array_type_def::subrange_sptr
-build_subrange_type(reader&, const xmlNodePtr);
+build_subrange_type(reader&, const xmlNodePtr, bool);
 
 static array_type_def_sptr
 build_array_type_def(reader&, const xmlNodePtr, bool);
@@ -1455,8 +1533,7 @@ static decl_base_sptr	handle_class_tdecl(reader&, xmlNodePtr, bool);
 /// @return the IR node representing the scope of the IR node for the
 /// XML node given in argument.
 scope_decl_sptr
-reader::get_scope_for_node(xmlNodePtr node,
-				 access_specifier& access)
+reader::get_scope_for_node(xmlNodePtr node, access_specifier& access)
 {
   scope_decl_sptr nil, scope;
   if (!node)
@@ -1468,7 +1545,9 @@ reader::get_scope_for_node(xmlNodePtr node,
       && (xmlStrEqual(parent->name, BAD_CAST("data-member"))
 	  || xmlStrEqual(parent->name, BAD_CAST("member-type"))
 	  || xmlStrEqual(parent->name, BAD_CAST("member-function"))
-	  || xmlStrEqual(parent->name, BAD_CAST("member-template"))))
+	  || xmlStrEqual(parent->name, BAD_CAST("member-template"))
+	  || xmlStrEqual(parent->name, BAD_CAST("template-parameter-type-composition"))
+	  || xmlStrEqual(parent->name, BAD_CAST("array-type-def"))))
     {
       read_access(parent, access);
       parent = parent->parent;
@@ -1499,6 +1578,40 @@ reader::get_scope_for_node(xmlNodePtr node,
   return scope;
 }
 
+/// Get the IR node representing the scope for a given XML node.
+///
+/// This function might trigger the building of a full sub-tree of IR.
+///
+/// @param node the XML for which to return the scope decl.  If its
+/// parent XML node has no corresponding IR node, that IR node is constructed.
+///
+/// @return the IR node representing the scope of the IR node for the
+/// XML node given in argument.
+scope_decl_sptr
+reader::get_scope_for_node(xmlNodePtr node)
+{
+  access_specifier access;
+  return get_scope_for_node(node, access);
+}
+
+/// Get the IR node representing the scope for a given XML node.
+///
+/// This function might trigger the building of a full sub-tree of IR.
+///
+/// @param node the XML for which to return the scope decl.  If its
+/// parent XML node has no corresponding IR node, that IR node is constructed.
+///
+/// @return the IR node representing the scope of the IR node for the
+/// XML node given in argument.
+scope_decl*
+reader::get_scope_ptr_for_node(xmlNodePtr node)
+{
+  scope_decl_sptr scope = get_scope_for_node(node);
+  if (scope)
+    return scope.get();
+  return nullptr;
+}
+
 /// Get the type declaration IR node that matches a given XML type node ID.
 ///
 /// If no IR node has been built for this ID, this function builds the
@@ -1509,8 +1622,7 @@ reader::get_scope_for_node(xmlNodePtr node,
 ///
 /// @return the type declaration for the ID given in parameter.
 type_base_sptr
-reader::build_or_get_type_decl(const string& id,
-				     bool add_decl_to_scope)
+reader::build_or_get_type_decl(const string& id, bool add_decl_to_scope)
 {
   type_base_sptr t = get_type_decl(id);
 
@@ -2861,8 +2973,6 @@ read_elf_symbol_visibility(xmlNodePtr node, elf_symbol::visibility& v)
     }
   return false;
 }
-
-#ifdef WITH_DEBUG_SELF_COMPARISON
 /// Read the value of the 'id' attribute from a given XML node.
 ///
 /// @param node the XML node to consider.
@@ -2881,6 +2991,7 @@ read_type_id_string(xmlNodePtr node, string& type_id)
   return false;
 }
 
+#ifdef WITH_DEBUG_SELF_COMPARISON
 /// Associate a type-id string with the type that was constructed from
 /// it.
 ///
@@ -2906,8 +3017,8 @@ maybe_map_type_with_type_id(const type_base_sptr& t,
       || is_non_canonicalized_type(t.get()))
     return false;
 
-  env.get_pointer_type_id_map()[reinterpret_cast<uintptr_t>(t.get())] =
-    type_id;
+  const_cast<environment&>(env).
+    get_pointer_type_id_map()[reinterpret_cast<uintptr_t>(t.get())] = type_id;
 
   return true;
 }
@@ -3011,7 +3122,10 @@ build_namespace_decl(reader&	rdr,
   const environment& env = rdr.get_environment();
   namespace_decl_sptr decl(new namespace_decl(env, name, loc));
   maybe_set_artificial_location(rdr, node, decl);
-  rdr.push_decl_to_current_scope(decl, add_to_current_scope);
+  rdr.push_decl_to_scope(decl,
+			 add_to_current_scope
+			 ? rdr.get_scope_ptr_for_node(node)
+			 : nullptr);
   rdr.map_xml_node_to_decl(node, decl);
 
   for (xmlNodePtr n = xmlFirstElementChild(node);
@@ -3158,12 +3272,15 @@ build_elf_symbol_from_reference(reader& rdr, const xmlNodePtr node)
       if (name.empty())
 	return nil;
 
-      const elf_symbols& symbols =
-	  rdr.corpus()->get_symtab()->lookup_symbol(name);
+      if (rdr.corpus()->get_symtab())
+	{
+	  const elf_symbols& symbols =
+	    rdr.corpus()->get_symtab()->lookup_symbol(name);
 
-      for (const auto& symbol : symbols)
-	if (symbol->get_id_string() == sym_id)
-	  return symbol;
+	  for (const auto& symbol : symbols)
+	    if (symbol->get_id_string() == sym_id)
+	      return symbol;
+	}
     }
 
   return nil;
@@ -3323,16 +3440,21 @@ build_function_parameter(reader& rdr, const xmlNodePtr node)
 /// shared_ptr<function_decl> that is returned is then really a
 /// shared_ptr<method_decl>.
 ///
-/// @param add_to_current_scope if set to yes, the resulting of
+/// @param add_to_current_scope if set to yes, the result of
 /// this function is added to its current scope.
+///
+/// @param add_to_exported_decls if set to yes, the resulting of this
+/// function is added to the set of decls exported by the current
+/// corpus being built.
 ///
 /// @return a pointer to a newly created function_decl upon successful
 /// completion, a null pointer otherwise.
 static function_decl_sptr
-build_function_decl(reader&	rdr,
+build_function_decl(reader&		rdr,
 		    const xmlNodePtr	node,
 		    class_or_union_sptr as_method_decl,
-		    bool		add_to_current_scope)
+		    bool		add_to_current_scope,
+		    bool		add_to_exported_decls)
 {
   function_decl_sptr nil;
 
@@ -3346,6 +3468,16 @@ build_function_decl(reader&	rdr,
   string mangled_name;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "mangled-name"))
     mangled_name = xml::unescape_xml_string(CHAR_STR(s));
+
+  if (as_method_decl
+      && !mangled_name.empty()
+      && as_method_decl->find_member_function_sptr(mangled_name))
+    {
+      function_decl_sptr result =
+	as_method_decl->find_member_function_sptr(mangled_name);
+      if (result)
+	return result;
+    }
 
   string inline_prop;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "declared-inline"))
@@ -3411,7 +3543,10 @@ build_function_decl(reader&	rdr,
 						 bind));
 
   maybe_set_artificial_location(rdr, node, fn_decl);
-  rdr.push_decl_to_current_scope(fn_decl, add_to_current_scope);
+  rdr.push_decl_to_scope(fn_decl,
+			 add_to_current_scope
+			 ? rdr.get_scope_ptr_for_node(node)
+			 : nullptr);
   RECORD_ARTIFACTS_AS_USED_IN_FN_DECL(rdr, fn_decl);
 
   elf_symbol_sptr sym = build_elf_symbol_from_reference(rdr, node);
@@ -3425,7 +3560,8 @@ build_function_decl(reader&	rdr,
 
   rdr.maybe_canonicalize_type(fn_type, !add_to_current_scope);
 
-  rdr.maybe_add_fn_to_exported_decls(fn_decl.get());
+  if (add_to_exported_decls)
+    rdr.maybe_add_fn_to_exported_decls(fn_decl.get());
 
   return fn_decl;
 }
@@ -3448,16 +3584,21 @@ build_function_decl(reader&	rdr,
 /// @param add_to_current_scope if set to yes, the resulting of
 /// this function is added to its current scope.
 ///
+/// @param add_to_exported_decls if set to yes, the resulting of this
+/// function is added to the set of decls exported by the current
+/// corpus being built.
+///
 /// @return a pointer to a newly created function_decl upon successful
 /// completion.  If the function was suppressed by a suppression
 /// specification then returns nil.
 static function_decl_sptr
-build_function_decl_if_not_suppressed(reader&	rdr,
-				      const xmlNodePtr	node,
-				      class_or_union_sptr as_method_decl,
-				      bool		add_to_current_scope)
+build_function_decl_if_not_suppressed(reader&			rdr,
+				      const xmlNodePtr		node,
+				      class_or_union_sptr	as_method_decl,
+				      bool			add_to_current_scope,
+				      bool			add_to_exported_decls)
 {
-    function_decl_sptr fn;
+  function_decl_sptr fn;
 
   if (function_is_suppressed(rdr, node))
     // The function was suppressed by at least one suppression
@@ -3466,7 +3607,8 @@ build_function_decl_if_not_suppressed(reader&	rdr,
     ;
   else
     fn = build_function_decl(rdr, node, as_method_decl,
-			     add_to_current_scope);
+			     add_to_current_scope,
+			     add_to_exported_decls);
   return fn;
 }
 
@@ -3650,7 +3792,10 @@ build_var_decl(reader&	rdr,
   if (sym)
     decl->set_symbol(sym);
 
-  rdr.push_decl_to_current_scope(decl, add_to_current_scope);
+  rdr.push_decl_to_scope(decl,
+			 add_to_current_scope
+			 ? rdr.get_scope_ptr_for_node(node)
+			 : nullptr);
   if (add_to_current_scope)
     {
       // This variable is really being kept in the IR, so let's record
@@ -3664,6 +3809,46 @@ build_var_decl(reader&	rdr,
   return decl;
 }
 
+///  Build the IR node for a void type.
+///
+///  @param rdr the ABIXML reader to use.
+///
+///  @return the void type node.
+static decl_base_sptr
+build_ir_node_for_void_type(reader& rdr)
+{
+  const environment& env = rdr.get_environment();
+
+  type_base_sptr t = env.get_void_type();
+  add_decl_to_scope(is_decl(t), rdr.get_translation_unit()->get_global_scope());
+  decl_base_sptr type_declaration = get_type_declaration(t);
+  canonicalize(t);
+  return type_declaration;
+}
+
+/// Build the IR node for a "pointer to void type".
+///
+/// That IR node is shared across the ABI corpus.
+///
+/// Note that this function just gets that IR node from the
+/// environment and, if it's not added to any scope yet, adds it to
+/// the global scope associated to the current translation unit.
+///
+/// @param rdr the DWARF reader to consider.
+///
+/// @return the IR node.
+static decl_base_sptr
+build_ir_node_for_void_pointer_type(reader& rdr)
+{
+    const environment& env = rdr.get_environment();
+
+  type_base_sptr t = env.get_void_pointer_type();
+  add_decl_to_scope(is_decl(t), rdr.get_translation_unit()->get_global_scope());
+  decl_base_sptr type_declaration = get_type_declaration(t);
+  canonicalize(t);
+  return type_declaration;
+}
+
 /// Build a type_decl from a "type-decl" XML Node.
 ///
 /// @param rdr the context of the parsing.
@@ -3675,7 +3860,7 @@ build_var_decl(reader&	rdr,
 ///
 /// @return a pointer to type_decl upon successful completion, a null
 /// pointer otherwise.
-static shared_ptr<type_decl>
+static type_decl_sptr
 build_type_decl(reader&		rdr,
 		const xmlNodePtr	node,
 		bool			add_to_current_scope)
@@ -3732,12 +3917,18 @@ build_type_decl(reader&		rdr,
     }
 
   const environment& env = rdr.get_environment();
-  type_decl_sptr decl(new type_decl(env, name, size_in_bits,
-				    alignment_in_bits, loc));
+  type_decl_sptr decl;
+  if (name == env.get_variadic_parameter_type_name())
+    decl = is_type_decl(env.get_variadic_parameter_type());
+  else if (name == "void")
+    decl = is_type_decl(build_ir_node_for_void_type(rdr));
+  else
+    decl.reset(new type_decl(env, name, size_in_bits,
+			     alignment_in_bits, loc));
   maybe_set_artificial_location(rdr, node, decl);
   decl->set_is_anonymous(is_anonymous);
   decl->set_is_declaration_only(is_decl_only);
-  if (rdr.push_and_key_type_decl(decl, id, add_to_current_scope))
+  if (rdr.push_and_key_type_decl(decl, node, add_to_current_scope))
     {
       rdr.map_xml_node_to_decl(node, decl);
       return decl;
@@ -3825,7 +4016,7 @@ build_qualified_type_decl(reader&	rdr,
     {
       decl.reset(new qualified_type_def(underlying_type, cv, loc));
       maybe_set_artificial_location(rdr, node, decl);
-      rdr.push_and_key_type_decl(decl, id, add_to_current_scope);
+      rdr.push_and_key_type_decl(decl, node, add_to_current_scope);
       RECORD_ARTIFACT_AS_USED_BY(rdr, underlying_type, decl);
     }
 
@@ -3886,25 +4077,29 @@ build_pointer_type_def(reader&	rdr,
   location loc;
   read_location(rdr, node, loc);
 
-  // Create the pointer type /before/ the pointed-to type.  After the
-  // creation, the type is 'keyed' using rdr.push_and_key_type_decl.
-  // This means that the type can be retrieved from its type ID.  This
-  // is so that if the pointed-to type indirectly uses this pointer
-  // type (via recursion) then that is made possible.
-  pointer_type_def_sptr t(new pointer_type_def(rdr.get_environment(),
-					       size_in_bits,
-					       alignment_in_bits,
-					       loc));
-  maybe_set_artificial_location(rdr, node, t);
-
-  if (rdr.push_and_key_type_decl(t, id, add_to_current_scope))
-    rdr.map_xml_node_to_decl(node, t);
-
   type_base_sptr pointed_to_type =
     rdr.build_or_get_type_decl(type_id, true);
   ABG_ASSERT(pointed_to_type);
 
-  t->set_pointed_to_type(pointed_to_type);
+  pointer_type_def_sptr t;
+  if (rdr.get_environment().is_void_type(pointed_to_type))
+    t = is_pointer_type(build_ir_node_for_void_pointer_type(rdr));
+  else
+    // Create the pointer type /before/ the pointed-to type.  After the
+    // creation, the type is 'keyed' using rdr.push_and_key_type_decl.
+    // This means that the type can be retrieved from its type ID.  This
+    // is so that if the pointed-to type indirectly uses this pointer
+    // type (via recursion) then that is made possible.
+    t.reset(new pointer_type_def(pointed_to_type,
+				 size_in_bits,
+				 alignment_in_bits,
+				 loc));
+
+  maybe_set_artificial_location(rdr, node, t);
+
+  if (rdr.push_and_key_type_decl(t, node, add_to_current_scope))
+    rdr.map_xml_node_to_decl(node, t);
+
   RECORD_ARTIFACT_AS_USED_BY(rdr, pointed_to_type, t);
   return t;
 }
@@ -3977,7 +4172,7 @@ build_reference_type_def(reader&		rdr,
 						   is_lvalue, size_in_bits,
 						   alignment_in_bits, loc));
   maybe_set_artificial_location(rdr, node, t);
-  if (rdr.push_and_key_type_decl(t, id, add_to_current_scope))
+  if (rdr.push_and_key_type_decl(t, node, add_to_current_scope))
     rdr.map_xml_node_to_decl(node, t);
 
   type_base_sptr pointed_to_type =
@@ -4034,16 +4229,16 @@ build_function_type(reader&	rdr,
     {
       method_class_type =
 	is_class_or_union_type(rdr.build_or_get_type_decl(method_class_id,
-							   /*add_decl_to_scope=*/true));
+							  /*add_decl_to_scope=*/true));
       ABG_ASSERT(method_class_type);
     }
 
- function_type_sptr fn_type(is_method_t
-			    ? new method_type(method_class_type,
-					      /*is_const=*/false,
-					      size, align)
-			    : new function_type(return_type,
-						parms, size, align));
+  function_type_sptr fn_type(is_method_t
+			     ? new method_type(method_class_type,
+					       /*is_const=*/false,
+					       size, align)
+			     : new function_type(return_type,
+						 parms, size, align));
 
   rdr.get_translation_unit()->bind_function_type_life_time(fn_type);
   rdr.key_type_decl(fn_type, id);
@@ -4087,8 +4282,9 @@ build_function_type(reader&	rdr,
 /// @return a pointer to a newly built array_type_def::subrange_type
 /// upon successful completion, a null pointer otherwise.
 static array_type_def::subrange_sptr
-build_subrange_type(reader&	rdr,
-		    const xmlNodePtr	node)
+build_subrange_type(reader&		rdr,
+		    const xmlNodePtr	node,
+		    bool		add_to_current_scope)
 {
   array_type_def::subrange_sptr nil;
 
@@ -4128,7 +4324,7 @@ build_subrange_type(reader&	rdr,
   bool is_infinite = false;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "length"))
     {
-      if (string(CHAR_STR(s)) == "infinite")
+      if (string(CHAR_STR(s)) == "infinite" || string(CHAR_STR(s)) == "unknown")
 	is_infinite = true;
       else
 	length = strtoull(CHAR_STR(s), NULL, 0);
@@ -4186,6 +4382,9 @@ build_subrange_type(reader&	rdr,
 				       underlying_type, loc));
   maybe_set_artificial_location(rdr, node, p);
   p->is_infinite(is_infinite);
+
+  if (rdr.push_and_key_type_decl(p, node, add_to_current_scope))
+    rdr.map_xml_node_to_decl(node, p);
 
   return p;
 }
@@ -4259,7 +4458,8 @@ build_array_type_def(reader&	rdr,
       size_in_bits = strtoull(CHAR_STR(s), &endptr, 0);
       if (*endptr != '\0')
 	{
-	  if (!strcmp(CHAR_STR(s), "infinite"))
+	  if (!strcmp(CHAR_STR(s), "infinite")
+	      ||!strcmp(CHAR_STR(s), "unknown"))
 	    size_in_bits = (size_t) -1;
 	  else
 	    return nil;
@@ -4284,7 +4484,7 @@ build_array_type_def(reader&	rdr,
     if (xmlStrEqual(n->name, BAD_CAST("subrange")))
       {
 	if (array_type_def::subrange_sptr s =
-	    build_subrange_type(rdr, n))
+	    build_subrange_type(rdr, n, /*add_to_current_scope=*/true))
 	  {
 	    MAYBE_MAP_TYPE_WITH_TYPE_ID(s, n);
 	    if (add_to_current_scope)
@@ -4303,7 +4503,7 @@ build_array_type_def(reader&	rdr,
 
   array_type_def_sptr ar_type(new array_type_def(type, subranges, loc));
   maybe_set_artificial_location(rdr, node, ar_type);
-  if (rdr.push_and_key_type_decl(ar_type, id, add_to_current_scope))
+  if (rdr.push_and_key_type_decl(ar_type, node, add_to_current_scope))
     rdr.map_xml_node_to_decl(node, ar_type);
   RECORD_ARTIFACT_AS_USED_BY(rdr, type, ar_type);
 
@@ -4479,7 +4679,7 @@ build_enum_type_decl(reader&	rdr,
   t->set_is_anonymous(is_anonymous);
   t->set_is_artificial(is_artificial);
   t->set_is_declaration_only(is_decl_only);
-  if (rdr.push_and_key_type_decl(t, id, add_to_current_scope))
+  if (rdr.push_and_key_type_decl(t, node, add_to_current_scope))
     {
       maybe_set_naming_typedef(rdr, node, t);
       rdr.map_xml_node_to_decl(node, t);
@@ -4520,13 +4720,6 @@ build_typedef_decl(reader&	rdr,
     id = CHAR_STR(s);
   ABG_ASSERT(!id.empty());
 
-  if (type_base_sptr t = rdr.get_type_decl(id))
-    {
-      typedef_decl_sptr result = is_typedef(t);
-      ABG_ASSERT(result);
-      return result;
-    }
-
   string name;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "name"))
     name = xml::unescape_xml_string(CHAR_STR(s));
@@ -4544,7 +4737,7 @@ build_typedef_decl(reader&	rdr,
 
   typedef_decl_sptr t(new typedef_decl(name, underlying_type, loc));
   maybe_set_artificial_location(rdr, node, t);
-  rdr.push_and_key_type_decl(t, id, add_to_current_scope);
+  rdr.push_and_key_type_decl(t, node, add_to_current_scope);
   rdr.map_xml_node_to_decl(node, t);
   RECORD_ARTIFACT_AS_USED_BY(rdr, underlying_type, t);
 
@@ -4786,7 +4979,10 @@ build_class_decl(reader&		rdr,
 
   ABG_ASSERT(!is_decl_only || !is_def_of_decl);
 
-  rdr.push_decl_to_current_scope(decl, add_to_current_scope);
+  rdr.push_decl_to_scope(decl,
+			 add_to_current_scope
+			 ? rdr.get_scope_ptr_for_node(node)
+			 : nullptr);
 
   rdr.map_xml_node_to_decl(node, decl);
   rdr.key_type_decl(decl, id);
@@ -4795,7 +4991,7 @@ build_class_decl(reader&		rdr,
   maybe_set_naming_typedef(rdr, node, decl);
 
   for (xmlNodePtr n = xmlFirstElementChild(node);
-       !is_decl_only && n;
+       n;
        n = xmlNextElementSibling(n))
     {
       if (xmlStrEqual(n->name, BAD_CAST("base-class")))
@@ -4930,8 +5126,6 @@ build_class_decl(reader&		rdr,
 	}
       else if (xmlStrEqual(n->name, BAD_CAST("member-function")))
 	{
-	  rdr.map_xml_node_to_decl(n, decl);
-
 	  access_specifier access =
 	    is_struct
 	    ? public_access
@@ -4959,7 +5153,8 @@ build_class_decl(reader&		rdr,
 	    {
 	      if (function_decl_sptr f =
 		  build_function_decl_if_not_suppressed(rdr, p, decl,
-							/*add_to_cur_sc=*/true))
+							/*add_to_cur_sc=*/true,
+							/*add_to_exported_decls=*/false))
 		{
 		  method_decl_sptr m = is_method_decl(f);
 		  ABG_ASSERT(m);
@@ -4971,6 +5166,8 @@ build_class_decl(reader&		rdr,
 		  set_member_function_is_ctor(m, is_ctor);
 		  set_member_function_is_dtor(m, is_dtor);
 		  set_member_function_is_const(m, is_const);
+		  rdr.map_xml_node_to_decl(p, m);
+		  rdr.maybe_add_fn_to_exported_decls(f.get());
 		  break;
 		}
 	    }
@@ -5199,7 +5396,10 @@ build_union_decl(reader& rdr,
 
   ABG_ASSERT(!is_decl_only || !is_def_of_decl);
 
-  rdr.push_decl_to_current_scope(decl, add_to_current_scope);
+  rdr.push_decl_to_scope(decl,
+			 add_to_current_scope
+			 ? rdr.get_scope_ptr_for_node(node)
+			 : nullptr);
 
   rdr.map_xml_node_to_decl(node, decl);
   rdr.key_type_decl(decl, id);
@@ -5312,7 +5512,8 @@ build_union_decl(reader& rdr,
 	    {
 	      if (function_decl_sptr f =
 		  build_function_decl_if_not_suppressed(rdr, p, decl,
-							/*add_to_cur_sc=*/true))
+							/*add_to_cur_sc=*/true,
+							/*add_to_exported_decls=*/false))
 		{
 		  method_decl_sptr m = is_method_decl(f);
 		  ABG_ASSERT(m);
@@ -5321,6 +5522,7 @@ build_union_decl(reader& rdr,
 		  set_member_function_is_ctor(m, is_ctor);
 		  set_member_function_is_dtor(m, is_dtor);
 		  set_member_function_is_const(m, is_const);
+		  rdr.maybe_add_fn_to_exported_decls(f.get());
 		  break;
 		}
 	    }
@@ -5413,7 +5615,12 @@ build_function_tdecl(reader& rdr,
   function_tdecl_sptr fn_tmpl_decl(new function_tdecl(env, loc, vis, bind));
   maybe_set_artificial_location(rdr, node, fn_tmpl_decl);
 
-  rdr.push_decl_to_current_scope(fn_tmpl_decl, add_to_current_scope);
+  rdr.push_decl_to_scope(fn_tmpl_decl,
+			 add_to_current_scope
+			 ? rdr.get_scope_ptr_for_node(node)
+			 : nullptr);
+  rdr.key_fn_tmpl_decl(fn_tmpl_decl, id);
+  rdr.map_xml_node_to_decl(node, fn_tmpl_decl);
 
   unsigned parm_index = 0;
   for (xmlNodePtr n = xmlFirstElementChild(node);
@@ -5428,7 +5635,8 @@ build_function_tdecl(reader& rdr,
 	}
       else if (function_decl_sptr f =
 	       build_function_decl_if_not_suppressed(rdr, n, class_decl_sptr(),
-					 /*add_to_current_scope=*/true))
+						     /*add_to_current_scope=*/true,
+						     /*add_to_exported_decls=*/true))
 	fn_tmpl_decl->set_pattern(f);
     }
 
@@ -5449,12 +5657,12 @@ build_function_tdecl(reader& rdr,
 ///
 /// @return the newly built function_tdecl upon successful
 /// completion, a null pointer otherwise.
-static shared_ptr<class_tdecl>
-build_class_tdecl(reader&	rdr,
+static class_tdecl_sptr
+build_class_tdecl(reader&		rdr,
 		  const xmlNodePtr	node,
 		  bool			add_to_current_scope)
 {
-  shared_ptr<class_tdecl> nil, result;
+  class_tdecl_sptr nil, result;
 
   if (!xmlStrEqual(node->name, BAD_CAST("class-template-decl")))
     return nil;
@@ -5476,7 +5684,10 @@ build_class_tdecl(reader&	rdr,
   class_tdecl_sptr class_tmpl (new class_tdecl(env, loc, vis));
   maybe_set_artificial_location(rdr, node, class_tmpl);
 
-  rdr.push_decl_to_current_scope(class_tmpl, add_to_current_scope);
+  if (add_to_current_scope)
+    rdr.push_decl_to_scope(class_tmpl, node);
+  rdr.key_class_tmpl_decl(class_tmpl, id);
+  rdr.map_xml_node_to_decl(node, class_tmpl);
 
   unsigned parm_index = 0;
   for (xmlNodePtr n = xmlFirstElementChild(node);
@@ -5555,10 +5766,9 @@ build_type_tparameter(reader&		rdr,
   maybe_set_artificial_location(rdr, node, result);
 
   if (id.empty())
-    rdr.push_decl_to_current_scope(dynamic_pointer_cast<decl_base>(result),
-				    /*add_to_current_scope=*/true);
+    rdr.push_decl_to_scope(is_decl(result), node);
   else
-    rdr.push_and_key_type_decl(result, id, /*add_to_current_scope=*/true);
+    rdr.push_and_key_type_decl(result, node, /*add_to_current_scope=*/true);
 
   rdr.maybe_canonicalize_type(result, /*force_delay=*/false);
 
@@ -5592,8 +5802,7 @@ build_type_composition(reader&		rdr,
 
   type_base_sptr composed_type;
   result.reset(new type_composition(index, tdecl, composed_type));
-  rdr.push_decl_to_current_scope(dynamic_pointer_cast<decl_base>(result),
-				  /*add_to_current_scope=*/true);
+  rdr.push_decl_to_scope(is_decl(result), node);
 
   for (xmlNodePtr n = xmlFirstElementChild(node);
        n;
@@ -5665,8 +5874,7 @@ build_non_type_tparameter(reader&	rdr,
 
   r.reset(new non_type_tparameter(index, tdecl, name, type, loc));
   maybe_set_artificial_location(rdr, node, r);
-  rdr.push_decl_to_current_scope(dynamic_pointer_cast<decl_base>(r),
-				  /*add_to_current_scope=*/true);
+  rdr.push_decl_to_scope(is_decl(r), node);
 
   return r;
 }
@@ -5721,7 +5929,7 @@ build_template_tparameter(reader&	rdr,
   template_tparameter_sptr result(new template_tparameter(index, tdecl,
 							  name, loc));
   maybe_set_artificial_location(rdr, node, result);
-  rdr.push_decl_to_current_scope(result, /*add_to_current_scope=*/true);
+  rdr.push_decl_to_scope(result, node);
 
   // Go parse template parameters that are children nodes
   int parm_index = 0;
@@ -5795,6 +6003,7 @@ build_type(reader&	rdr,
    || (t = build_reference_type_def(rdr, node , add_to_current_scope))
    || (t = build_function_type(rdr, node, add_to_current_scope))
    || (t = build_array_type_def(rdr, node, add_to_current_scope))
+   || (t = build_subrange_type(rdr, node, add_to_current_scope))
    || (t = build_enum_type_decl_if_not_suppressed(rdr, node,
 						  add_to_current_scope))
    || (t = build_typedef_decl(rdr, node, add_to_current_scope))
@@ -6005,7 +6214,8 @@ handle_function_decl(reader&	rdr,
 		     bool		add_to_current_scope)
 {
   return build_function_decl_if_not_suppressed(rdr, node, class_decl_sptr(),
-					       add_to_current_scope);
+					       add_to_current_scope,
+					       /*add_to_exported_decls=*/true);
 }
 
 /// Parse a 'class-decl' xml element.
@@ -6214,7 +6424,7 @@ read_corpus_from_abixml_file(const string& path,
 bool
 load_canonical_type_ids(fe_iface& iface, const string &file_path)
 {
-  xml_reader::reader& rdr = dynamic_cast<xml_reader::reader&>(iface)
+  abixml::reader& rdr = dynamic_cast<abixml::reader&>(iface);
 
   xmlDocPtr doc = xmlReadFile(file_path.c_str(), NULL, XML_PARSE_NOERROR);
   if (!doc)
@@ -6273,7 +6483,7 @@ load_canonical_type_ids(fe_iface& iface, const string &file_path)
 	      // that are not canonicalized.  Look into function
 	      // hash_as_canonical_type_or_constant for the details.
 	      && v != 0xdeadbabe)
-	    rdr.get_environment()->get_type_id_canonical_type_map()[id] = v;
+	    rdr.get_environment().get_type_id_canonical_type_map()[id] = v;
 	}
     }
   return true;

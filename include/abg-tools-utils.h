@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 ///@file
 
@@ -30,16 +30,20 @@ using std::string;
 using std::set;
 using std::shared_ptr;
 
+void initialize();
 const char* get_system_libdir();
 const char* get_anonymous_struct_internal_name_prefix();
 const char* get_anonymous_union_internal_name_prefix();
 const char* get_anonymous_enum_internal_name_prefix();
+const char* get_anonymous_subrange_internal_name_prefix();
 
 bool file_exists(const string&);
 bool is_regular_file(const string&);
 bool file_has_dwarf_debug_info(const string& elf_file_path,
 			       const vector<char**>& debug_info_root_paths);
 bool file_has_ctf_debug_info(const string& elf_file_path,
+			     const vector<char**>& debug_info_root_paths);
+bool file_has_btf_debug_info(const string& elf_file_path,
 			     const vector<char**>& debug_info_root_paths);
 bool is_dir(const string&);
 bool dir_exists(const string&);
@@ -68,6 +72,9 @@ bool sorted_strings_common_prefix(vector<string>&, string&);
 string get_library_version_string();
 string get_abixml_version_string();
 bool execute_command_and_get_output(const string&, vector<string>&);
+void get_comma_separated_args_of_option(const string& input_str,
+					const string& option,
+					vector<string>& arguments);
 bool get_dsos_provided_by_rpm(const string& rpm_path,
 			      set<string>& provided_dsos);
 string trim_white_space(const string&);
@@ -121,6 +128,38 @@ bool
 find_file_under_dir(const string& root_dir,
 		    const string& file_path_to_look_for,
 		    string& result);
+
+bool
+find_file_under_dirs(const vector<string>& root_dirs,
+		     const string& file_path_to_look_for,
+		     string& result);
+
+bool
+get_dependencies(const corpus&, const vector<string>&, set<string>&);
+
+void
+add_binaries_into_corpus_group(const fe_iface_sptr&	reader,
+			       const vector<string>&	binaries,
+			       const vector<string>&	deps_dirs,
+			       corpus_group&		group);
+
+void
+add_dependencies_into_corpus_group(const fe_iface_sptr&	reader,
+				   const corpus&		korpus,
+				   const vector<string>&	deps_dirs,
+				   corpus_group&		group);
+
+corpus_group_sptr
+stick_corpus_and_binaries_into_corpus_group(const fe_iface_sptr&	reader,
+					    const corpus_sptr&		korpus,
+					    const vector<string>&	binaries,
+					    const vector<string>&	deps_dirs);
+
+corpus_group_sptr
+stick_corpus_and_dependencies_into_corpus_group(const fe_iface_sptr&	reader,
+						const corpus_sptr&	korpus,
+						const vector<string>&	deps_dirs);
+
 
 class temp_file;
 
@@ -297,6 +336,10 @@ get_deb_name(const string& str, string& name);
 bool
 file_is_kernel_package(const string& file_path,
 		       file_type file_type);
+
+bool
+rpm_contains_file(const string& rpm_path,
+		  const string& file_name);
 
 bool
 file_is_kernel_debuginfo_package(const string& file_path,

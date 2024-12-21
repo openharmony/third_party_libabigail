@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -145,7 +145,7 @@ char_is_function_name_char(int b)
 static bool
 char_is_function_argument_char(int b)
 {
-  if (char_is_delimiter(b) || b == '(' || b == ')')
+  if (b == '(' || b == ')')
     return false;
   return true;
 }
@@ -1353,7 +1353,7 @@ public:
       }
 
     list_property_value_sptr list = read_list_property_value();
-    if (list->get_content().size() == 1)
+    if (list && list->get_content().size() == 1)
       result.reset(new string_property_value(list->get_content()[0]));
     else
       result = list;
@@ -1365,7 +1365,7 @@ public:
   ///
   /// A string is just a contiguous set of characters that test
   /// positive when passed to
-  /// read_context::char_is_property_name_char().
+  /// read_context::char_is_property_value_char().
   ///
   /// Note that all escaped characters are suitable to be in a string.
   ///
@@ -1440,6 +1440,7 @@ public:
 	char c = 0;
 	read_next_char(c);
 	ABG_ASSERT(c == ',');
+	skip_white_spaces();
       }
 
     if (!content.empty())
