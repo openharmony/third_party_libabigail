@@ -104,7 +104,7 @@ def output_commits():
             hash = lin[16:].strip()
             try:
                 rel = release_refs[hash]
-                print("=== release %d.%d.%d ===\n" % (int(rel[0]), int(rel[1]), int(rel[2])))
+
             except:
                 pass
             buf = []
@@ -121,7 +121,7 @@ def output_commits():
 
 def get_rel_tags():
     # Populate the release_refs dict with the tags for previous releases
-    reltagre = re.compile("^([a-z0-9]{40}) refs\/tags\/GNET-([0-9]+)[-_.]([0-9]+)[-_.]([0-9]+)")
+    reltagre = re.compile("^([a-z0-9]{40}) refs/tags/libabigail-([0-9]+)[-_.]([0-9]+)[-_.]([0-9]+)")
 
     cmd = ['git', 'show-ref', '--tags', '--dereference']
     p = subprocess.Popen(args=cmd, shell=False,
@@ -134,7 +134,7 @@ def get_rel_tags():
            release_refs[sha] = (maj, min, nano)
 
 def find_start_tag():
-    starttagre = re.compile("^([a-z0-9]{40}) refs\/tags\/CHANGELOG_START")
+    starttagre = re.compile("^([a-z0-9]{40}) refs/tags/CHANGELOG_START")
     cmd = ['git', 'show-ref', '--tags']
     p = subprocess.Popen(args=cmd, shell=False,
                          stdout=subprocess.PIPE,

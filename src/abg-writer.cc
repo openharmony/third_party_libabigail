@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 /// @file
 ///
@@ -230,7 +230,8 @@ class write_context
   class_tmpl_shared_ptr_map		m_class_tmpl_id_map;
   string_elf_symbol_sptr_map_type	m_fun_symbol_map;
   string_elf_symbol_sptr_map_type	m_var_symbol_map;
-  unordered_set<interned_string, hash_interned_string> m_emitted_decls_set;
+  unordered_set<interned_string, hash_interned_string>	m_emitted_decls_set;
+  unordered_set<string>				m_emitted_corpora_set;
 
   write_context();
 
@@ -818,6 +819,42 @@ public:
     m_emitted_decls_set.insert(irepr);
   }
 
+  /// Test if a corpus has already been emitted.
+  ///
+  /// A corpus is emitted if it's been recorded as having been emitted
+  /// by the function record_corpus_as_emitted().
+  ///
+  /// @param corp the corpus to consider.
+  ///
+  /// @return true iff the corpus @p corp has been emitted.
+  bool
+  corpus_is_emitted(const corpus_sptr& corp)
+  {
+    if (!corp)
+      return false;
+
+    if (m_emitted_corpora_set.find(corp->get_path())
+	== m_emitted_corpora_set.end())
+      return false;
+
+    return true;
+  }
+
+  /// Record the corpus has having been emitted.
+  ///
+  /// @param corp the corpus to consider.
+  void
+  record_corpus_as_emitted(const corpus_sptr& corp)
+  {
+    if (!corp)
+      return;
+
+    const string& path = corp->get_path();
+    ABG_ASSERT(!path.empty());
+
+    m_emitted_corpora_set.insert(path);
+  }
+
   /// Get the set of types that have been emitted.
   ///
   /// @return the set of types that have been emitted.
@@ -884,6 +921,9 @@ static bool write_reference_type_def(const reference_type_def_sptr&,
 				     write_context&, unsigned);
 static bool write_array_type_def(const array_type_def_sptr&,
 			         write_context&, unsigned);
+static bool write_array_subrange_type(const array_type_def::subrange_sptr&,
+				      write_context&,
+				      unsigned);
 static bool write_enum_type_decl(const enum_type_decl_sptr&,
 				 write_context&, unsigned);
 static bool write_typedef_decl(const typedef_decl_sptr&,
@@ -1470,7 +1510,7 @@ static void
 write_array_size_and_alignment(const shared_ptr<array_type_def> decl, ostream& o)
 {
   if (decl->is_infinite())
-    o << " size-in-bits='" << "infinite" << "'";
+    o << " size-in-bits='" << "unknown" << "'";
   else {
     size_t size_in_bits = decl->get_size_in_bits();
     if (size_in_bits)
@@ -1932,6 +1972,9 @@ write_decl(const decl_base_sptr& decl, write_context& ctxt, unsigned indent)
 				  <reference_type_def>(decl), ctxt, indent)
       || write_array_type_def(dynamic_pointer_cast
 			      <array_type_def>(decl), ctxt, indent)
+      || write_array_subrange_type(dynamic_pointer_cast
+				   <array_type_def::subrange_type>(decl),
+				   ctxt, indent)
       || write_enum_type_decl(dynamic_pointer_cast<enum_type_decl>(decl),
 			      ctxt, indent)
       || write_typedef_decl(dynamic_pointer_cast<typedef_decl>(decl),
@@ -2698,15 +2741,19 @@ write_pointer_type_def(const pointer_type_def_sptr&	decl,
 
   ostream& o = ctxt.get_ostream();
 
+  annotate(decl, ctxt, indent);
+
+  do_indent(o, indent);
+
+  string i;
+
+  o << "<pointer-type-def ";
 
   type_base_sptr pointed_to_type = decl->get_pointed_to_type();
 
-  annotate(decl->get_canonical_type(), ctxt, indent);
+  i = ctxt.get_id_for_type(pointed_to_type);
 
-  do_indent(o, indent);
-  o << "<pointer-type-def type-id='"
-    << ctxt.get_id_for_type(pointed_to_type)
-    << "'";
+  o << "type-id='" << i << "'";
 
   ctxt.record_type_as_referenced(pointed_to_type);
 
@@ -2716,7 +2763,7 @@ write_pointer_type_def(const pointer_type_def_sptr&	decl,
 			    : decl->get_translation_unit()->get_address_size()),
 			   0);
 
-  string i = id;
+  i = id;
   if (i.empty())
     i = ctxt.get_id_for_type(decl);
 
@@ -2857,21 +2904,19 @@ write_array_subrange_type(const array_type_def::subrange_sptr&	decl,
 
   o << " length='";
   if (decl->is_infinite())
-    o << "infinite";
+    o << "unknown";
   else
     o << decl->get_length();
 
   o << "'";
 
-  if (decl->get_lower_bound())
-    {
-      ABG_ASSERT(decl->is_infinite()
-		 || (decl->get_length() ==
-		     (uint64_t) (decl->get_upper_bound()
-				 - decl->get_lower_bound() + 1)));
-      o << " lower-bound='" << decl->get_lower_bound() << "' upper-bound='"
-	<< decl->get_upper_bound() << "'";
-    }
+  ABG_ASSERT(decl->is_infinite()
+	     || decl->get_length() == 0
+	     || (decl->get_length() ==
+		 (uint64_t) (decl->get_upper_bound()
+			     - decl->get_lower_bound() + 1)));
+  o << " lower-bound='" << decl->get_lower_bound() << "' upper-bound='"
+    << decl->get_upper_bound() << "'";
 
   type_base_sptr underlying_type = decl->get_underlying_type();
   if (underlying_type)
@@ -4588,6 +4633,7 @@ write_corpus(write_context&	ctxt,
   out << "</abi-corpus>\n";
 
   ctxt.clear_referenced_types();
+  ctxt.record_corpus_as_emitted(corpus);
 
   return true;
 }
@@ -4639,7 +4685,10 @@ std::ostream& out = ctxt.get_ostream();
 	 group->get_corpora().begin();
        c != group->get_corpora().end();
        ++c)
-    write_corpus(ctxt, *c, get_indent_to_level(ctxt, indent, 1), true);
+    {
+      ABG_ASSERT(!ctxt.corpus_is_emitted(*c));
+      write_corpus(ctxt, *c, get_indent_to_level(ctxt, indent, 1), true);
+    }
 
   do_indent_to_level(ctxt, indent, 0);
   out << "</abi-corpus-group>\n";
@@ -4861,16 +4910,20 @@ write_type_record(xml_writer::write_context&	ctxt,
   //       <c>0x25f9ba8</c>
   //     </type>
 
-  string id = ctxt.get_id_for_type (const_cast<type_base*>(type));
-  o << "  <type>\n"
-    << "    <id>" << id << "</id>\n"
-    << "    <c>"
-    << std::hex
-    << (type->get_canonical_type()
-	? reinterpret_cast<uintptr_t>(type->get_canonical_type().get())
-	: 0xdeadbabe)
-    << "</c>\n"
-    << "  </type>\n";
+    type_base* canonical = type->get_naked_canonical_type();
+    string id ;
+  if (canonical)
+    {
+      id = ctxt.get_id_for_type (const_cast<type_base*>(type));
+
+      o << "  <type>\n"
+	<< "    <id>" << id << "</id>\n"
+	<< "    <c>"
+	<< std::hex
+	<< reinterpret_cast<uintptr_t>(canonical)
+	<< "</c>\n"
+	<< "  </type>\n";
+    }
 }
 
 /// Serialize the map that is stored at

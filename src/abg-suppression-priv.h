@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2016-2022 Red Hat, Inc.
+// Copyright (C) 2016-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -570,11 +570,22 @@ class type_suppression::priv
   type_suppression::type_kind		type_kind_;
   bool					consider_reach_kind_;
   type_suppression::reach_kind		reach_kind_;
+  bool					has_size_change_;
+  // The data members a class needs to have to match this suppression
+  // specification.  These might be selected by a regular expression.
+  string_set_type			potential_data_members_;
+  // The regular expression string that selects the potential data
+  // members of the class.
+  string				potential_data_members_regex_str_;
+  // The compiled regular expression that selects the potential data
+  // members of the class.
+  mutable regex::regex_t_sptr		potential_data_members_regex_;
   type_suppression::insertion_ranges	insertion_ranges_;
-  unordered_set<string>			source_locations_to_keep_;
+  unordered_set<string>		source_locations_to_keep_;
   string				source_location_to_keep_regex_str_;
   mutable regex::regex_t_sptr		source_location_to_keep_regex_;
   mutable vector<string>		changed_enumerator_names_;
+  mutable vector<regex::regex_t_sptr>	changed_enumerators_regexp_;
 
   priv();
 
@@ -590,7 +601,8 @@ public:
       consider_type_kind_(consider_type_kind),
       type_kind_(type_kind),
       consider_reach_kind_(consider_reach_kind),
-      reach_kind_(reach_kind)
+      reach_kind_(reach_kind),
+      has_size_change_(false)
   {}
 
   /// Get the regular expression object associated to the 'type_name_regex'
@@ -676,6 +688,34 @@ public:
   void
   set_source_location_to_keep_regex(regex::regex_t_sptr r)
   {source_location_to_keep_regex_ = r;}
+
+  /// Getter for the "potential_data_member_names_regex" object.
+  ///
+  /// This regex object matches the names of the data members that are
+  /// needed for this suppression specification to select the type.
+  ///
+  /// @return the "potential_data_member_names_regex" object.
+  const regex::regex_t_sptr
+  get_potential_data_member_names_regex() const
+  {
+    if (!potential_data_members_regex_
+	&& !potential_data_members_regex_str_.empty())
+      {
+	potential_data_members_regex_ =
+	  regex::compile(potential_data_members_regex_str_);
+      }
+    return potential_data_members_regex_;
+  }
+
+  /// Setter for the "potential_data_member_names_regex" object.
+  ///
+  /// This regex object matches the names of the data members that are
+  /// needed for this suppression specification to select the type.
+  ///
+  /// @param r the new "potential_data_member_names_regex" object.
+  void
+  set_potential_data_member_names_regex(regex::regex_t_sptr &r)
+  {potential_data_members_regex_ = r;}
 
   friend class type_suppression;
 }; // class type_suppression::priv

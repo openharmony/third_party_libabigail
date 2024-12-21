@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -264,6 +264,10 @@ typedef stack<scope_decl*> scope_stack_type;
 typedef unordered_map<Dwarf_Off, Dwarf_Off> offset_offset_map_type;
 
 /// Convenience typedef for a map which key is a string and which
+/// value is a vector of smart pointer to a class_or_union_sptr.
+typedef unordered_map<string, classes_or_unions_type> string_classes_or_unions_map;
+
+/// Convenience typedef for a map which key is a string and which
 /// value is a vector of smart pointer to a class.
 typedef unordered_map<string, classes_type> string_classes_map;
 
@@ -379,6 +383,9 @@ static bool
 die_is_anonymous(const Dwarf_Die* die);
 
 static bool
+die_is_anonymous_data_member(const Dwarf_Die* die);
+
+static bool
 die_is_type(const Dwarf_Die* die);
 
 static bool
@@ -416,6 +423,9 @@ pointer_or_qual_die_of_anonymous_class_type(const Dwarf_Die* die);
 
 static bool
 die_is_reference_type(const Dwarf_Die* die);
+
+static bool
+die_is_pointer_array_or_reference_type(const Dwarf_Die* die);
 
 static bool
 die_is_pointer_or_reference_type(const Dwarf_Die* die);
@@ -483,6 +493,11 @@ die_constant_attribute(const Dwarf_Die *die,
 		       array_type_def::subrange_type::bound_value &value);
 
 static bool
+die_member_offset(const reader& rdr,
+		  const Dwarf_Die* die,
+		  int64_t& offset);
+
+static bool
 form_is_DW_FORM_strx(unsigned form);
 
 static bool
@@ -508,6 +523,16 @@ die_die_attribute(const Dwarf_Die* die,
 		  Dwarf_Die& result,
 		  bool recursively = true);
 
+static bool
+subrange_die_indirect_bound_value(const Dwarf_Die *die,
+				  unsigned attr_name,
+				  array_type_def::subrange_type::bound_value& v,
+				  bool& is_signed);
+
+static bool
+subrange_die_indirectly_references_subrange_die(const Dwarf_Die *die,
+						unsigned attr_name,
+						Dwarf_Die& referenced_subrange);
 static string
 get_internal_anonymous_die_prefix_name(const Dwarf_Die *die);
 
@@ -557,6 +582,9 @@ die_function_signature(const reader& rdr,
 
 static bool
 die_peel_qual_ptr(Dwarf_Die *die, Dwarf_Die& peeled_die);
+
+static bool
+die_peel_qualified(Dwarf_Die *die, Dwarf_Die& peeled_die);
 
 static bool
 die_function_type_is_method_type(const reader& rdr,
@@ -1832,7 +1860,7 @@ public:
   die_function_type_map_type	type_unit_die_wip_function_types_map_;
   die_function_decl_map_type	die_function_with_no_symbol_map_;
   vector<type_base_sptr>	types_to_canonicalize_;
-  string_classes_map		decl_only_classes_map_;
+  string_classes_or_unions_map	decl_only_classes_map_;
   string_enums_map		decl_only_enums_map_;
   die_tu_map_type		die_tu_map_;
   translation_unit_sptr	cur_tu_;
@@ -1958,7 +1986,7 @@ public:
     options().load_all_types = load_all_types;
 #ifdef WITH_DEBUG_TYPE_CANONICALIZATION
     debug_die_canonicalization_is_on_ =
-      environment->debug_die_canonicalization_is_on();
+      env().debug_die_canonicalization_is_on();
     use_canonical_die_comparison_ = true;
 #endif
     compare_count_ = 0;
@@ -1990,7 +2018,7 @@ public:
 	     bool			load_all_types,
 	     bool			linux_kernel_mode)
   {
-    reset(elf_path, debug_info_root_paths);
+    elf_based_reader::initialize(elf_path, debug_info_root_paths);
     initialize(load_all_types, linux_kernel_mode);
   }
 
@@ -2044,12 +2072,12 @@ public:
     // Load the generic ELF parts of the corpus.
     elf::reader::read_corpus(status);
 
-    if ((status & STATUS_NO_SYMBOLS_FOUND)
-	|| !(status & STATUS_OK))
-      // Either we couldn't find ELF symbols or something went badly
-      // wrong.  There is nothing we can do with this ELF file.  Bail
-      // out.
+    if (!(status & STATUS_OK))
+      {
+	// Something went badly wrong.  There is nothing we can do
+	// with this ELF file.  Bail out.
       return corpus_sptr();
+      }
 
     // If we couldn't find debug info from the elf path, then say it.
     if (dwarf_debug_info() == nullptr)
@@ -2109,14 +2137,14 @@ public:
     corpus()->set_soname(dt_soname());
     corpus()->set_needed(dt_needed());
     corpus()->set_architecture_name(elf_architecture());
-    if (corpus_group_sptr group = corpus_group())
-      group->add_corpus(corpus());
-
     // Set symbols information to the corpus.
     corpus()->set_symtab(symtab());
 
-    // Get out now if no debug info is found.
-    if (!dwarf_debug_info())
+    // Get out now if no debug info is found or if the symbol table is
+    // empty.
+    if (!dwarf_debug_info()
+	|| !corpus()->get_symtab()
+	|| !corpus()->get_symtab()->has_symbols())
       return corpus();
 
     uint8_t address_size = 0;
@@ -2126,6 +2154,8 @@ public:
     if (env().self_comparison_debug_is_on())
       env().set_self_comparison_debug_input(corpus());
 #endif
+
+    env().priv_->do_log(do_log());
 
     // Walk all the DIEs of the debug info to build a DIE -> parent map
     // useful for get_die_parent() to work.
@@ -2155,7 +2185,7 @@ public:
       tools_utils::timer t;
       if (do_log())
 	{
-	  cerr << "building the libabigail internal representation ...";
+	  cerr << "building the libabigail internal representation ...\n";
 	  t.start();
 	}
       // And now walk all the DIEs again to build the libabigail IR.
@@ -2187,8 +2217,9 @@ public:
       if (do_log())
 	{
 	  t.stop();
-	  cerr << " DONE@" << corpus()->get_path()
-	       << ":"
+	  cerr << "building the libabigail internal representation "
+	       << "DONE for corpus << corpus()->get_path()"
+	       << " in :"
 	       << t
 	       << "\n";
 
@@ -2279,9 +2310,9 @@ public:
       if (do_log())
 	{
 	  t.stop();
-	  cerr << "late type canonicalizing DONE@"
+	  cerr << "late type canonicalizing DONE for "
 	       << corpus()->get_path()
-	       << ":"
+	       << " in :"
 	       << t
 	       << "\n";
 	}
@@ -2624,7 +2655,7 @@ public:
   ///
   /// @param die the DIE to consider.
   ///
-  /// @param canonical_die output parameter.  Is set to the resuling
+  /// @param canonical_die output parameter.  Is set to the resulting
   /// canonical die, if this function returns true.
   ///
   /// @param where the offset of the logical DIE we are supposed to be
@@ -3497,8 +3528,9 @@ public:
     if (!die_is_function_type(die))
       return function_type_sptr();
 
-    interned_string repr =
-      get_die_pretty_representation(die, /*where=*/0);
+    interned_string repr = die_name(die).empty() ?
+      get_die_pretty_type_representation(die, /*where=*/0)
+      : get_die_pretty_representation(die, /*where=*/0);
     ABG_ASSERT(!repr.empty());
 
     istring_fn_type_map_type::const_iterator i =
@@ -3872,6 +3904,61 @@ public:
     return (i != die_wip_function_types_map(source).end());
   }
 
+  /// Sometimes, a data member die can erroneously have an empty name as
+  /// a result of a bug of the DWARF emitter.
+  ///
+  /// This is what happens in
+  /// https://sourceware.org/bugzilla/show_bug.cgi?id=29934.
+  ///
+  /// In that case, this function constructs an artificial name for that
+  /// data member.  The pattern of the name is as follows:
+  ///
+  ///          "unnamed-@-<location>".
+  ///
+  ///location is either the value of the data member location of the
+  ///data member if it has one or  concatenation of its source location
+  ///if it has none.  If no location can be calculated then the function
+  ///returns the empty string.
+  string
+  build_name_for_buggy_anonymous_data_member(Dwarf_Die *die)
+  {
+    string result;
+    // Let's make sure we are looking at a data member with an empty
+    // name ...
+    if (!die
+	|| dwarf_tag(die) != DW_TAG_member
+	|| !die_name(die).empty())
+      return result;
+
+    // ... and yet, it's not an anonymous data member (aka unnamed
+    // field) as described in
+    // https://gcc.gnu.org/onlinedocs/gcc/Unnamed-Fields.html.
+    if (die_is_anonymous_data_member(die))
+      return result;
+
+    // If we come this far, it means we are looking at a buggy data
+    // member with no name.  Let's build a name for it so that it can be
+    // addressed.
+    int64_t offset_in_bits = 0;
+    bool has_offset = die_member_offset(*this, die, offset_in_bits);
+    location loc;
+    if (!has_offset)
+      {
+	loc = die_location(*this, die);
+	if (!loc)
+	  return result;
+      }
+
+    std::ostringstream o;
+    o << "unnamed-dm-@-";
+    if (has_offset)
+      o << "offset-" << offset_in_bits << "bits";
+    else
+      o << "loc-" << loc.expand();
+
+    return o.str();
+  }
+
   /// Getter for the map of declaration-only classes that are to be
   /// resolved to their definition classes by the end of the corpus
   /// loading.
@@ -3879,7 +3966,7 @@ public:
   /// @return a map of string -> vector of classes where the key is
   /// the fully qualified name of the class and the value is the
   /// vector of declaration-only class.
-  const string_classes_map&
+  const string_classes_or_unions_map&
   declaration_only_classes() const
   {return decl_only_classes_map_;}
 
@@ -3890,7 +3977,7 @@ public:
   /// @return a map of string -> vector of classes where the key is
   /// the fully qualified name of the class and the value is the
   /// vector of declaration-only class.
-  string_classes_map&
+  string_classes_or_unions_map&
   declaration_only_classes()
   {return decl_only_classes_map_;}
 
@@ -3900,18 +3987,18 @@ public:
   ///
   /// @param klass the class to consider.
   void
-  maybe_schedule_declaration_only_class_for_resolution(class_decl_sptr& klass)
+  maybe_schedule_declaration_only_class_for_resolution(const class_or_union_sptr& cou)
   {
-    if (klass->get_is_declaration_only()
-	&& klass->get_definition_of_declaration() == 0)
+    if (cou->get_is_declaration_only()
+	&& cou->get_definition_of_declaration() == 0)
       {
-	string qn = klass->get_qualified_name();
-	string_classes_map::iterator record =
+	string qn = cou->get_qualified_name();
+	string_classes_or_unions_map::iterator record =
 	  declaration_only_classes().find(qn);
 	if (record == declaration_only_classes().end())
-	  declaration_only_classes()[qn].push_back(klass);
+	  declaration_only_classes()[qn].push_back(cou);
 	else
-	  record->second.push_back(klass);
+	  record->second.push_back(cou);
       }
   }
 
@@ -3923,10 +4010,10 @@ public:
   /// @return true iff @p klass is a declaration-only class and if
   /// it's been scheduled for resolution to a defined class.
   bool
-  is_decl_only_class_scheduled_for_resolution(class_decl_sptr& klass)
+  is_decl_only_class_scheduled_for_resolution(const class_or_union_sptr& cou)
   {
-    if (klass->get_is_declaration_only())
-      return (declaration_only_classes().find(klass->get_qualified_name())
+    if (cou->get_is_declaration_only())
+      return (declaration_only_classes().find(cou->get_qualified_name())
 	      != declaration_only_classes().end());
 
     return false;
@@ -3967,13 +4054,13 @@ public:
   {
     vector<string> resolved_classes;
 
-    for (string_classes_map::iterator i =
+    for (string_classes_or_unions_map::iterator i =
 	   declaration_only_classes().begin();
 	 i != declaration_only_classes().end();
 	 ++i)
       {
 	bool to_resolve = false;
-	for (classes_type::iterator j = i->second.begin();
+	for (classes_or_unions_type::iterator j = i->second.begin();
 	     j != i->second.end();
 	     ++j)
 	  if ((*j)->get_is_declaration_only()
@@ -4016,6 +4103,9 @@ public:
 	const type_base_wptrs_type *classes =
 	  lookup_class_types(i->first, *corpus());
 	if (!classes)
+	  classes = lookup_union_types(i->first, *corpus());
+
+	if (!classes)
 	  continue;
 
 	// This is a map that associates the translation unit path to
@@ -4024,15 +4114,15 @@ public:
 	// should stay ordered by using the TU path as key to ensure
 	// stability of the order of classe definitions in ABIXML
 	// output.
-	map<string, class_decl_sptr> per_tu_class_map;
+	map<string, class_or_union_sptr> per_tu_class_map;
 	for (type_base_wptrs_type::const_iterator c = classes->begin();
 	     c != classes->end();
 	     ++c)
 	  {
-	    class_decl_sptr klass = is_class_type(type_base_sptr(*c));
+	    class_or_union_sptr klass = is_class_or_union_type(type_base_sptr(*c));
 	    ABG_ASSERT(klass);
 
-	    klass = is_class_type(look_through_decl_only_class(klass));
+	    klass = is_class_or_union_type(look_through_decl_only_class(klass));
 	    if (klass->get_is_declaration_only())
 	      continue;
 
@@ -4052,7 +4142,7 @@ public:
 	    // either to the definitions that are in the same TU as
 	    // the declaration, or to the definition found elsewhere,
 	    // if there is only one such definition.
-	    for (classes_type::iterator j = i->second.begin();
+	    for (classes_or_unions_type::iterator j = i->second.begin();
 		 j != i->second.end();
 		 ++j)
 	      {
@@ -4061,7 +4151,7 @@ public:
 		  {
 		    string tu_path =
 		      (*j)->get_translation_unit()->get_absolute_path();
-		    map<string, class_decl_sptr>::const_iterator e =
+		    map<string, class_or_union_sptr>::const_iterator e =
 		      per_tu_class_map.find(tu_path);
 		    if (e != per_tu_class_map.end())
 		      (*j)->set_definition_of_declaration(e->second);
@@ -4077,8 +4167,8 @@ public:
 			// definition.  Otherwise, we are in the case
 			// 3/ described above.
 			map<string,
-			    class_decl_sptr>::const_iterator it;
-			class_decl_sptr first_class =
+			    class_or_union_sptr>::const_iterator it;
+			class_or_union_sptr first_class =
 			  per_tu_class_map.begin()->second;
 			bool all_class_definitions_are_equal = true;
 			for (it = per_tu_class_map.begin();
@@ -4124,7 +4214,8 @@ public:
 	cerr << "Here are the "
 	     << num_decl_only_classes - num_resolved
 	     << " unresolved class declarations:\n";
-	for (string_classes_map::iterator i = declaration_only_classes().begin();
+	for (string_classes_or_unions_map::iterator i =
+	       declaration_only_classes().begin();
 	     i != declaration_only_classes().end();
 	     ++i)
 	  cerr << "    " << i->first << "\n";
@@ -4385,19 +4476,14 @@ public:
 
     string id = fn->get_id_string();
 
-    const vector<function_decl*> *fns = corp->lookup_functions(id);
+    const std::unordered_set<function_decl*> *fns = corp->lookup_functions(id);
     if (!fns)
       return false;
 
-    for (vector<function_decl*>::const_iterator i = fns->begin();
-	 i != fns->end();
-	 ++i)
-      {
-	function_decl* f = *i;
-	ABG_ASSERT(f);
-	if (f->get_symbol())
-	  return true;
-      }
+    for (auto f : *fns)
+      if (f->get_symbol())
+	return true;
+
     return false;
   }
 
@@ -4511,45 +4597,18 @@ public:
     tools_utils::timer cn_timer;
     if (do_log())
       {
-	cerr << "going to canonicalize types";
+	cerr << "DWARF Reader is going to canonicalize types";
 	corpus_sptr c = corpus();
 	if (c)
-	  cerr << " of corpus " << corpus()->get_path();
+	  cerr << " of corpus " << corpus()->get_path() << "\n";
 	cn_timer.start();
       }
 
     if (!types_to_canonicalize().empty())
-      {
-	tools_utils::timer single_type_cn_timer;
-	size_t total = types_to_canonicalize().size();
-	if (do_log())
-	  cerr << total << " Types to canonicalize\n";
-	size_t i = 1;
-	for (vector<type_base_sptr>::const_iterator it =
-	       types_to_canonicalize().begin();
-	     it != types_to_canonicalize().end();
-	     ++it, ++i)
-	  {
-	    if (do_log())
-	      {
-		cerr << "canonicalizing type "
-		     << get_pretty_representation(*it, false)
-		     << " [" << i << "/" << total << "]";
-		if (corpus_sptr c = corpus())
-		  cerr << "@" << c->get_path();
-		cerr << " ...";
-		single_type_cn_timer.start();
-	      }
-	    canonicalize(*it);
-	    if (do_log())
-	      {
-		single_type_cn_timer.stop();
-		cerr << "DONE:"
-		     << single_type_cn_timer
-		     << "\n";
-	      }
-	  }
-      }
+      canonicalize_types(types_to_canonicalize().begin(),
+			 types_to_canonicalize().end(),
+			 [](const vector<type_base_sptr>::const_iterator& i)
+			 {return *i;});
 
     if (do_log())
       {
@@ -4769,47 +4828,6 @@ public:
   list<var_decl_sptr>&
   var_decls_to_re_add_to_tree()
   {return var_decls_to_add_;}
-
-  /// The section containing the symbol table from the current ELF
-  /// file.
-  ///
-  /// Note that after it's first invocation, this function caches the
-  /// symbol table that it found.  Subsequent invocations just return
-  /// the cached symbol table section.
-  ///
-  /// @return the symbol table section if found
-  Elf_Scn*
-  find_symbol_table_section() const
-  {return const_cast<Elf_Scn*>(abigail::elf::reader::find_symbol_table_section());}
-
-  /// Lookup an elf symbol, referred to by its index, from the .symtab
-  /// section.
-  ///
-  /// The resulting symbol returned is an instance of a GElf_Sym, from
-  /// the libelf library.
-  ///
-  /// @param symbol_index the index of the symbol to look up.
-  ///
-  /// @param elf_sym out parameter.  This is set to the resulting ELF
-  /// symbol iff the function returns TRUE, meaning the symbol was
-  /// found.
-  ///
-  /// @return TRUE iff the symbol was found.
-  bool
-  lookup_native_elf_symbol_from_index(size_t symbol_index, GElf_Sym &elf_sym)
-  {
-    Elf_Scn* symtab_section = find_symbol_table_section();
-    if (!symtab_section)
-      return false;
-
-    Elf_Data* symtab = elf_getdata(symtab_section, 0);
-    ABG_ASSERT(symtab);
-
-    if (!gelf_getsym(symtab, symbol_index, &elf_sym))
-      return false;
-
-    return true;
-  }
 
   /// Test if a DIE represents a decl (function or variable) that has
   /// a symbol that is exported, whatever that means.  This is
@@ -5695,12 +5713,23 @@ struct offset_pairs_stack_type
 	  }
 	// Update the cached result.  We know the comparison result
 	// must now be different.
-	auto comp_result_it = rdr_.die_comparison_results_.find(p);
+	auto comp_result_it = rdr_.die_comparison_results_.find(dependant_type);
 	if (comp_result_it != rdr_.die_comparison_results_.end())
-	  {
-	    ABG_ASSERT(comp_result_it->second == COMPARISON_RESULT_UNKNOWN);
-	    comp_result_it->second= COMPARISON_RESULT_DIFFERENT;
-	  }
+	  comp_result_it->second= COMPARISON_RESULT_DIFFERENT;
+      }
+
+    // Update the cached result of the root type to cancel too.
+    auto comp_result_it = rdr_.die_comparison_results_.find(p);
+    if (comp_result_it != rdr_.die_comparison_results_.end())
+      {
+	// At this point, the result of p is either
+	// COMPARISON_RESULT_UNKNOWN (if we cache comparison
+	// results of that kind) or COMPARISON_RESULT_DIFFERENT.
+	// Make sure it's the cached result is now
+	// COMPARISON_RESULT_DIFFERENT.
+	if (comp_result_it->second == COMPARISON_RESULT_UNKNOWN)
+	  comp_result_it->second= COMPARISON_RESULT_DIFFERENT;
+	ABG_ASSERT(comp_result_it->second == COMPARISON_RESULT_DIFFERENT);
       }
 
     if (rdr_.propagated_types_.find(p) != rdr_.propagated_types_.end())
@@ -5760,6 +5789,12 @@ build_ir_node_from_die(reader&	rdr,
 		       Dwarf_Die*	die,
 		       bool		called_from_public_decl,
 		       size_t		where_offset);
+
+static decl_base_sptr
+build_ir_node_for_void_type(reader& rdr);
+
+static type_or_decl_base_sptr
+build_ir_node_for_void_pointer_type(reader& rdr);
 
 static class_decl_sptr
 add_or_update_class_type(reader&	 rdr,
@@ -5843,6 +5878,33 @@ die_is_anonymous(const Dwarf_Die* die)
   if (!dwarf_attr_integrate(const_cast<Dwarf_Die*>(die), DW_AT_name, &attr))
     return true;
   return false;
+}
+
+/// Test if a DIE is an anonymous data member, aka, "unnamed field".
+///
+/// Unnamed fields are specified at
+/// https://gcc.gnu.org/onlinedocs/gcc/Unnamed-Fields.html.
+///
+/// @param die the DIE to consider.
+///
+/// @return true iff @p die is an anonymous data member.
+static bool
+die_is_anonymous_data_member(const Dwarf_Die* die)
+{
+  if (!die
+      || dwarf_tag(const_cast<Dwarf_Die*>(die)) != DW_TAG_member
+      || !die_name(die).empty())
+    return false;
+
+  Dwarf_Die type_die;
+  if (!die_die_attribute(die, DW_AT_type, type_die))
+    return false;
+
+  if (dwarf_tag(&type_die) != DW_TAG_structure_type
+      && dwarf_tag(&type_die) != DW_TAG_union_type)
+  return false;
+
+  return true;
 }
 
 /// Get the value of an attribute that is supposed to be a string, or
@@ -6155,6 +6217,110 @@ die_die_attribute(const Dwarf_Die* die,
     return false;
 
   return dwarf_formref_die(&attr, &result);
+}
+
+/// Test if a subrange DIE indirectly references another subrange DIE
+/// through a given attribute.
+///
+/// A DW_TAG_subrange_type DIE can have its DW_AT_{lower,upper}_bound
+/// attribute be a reference to either a data member or a variable
+/// which type is itself a DW_TAG_subrange_type.  This latter subrange
+/// DIE is said to be "indirectly referenced" by the former subrange
+/// DIE.  In that case, the DW_AT_{lower,upper}_bound of the latter is
+/// the value we want for the DW_AT_upper_bound of the former.
+///
+/// This function tests if the former subrange DIE does indirectly
+/// reference another subrange DIE through a given attribute (not
+/// necessarily DW_AT_upper_bound).
+///
+/// @param die the DIE to consider.  Note that It must be a
+/// DW_TAG_subrange_type.
+///
+/// @param attr_name the name of the attribute to look through for the
+/// indirectly referenced subrange DIE.
+///
+/// @param referenced_subrange if the function returns true, then the
+/// argument of this parameter is set to the indirectly referenced
+/// DW_TAG_subrange_type DIE.
+///
+/// @return true iff @p DIE indirectly references a subrange DIE
+/// through the attribute @p attr_name.
+static bool
+subrange_die_indirectly_references_subrange_die(const Dwarf_Die *die,
+						unsigned attr_name,
+						Dwarf_Die& referenced_subrange)
+{
+  bool result = false;
+
+  if (dwarf_tag(const_cast<Dwarf_Die*>(die)) != DW_TAG_subrange_type)
+    return result;
+
+  Dwarf_Die referenced_die;
+  if (die_die_attribute(die, attr_name, referenced_die))
+    {
+      unsigned tag = dwarf_tag(&referenced_die);
+      if ( tag == DW_TAG_member || tag == DW_TAG_variable)
+	{
+	  Dwarf_Die type_die;
+	  if (die_die_attribute(&referenced_die, DW_AT_type, type_die))
+	    {
+	      tag = dwarf_tag(&type_die);
+	      if (tag == DW_TAG_subrange_type)
+		{
+		  memcpy(&referenced_subrange, &type_die, sizeof(type_die));
+		  result = true;
+		}
+	    }
+	}
+    }
+  return result;
+}
+
+/// Return the bound value of subrange die by looking at an indirectly
+/// referenced subrange DIE.
+///
+/// A DW_TAG_subrange_type DIE can have its DW_AT_{lower,upper}_bound
+/// attribute be a reference to either a data member or a variable
+/// which type is itself a DW_TAG_subrange_type.  This latter subrange
+/// DIE is said to be "indirectly referenced" by the former subrange
+/// DIE.  In that case, the DW_AT_{lower,upper}_bound of the latter is
+/// the value we want for the DW_AT_{lower,upper}_bound of the former.
+///
+/// This function gets the DW_AT_{lower,upper}_bound value of a
+/// subrange type by looking at the DW_AT_{lower,upper}_bound value of
+/// the indirectly referenced subrange type, if it exists.
+///
+/// @param die the subrange DIE to consider.
+///
+/// @param attr_name the name of the attribute to consider, typically,
+/// DW_AT_{lower,upper}_bound.
+///
+/// @param v the found value, iff this function returned true.
+///
+/// @param is_signed, this is set to true if @p v is signed.  This
+/// parameter is set at all only if the function returns true.
+///
+/// @return true iff the DW_AT_{lower,upper}_bound was found on the
+/// indirectly referenced subrange type.
+static bool
+subrange_die_indirect_bound_value(const Dwarf_Die *die,
+				  unsigned attr_name,
+				  array_type_def::subrange_type::bound_value& v,
+				  bool& is_signed)
+{
+  bool result = false;
+
+  if (dwarf_tag(const_cast<Dwarf_Die*>(die)) != DW_TAG_subrange_type)
+    return result;
+
+  Dwarf_Die subrange_die;
+  if (subrange_die_indirectly_references_subrange_die(die, attr_name,
+						      subrange_die))
+    {
+      if (die_constant_attribute(&subrange_die, attr_name, is_signed, v))
+	result = true;
+    }
+  return result;
 }
 
 /// Read and return an addresss class attribute from a given DIE.
@@ -6840,7 +7006,7 @@ die_is_pointer_type(const Dwarf_Die* die)
 static bool
 pointer_or_qual_die_of_anonymous_class_type(const Dwarf_Die* die)
 {
-  if (!die_is_pointer_or_reference_type(die)
+  if (!die_is_pointer_array_or_reference_type(die)
       && !die_is_qualified_type(die))
     return false;
 
@@ -6898,10 +7064,19 @@ die_is_array_type(const Dwarf_Die* die)
 ///
 /// @return true iff @p die represents a pointer or reference type.
 static bool
-die_is_pointer_or_reference_type(const Dwarf_Die* die)
+die_is_pointer_array_or_reference_type(const Dwarf_Die* die)
 {return (die_is_pointer_type(die)
 	 || die_is_reference_type(die)
 	 || die_is_array_type(die));}
+
+/// Test if a DIE represents a pointer or a reference type.
+///
+/// @param die the die to consider.
+///
+/// @return true iff @p die represents a pointer or reference type.
+static bool
+die_is_pointer_or_reference_type(const Dwarf_Die* die)
+{return (die_is_pointer_type(die) || die_is_reference_type(die));}
 
 /// Test if a DIE represents a pointer, a reference or a typedef type.
 ///
@@ -6911,7 +7086,7 @@ die_is_pointer_or_reference_type(const Dwarf_Die* die)
 /// typedef type.
 static bool
 die_is_pointer_reference_or_typedef_type(const Dwarf_Die* die)
-{return (die_is_pointer_or_reference_type(die)
+{return (die_is_pointer_array_or_reference_type(die)
 	 || dwarf_tag(const_cast<Dwarf_Die*>(die)) == DW_TAG_typedef);}
 
 /// Test if a DIE represents a class type.
@@ -7151,6 +7326,38 @@ die_peel_qual_ptr(Dwarf_Die *die, Dwarf_Die& peeled_die)
     }
 
   return true;
+}
+
+/// Return the leaf object under a qualified type DIE.
+///
+/// @param die the DIE of the type to consider.
+///
+/// @param peeled_die out parameter.  Set to the DIE of the leaf
+/// object iff the function actually peeled anything.
+///
+/// @return true upon successful completion.
+static bool
+die_peel_qualified(Dwarf_Die *die, Dwarf_Die& peeled_die)
+{
+  if (!die)
+    return false;
+
+  memcpy(&peeled_die, die, sizeof(peeled_die));
+
+  int tag = dwarf_tag(&peeled_die);
+
+  bool result = false;
+  while (tag == DW_TAG_const_type
+	 || tag == DW_TAG_volatile_type
+	 || tag == DW_TAG_restrict_type)
+    {
+      if (!die_die_attribute(&peeled_die, DW_AT_type, peeled_die))
+	break;
+      tag = dwarf_tag(&peeled_die);
+      result = true;
+    }
+
+  return result;
 }
 
 /// Return the leaf object under a typedef type DIE.
@@ -7869,6 +8076,10 @@ op_pushes_non_constant_value(Dwarf_Op* ops,
       next_index = index + 1;
       break;
 
+    case DW_OP_GNU_variable_value:
+      next_index = index + 1;
+      break;
+
     default:
       return false;
     }
@@ -8036,13 +8247,16 @@ op_is_arith_logic(Dwarf_Op* expr,
 
   Dwarf_Op& op = expr[index];
   expr_result val1, val2;
+  bool result = false;
 
   switch (op.atom)
     {
     case DW_OP_abs:
+      ABG_ASSERT(ctxt.stack.size() > 0);
       val1 = ctxt.pop();
       val1 = val1.abs();
       ctxt.push(val1);
+      result = true;
       break;
 
     case DW_OP_and:
@@ -8053,87 +8267,114 @@ op_is_arith_logic(Dwarf_Op* expr,
       break;
 
     case DW_OP_div:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       if (!val1.is_const())
 	val1 = 1;
       ctxt.push(val2 / val1);
+      result = true;
       break;
 
     case DW_OP_minus:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 - val1);
+      result = true;
       break;
 
     case DW_OP_mod:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 % val1);
+      result = true;
       break;
 
     case DW_OP_mul:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 * val1);
+      result = true;
       break;
 
     case DW_OP_neg:
+      ABG_ASSERT(ctxt.stack.size() > 0);
       val1 = ctxt.pop();
       ctxt.push(-val1);
+      result = true;
       break;
 
     case DW_OP_not:
+      ABG_ASSERT(ctxt.stack.size() > 0);
       val1 = ctxt.pop();
       ctxt.push(~val1);
+      result = true;
       break;
 
     case DW_OP_or:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val1 | val2);
+      result = true;
       break;
 
     case DW_OP_plus:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 + val1);
+      result = true;
       break;
 
     case DW_OP_plus_uconst:
+      ABG_ASSERT(ctxt.stack.size() > 0);
       val1 = ctxt.pop();
       val1 += op.number;
       ctxt.push(val1);
+      result = true;
       break;
 
     case DW_OP_shl:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 << val1);
+      result = true;
       break;
 
     case DW_OP_shr:
     case DW_OP_shra:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 >> val1);
+      result = true;
       break;
 
     case DW_OP_xor:
+      ABG_ASSERT(ctxt.stack.size() > 1);
       val1 = ctxt.pop();
       val2 = ctxt.pop();
       ctxt.push(val2 ^ val1);
+      result = true;
       break;
 
     default:
-      return false;
+      break;
     }
 
-  if (ctxt.stack.front().is_const())
-    ctxt.accum = ctxt.stack.front();
+  if (result == true)
+    {
+      if (ctxt.stack.front().is_const())
+	ctxt.accum = ctxt.stack.front();
 
-  next_index = index + 1;
-  return true;
+      next_index = index + 1;
+    }
+  return result;;
 }
 
 /// If the current operation in the dwarf expression represents a push
@@ -8207,7 +8448,7 @@ op_is_control_flow(Dwarf_Op* expr,
 
     case DW_OP_bra:
       val1 = ctxt.pop();
-      if (val1 != 0)
+      if (val1.const_value() != 0)
 	index += val1.const_value() - 1;
       break;
 
@@ -9024,9 +9265,15 @@ die_qualified_type_name(const reader& rdr,
 	  repr.clear();
 	else
 	  {
-	    if (has_underlying_type_die
-		&& die_is_pointer_or_reference_type(&underlying_type_die))
-	      repr = underlying_type_repr + " " + repr;
+	    if (has_underlying_type_die)
+	      {
+		Dwarf_Die peeled;
+		die_peel_qualified(&underlying_type_die, peeled);
+		if (die_is_pointer_or_reference_type(&peeled))
+		  repr = underlying_type_repr + " " + repr;
+		else
+		  repr += " " + underlying_type_repr;
+	      }
 	    else
 	      repr += " " + underlying_type_repr;
 	  }
@@ -9413,7 +9660,7 @@ die_return_and_parm_names_from_fn_type_die(const reader& rdr,
 	else if (child_tag == DW_TAG_unspecified_parameters)
 	  {
 	    // This is a variadic function parameter.
-	    parm_names.push_back("variadic parameter type");
+	    parm_names.push_back(rdr.env().get_variadic_parameter_type_name());
 	    // After a DW_TAG_unspecified_parameters tag, we shouldn't
 	    // keep reading for parameters.  The
 	    // unspecified_parameters TAG should be the last parameter
@@ -10335,13 +10582,11 @@ propagate_canonical_type(const reader& rdr,
 
 
   if (!l_has_canonical_die_offset
+      && r_has_canonical_die_offset
       // A DIE can be equivalent only to another DIE of the same
       // source.
       && l_source == r_source)
     {
-      if (!r_has_canonical_die_offset)
-	rdr.compute_canonical_die_offset(r, r_canonical_die_offset,
-					  /*die_as_type=*/true);
       ABG_ASSERT(r_canonical_die_offset);
       rdr.set_canonical_die_offset(l, r_canonical_die_offset,
 				    /*die_as_type=*/true);
@@ -10861,8 +11106,14 @@ compare_dies(const reader& rdr,
       {
 	uint64_t l_lower_bound = 0, r_lower_bound = 0,
 	  l_upper_bound = 0, r_upper_bound = 0;
-	die_unsigned_constant_attribute(l, DW_AT_lower_bound, l_lower_bound);
-	die_unsigned_constant_attribute(r, DW_AT_lower_bound, r_lower_bound);
+	bool l_lower_bound_set = false, r_lower_bound_set = false,
+	  l_upper_bound_set = false, r_upper_bound_set = false;
+
+	l_lower_bound_set =
+	  die_unsigned_constant_attribute(l, DW_AT_lower_bound, l_lower_bound);
+	r_lower_bound_set =
+	  die_unsigned_constant_attribute(r, DW_AT_lower_bound, r_lower_bound);
+
 	if (!die_unsigned_constant_attribute(l, DW_AT_upper_bound,
 					     l_upper_bound))
 	  {
@@ -10870,10 +11121,14 @@ compare_dies(const reader& rdr,
 	    if (die_unsigned_constant_attribute(l, DW_AT_count, l_count))
 	      {
 		l_upper_bound = l_lower_bound + l_count;
+		l_upper_bound_set = true;
 		if (l_upper_bound)
 		  --l_upper_bound;
 	      }
 	  }
+	else
+	  l_upper_bound_set = true;
+
 	if (!die_unsigned_constant_attribute(r, DW_AT_upper_bound,
 					     r_upper_bound))
 	  {
@@ -10881,12 +11136,17 @@ compare_dies(const reader& rdr,
 	    if (die_unsigned_constant_attribute(l, DW_AT_count, r_count))
 	      {
 		r_upper_bound = r_lower_bound + r_count;
+		r_upper_bound_set = true;
 		if (r_upper_bound)
 		  --r_upper_bound;
 	      }
 	  }
+	else
+	  r_upper_bound_set = true;
 
-	if ((l_lower_bound != r_lower_bound)
+	if ((l_lower_bound_set != r_lower_bound_set)
+	    || (l_upper_bound_set != r_upper_bound_set)
+	    || (l_lower_bound != r_lower_bound)
 	    || (l_upper_bound != r_upper_bound))
 	  SET_RESULT_TO_FALSE(result, l, r);
       }
@@ -12971,6 +13231,7 @@ add_or_update_class_type(reader&	 rdr,
 	      /// "_vptr[^0-9a-zA-Z_]", which is what Clang and GCC
 	      /// use as a name for the hidden vtable pointer.
 	      if (n.substr(0, 5) == "_vptr"
+		  && n.size() > 5
 		  && !std::isalnum(n.at(5))
 		  && n.at(5) != '_')
 		continue;
@@ -13001,6 +13262,16 @@ add_or_update_class_type(reader&	 rdr,
 	      if (!t)
 		continue;
 
+	      if (n.empty() && !die_is_anonymous_data_member(&child))
+		{
+		  // We must be in a case where the data member has an
+		  // empty name because the DWARF emitter has a bug.
+		  // Let's generate an artificial name for that data
+		  // member.
+		  n = rdr.build_name_for_buggy_anonymous_data_member(&child);
+		  ABG_ASSERT(!n.empty());
+		}
+
 	      // The call to build_ir_node_from_die above could have
 	      // triggered the adding of a data member named 'n' into
 	      // result.  So let's check again if the variable is
@@ -13023,7 +13294,8 @@ add_or_update_class_type(reader&	 rdr,
 	      die_access_specifier(&child, access);
 
 	      var_decl_sptr dm(new var_decl(n, t, loc, m));
-	      if (n.empty() && result->find_data_member(dm))
+	      if (n.empty()
+		  && anonymous_data_member_exists_in_class(*dm, *result))
 		// dm is an anonymous data member that was already
 		// present in the current class so let's not add it.
 		continue;
@@ -13230,9 +13502,7 @@ add_or_update_union_type(reader&	 rdr,
 
   rdr.associate_die_to_type(die, result, where_offset);
 
-  // TODO: maybe schedule declaration-only union for result like we do
-  // for classes:
-  // rdr.maybe_schedule_declaration_only_class_for_resolution(result);
+  rdr.maybe_schedule_declaration_only_class_for_resolution(result);
 
   Dwarf_Die child;
   bool has_child = (dwarf_child(die, &child) == 0);
@@ -13638,6 +13908,9 @@ build_pointer_type_def(reader&	rdr,
   result.reset(new pointer_type_def(utype, size, /*alignment=*/0, location()));
   ABG_ASSERT(result->get_pointed_to_type());
 
+  if (is_void_pointer_type(result))
+    result = is_pointer_type(build_ir_node_for_void_pointer_type(rdr));
+
   rdr.associate_die_to_type(die, result, where_offset);
   return result;
 }
@@ -14001,6 +14274,7 @@ build_subrange_type(reader&		rdr,
   array_type_def::subrange_type::bound_value upper_bound;
   uint64_t count = 0;
   bool is_infinite = false;
+  bool count_present = false;
 
   // The DWARF 4 specifications says, in [5.11 Subrange
   // Type Entries]:
@@ -14013,8 +14287,15 @@ build_subrange_type(reader&		rdr,
   // So let's look for DW_AT_lower_bound first.
   die_constant_attribute(die, DW_AT_lower_bound, is_signed, lower_bound);
 
+  bool found_upper_bound = die_constant_attribute(die, DW_AT_upper_bound,
+						  is_signed, upper_bound);
+  if (!found_upper_bound)
+    found_upper_bound = subrange_die_indirect_bound_value(die,
+							  DW_AT_upper_bound,
+							  upper_bound,
+							  is_signed);
   // Then, DW_AT_upper_bound.
-  if (!die_constant_attribute(die, DW_AT_upper_bound, is_signed, upper_bound))
+  if (!found_upper_bound)
     {
       // The DWARF 4 spec says, in [5.11 Subrange Type
       // Entries]:
@@ -14027,15 +14308,17 @@ build_subrange_type(reader&		rdr,
       //
       // So, as DW_AT_upper_bound is not present in this
       // case, let's see if there is a DW_AT_count.
-      die_unsigned_constant_attribute(die, DW_AT_count, count);
+      if (die_unsigned_constant_attribute(die, DW_AT_count, count))
+	{
+	  count_present = true;
+	  // We can deduce the upper_bound from the
+	  // lower_bound and the number of elements of the
+	  // array:
+	  int64_t u = lower_bound.get_signed_value() + count;
+	  upper_bound = u - 1;
+	}
 
-      // We can deduce the upper_bound from the
-      // lower_bound and the number of elements of the
-      // array:
-      if (int64_t u = lower_bound.get_signed_value() + count)
-	upper_bound = u - 1;
-
-      if (upper_bound.get_unsigned_value() == 0 && count == 0)
+      if (!count_present)
 	// No upper_bound nor count was present on the DIE, this means
 	// the array is considered to have an infinite (or rather not
 	// known) size.
@@ -14043,12 +14326,9 @@ build_subrange_type(reader&		rdr,
     }
 
   if (UINT64_MAX == upper_bound.get_unsigned_value())
-    {
-      // If the upper_bound size is the max of the integer value, then
-      // it most certainly means infinite size.
-      is_infinite = true;
-      upper_bound.set_unsigned(0);
-    }
+    // If the upper_bound size is the max of the integer value
+    // then it most certainly means unknown size.
+    is_infinite = true;
 
   result.reset
     (new array_type_def::subrange_type(rdr.env(),
@@ -14061,6 +14341,7 @@ build_subrange_type(reader&		rdr,
   if (underlying_type)
     result->set_underlying_type(underlying_type);
 
+  // Let's ensure the resulting subrange looks metabolically healhty.
   ABG_ASSERT(result->is_infinite()
 	     || (result->get_length() ==
 		 (uint64_t) (result->get_upper_bound()
@@ -14367,7 +14648,7 @@ build_var_decl(reader&	rdr,
       ABG_ASSERT(type);
     }
 
-  if (!type)
+  if (!type && !result)
     return result;
 
   string name, linkage_name;
@@ -14380,9 +14661,12 @@ build_var_decl(reader&	rdr,
     {
       // We were called to append properties that might have been
       // missing from the first version of the variable.  And usually
-      // that missing property is the mangled name.
+      // that missing property is the mangled name or the type.
       if (!linkage_name.empty())
 	result->set_linkage_name(linkage_name);
+
+      if (type)
+	result->set_type(type);
     }
 
   // Check if a variable symbol with this name is exported by the elf
@@ -14779,7 +15063,7 @@ get_opaque_version_of_type(reader	&rdr,
   //
   if (tag == DW_TAG_structure_type || tag == DW_TAG_class_type)
     {
-      string_classes_map::const_iterator i =
+      string_classes_or_unions_map::const_iterator i =
 	rdr.declaration_only_classes().find(qualified_name);
       if (i != rdr.declaration_only_classes().end())
 	result = i->second.back();
@@ -15180,13 +15464,9 @@ build_ir_node_from_die(reader&	rdr,
 
     case DW_TAG_typedef:
       {
-	typedef_decl_sptr t;
-	t = is_typedef(scope->find_member_type(die_name(die)));
-
-	if (!t)
-	  t = build_typedef_type(rdr, die,
-				 called_from_public_decl,
-				 where_offset);
+	typedef_decl_sptr t = build_typedef_type(rdr, die,
+						 called_from_public_decl,
+						 where_offset);
 
 	result = add_decl_to_scope(t, scope);
 	if (result)
@@ -15567,7 +15847,8 @@ build_ir_node_from_die(reader&	rdr,
 		  {
 		    fn = dynamic_pointer_cast<function_decl>(d);
 		    if (has_abstract_origin
-			&& (linkage_name != spec_linkage_name))
+			&& (linkage_name != spec_linkage_name)
+			&& !c->find_member_function_sptr(linkage_name))
 		      // The current DIE has 'd' as abstract orign,
 		      // and has a linkage name that is different
 		      // from from the linkage name of 'd'.  That
@@ -15707,10 +15988,31 @@ build_ir_node_for_void_type(reader& rdr)
   const environment& env = rdr.env();
 
   type_base_sptr t = env.get_void_type();
+  add_decl_to_scope(is_decl(t), rdr.cur_transl_unit()->get_global_scope());
   decl_base_sptr type_declaration = get_type_declaration(t);
-  if (!has_scope(type_declaration))
-    add_decl_to_scope(type_declaration,
-		      rdr.cur_transl_unit()->get_global_scope());
+  canonicalize(t);
+  return type_declaration;
+}
+
+/// Build the IR node for a "pointer to void type".
+///
+/// That IR node is shared across the ABI corpus.
+///
+/// Note that this function just gets that IR node from the
+/// environment and, if it's not added to any scope yet, adds it to
+/// the global scope associated to the current translation unit.
+///
+/// @param rdr the DWARF reader to consider.
+///
+/// @return the IR node.
+static type_or_decl_base_sptr
+build_ir_node_for_void_pointer_type(reader& rdr)
+{
+  const environment& env = rdr.env();
+
+  type_base_sptr t = env.get_void_pointer_type();
+  add_decl_to_scope(is_decl(t), rdr.cur_transl_unit()->get_global_scope());
+  decl_base_sptr type_declaration = get_type_declaration(t);
   canonicalize(t);
   return type_declaration;
 }
@@ -15727,10 +16029,8 @@ build_ir_node_for_variadic_parameter_type(reader &rdr)
   const environment& env = rdr.env();
 
   type_base_sptr t = env.get_variadic_parameter_type();
+  add_decl_to_scope(is_decl(t), rdr.cur_transl_unit()->get_global_scope());
   decl_base_sptr type_declaration = get_type_declaration(t);
-  if (!has_scope(type_declaration))
-    add_decl_to_scope(type_declaration,
-		      rdr.cur_transl_unit()->get_global_scope());
   canonicalize(t);
   return type_declaration;
 }

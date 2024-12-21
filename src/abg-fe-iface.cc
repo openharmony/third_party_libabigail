@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022 Red Hat, Inc.
+// Copyright (C) 2022-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -43,11 +43,11 @@ struct fe_iface::priv
   void
   initialize()
   {
-    //TODO: initialize the options.
     corpus_path.clear();
     dt_soname.clear();
     suppressions.clear();
     corpus_group.reset();
+    corpus.reset();
   }
 }; //end struct fe_iface::priv
 
@@ -78,14 +78,11 @@ fe_iface::~fe_iface()
 ///
 /// @param corpus_path the path to the file for which a new corpus is
 /// to be created.
-///
-/// @param e the environment in which the Front End operates.
 void
-fe_iface::reset(const std::string& corpus_path,
-		environment& e)
+fe_iface::initialize(const std::string& corpus_path)
 {
-  delete priv_;
-  priv_ = new fe_iface::priv(corpus_path, e);
+  priv_->initialize();
+  priv_->corpus_path = corpus_path;
 }
 
 /// Getter of the the options of the current Front End Interface.
@@ -310,7 +307,7 @@ fe_iface::maybe_add_fn_to_exported_decls(const function_decl* fn)
   if (fn)
     if (corpus::exported_decls_builder* b =
 	corpus()->get_exported_decls_builder().get())
-      b->maybe_add_fn_to_exported_fns(fn);
+      b->maybe_add_fn_to_exported_fns(const_cast<function_decl*>(fn));
 }
 
 /// Try and add the representation of the ABI of a variable to the set
@@ -397,13 +394,13 @@ status_to_diagnostic_string(fe_iface::status s)
   std::string str;
 
   if (s & fe_iface::STATUS_DEBUG_INFO_NOT_FOUND)
-    str += "could not find debug info\n";
+    str += "could not find debug info";
 
   if (s & fe_iface::STATUS_ALT_DEBUG_INFO_NOT_FOUND)
-    str += "could not find alternate debug info\n";
+    str += "could not find alternate debug info";
 
   if (s & fe_iface::STATUS_NO_SYMBOLS_FOUND)
-    str += "could not load ELF symbols\n";
+    str += "could not load ELF symbols";
 
   return str;
 }

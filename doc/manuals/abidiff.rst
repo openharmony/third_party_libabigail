@@ -16,8 +16,9 @@ For a comprehensive ABI change report between two input shared
 libraries that includes changes about function and variable sub-types,
 ``abidiff`` uses by default, debug information in `DWARF`_ format, if
 present, otherwise it compares interfaces using debug information in
-`CTF`_ format, if present, finally, if neither is found, it uses only
-`ELF`_ symbols to report which of them were added or removed.
+`CTF`_ or `BTF`_ formats, if present. Finally, if no debug info in
+these formats is found, it only considers `ELF`_ symbols and report
+about their addition or removal.
 
 .. include:: tools-use-libabigail.txt
 
@@ -175,6 +176,72 @@ Options
     Specifies where to find one public header of the second shared
     library that the tool has to consider.  The tool will thus filter
     out ABI changes on types that are not defined in public headers.
+
+  * ``--add-binaries1`` <*bin1,bin2,bin3,..*>
+
+    For each of the comma-separated binaries given in argument to this
+    option, if the binary is found in the directory specified by the
+    ``--added-binaries-dir1`` option, then ``abidiff`` loads the ABI
+    corpus of the binary and adds it to a set of corpora (called an
+    ABI Corpus Group) that includes the first argument of ``abidiff``.
+
+    That ABI corpus group is then compared against the second corpus
+    group given in argument to ``abidiff``.
+
+  * ``--add-binaries2`` <*bin1,bin2,bin3,..*>
+
+    For each of the comma-separated binaries given in argument to this
+    option, if the binary is found in the directory specified by the
+    ``--added-binaries-dir2`` option, then ``abidiff`` loads the ABI
+    corpus of the binary and adds it to a set of corpora(called an ABI
+    Corpus Group) that includes the second argument of ``abidiff``.
+
+    That ABI corpus group is then compared against the first corpus
+    group given in argument to ``abidiff``.
+
+  * ``--follow-dependencies | --fdeps``
+
+    For each dependency of the first argument of ``abidiff``, if it's
+    found in the directory specified by the ``--added-binaries-dir1``
+    option, then construct an ABI corpus out of the dependency, add it
+    to a set of corpora (called an ABI Corpus Group) that includes the
+    first argument of ``abidiff``.
+
+    Similarly, for each dependency of the second argument of
+    ``abidiff``, if it's found in the directory specified by the
+    ``--added-binaries-dir2`` option, then construct an ABI corpus out
+    of the dependency, add it to an ABI corpus group that includes the
+    second argument of ``abidiff``.
+
+    These two ABI corpus groups are then compared against each other.
+
+    Said otherwise, this makes ``abidiff`` compare the set of its
+    first input and its dependencies against the set of its second
+    input and its dependencies.
+
+  * ``list-dependencies | --ldeps``
+
+    This option lists all the dependencies of the input arguments of
+    ``abidiff`` that are found in the directories specified by the
+    options ``--added-binaries-dir1`` and ``--added-binaries-dir2``
+
+  * ``--added-binaries-dir1 | --abd1`` <added-binaries-directory-1>
+
+    This option is to be used in conjunction with the
+    ``--add-binaries1``, ``--follow-dependencies`` and
+    ``--list-dependencies`` options.  Binaries referred to by these
+    options, if found in the directory `added-binaries-directory-1`,
+    are loaded as ABI corpus and are added to the first ABI corpus group
+    that is to be used in the comparison.
+
+  * ``--added-binaries-dir2 | --abd2`` <added-binaries-directory-2>
+
+    This option is to be used in conjunction with the
+    ``--add-binaries2``, ``--follow-dependencies`` and
+    ``--list-dependencies`` options.  Binaries referred to by these
+    options, if found in the directory `added-binaries-directory-2`,
+    are loaded as ABI corpus and are added to the second ABI corpus
+    group to be used in the comparison.
 
   * ``--no-linux-kernel-mode``
 
@@ -600,9 +667,26 @@ Options
 
     This option disables those optimizations.
 
+  * ``--no-change-categorization | -x``
+
+    This option disables the categorization of changes into harmless
+    and harmful changes.  Note that this categorization is a
+    pre-requisite for the filtering of changes so this option disables
+    that filtering.  The goal of this option is to speed-up the
+    execution of the program for cases where the graph of changes is
+    huge and where the user is just interested in looking at, for
+    instance, leaf node changes without caring about their possible
+    impact on interfaces.  In that case, this option would be used
+    along with the ``--leaf-changes-only`` one.
+
   * ``--ctf``
 
     When comparing binaries, extract ABI information from `CTF`_ debug
+    information, if present.
+
+  * ``--btf``
+
+    When comparing binaries, extract ABI information from `BTF`_ debug
     information, if present.
 
   * ``--stats``
@@ -827,9 +911,35 @@ Usage examples
 
 	$
 
+  4. Comparing two sets of binaries that are passed on the command line: ::
+
+           $ abidiff --add-binaries1=file2-v1              \
+                     --add-binaries2=file2-v2,file2-v1     \
+	             --added-binaries-dir1 dir1 	   \
+	             --added-binaries-dir2 dir2	           \
+	             file1-v1 file1-v2
+
+     Note that the files ``file2-v1``, and ``file2-v2`` are to be
+     found in ``dir1`` and ``dir2`` or in the current directory.
+
+
+  5. Compare two libraries and their dependencies: ::
+
+           $ abidiff --follow-dependencies			\
+	             --added-binaries-dir1 /some/where		\
+	             --added-binaries-dir2 /some/where/else	\
+	             foo bar
+
+     This compares the set of binaries comprised by ``foo`` and its
+     dependencies against the set of binaries comprised by ``bar`` and
+     its dependencies.
+
+
 .. _ELF: http://en.wikipedia.org/wiki/Executable_and_Linkable_Format
 .. _DWARF: http://www.dwarfstd.org
 .. _CTF: https://raw.githubusercontent.com/wiki/oracle/binutils-gdb/files/ctf-spec.pdf
+.. _BTF: https://docs.kernel.org/bpf/btf.html
 .. _ODR: https://en.wikipedia.org/wiki/One_Definition_Rule
 .. _One Definition Rule: https://en.wikipedia.org/wiki/One_Definition_Rule
 .. _DWZ: https://sourceware.org/dwz
+.. _Linux Kernel: https://kernel.org/

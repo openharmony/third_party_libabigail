@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -163,7 +163,13 @@ public:
   get_void_type() const;
 
   const type_base_sptr&
+  get_void_pointer_type() const;
+
+  const type_base_sptr&
   get_variadic_parameter_type() const;
+
+  static string&
+  get_variadic_parameter_type_name();
 
   bool
   canonicalization_is_done() const;
@@ -188,6 +194,12 @@ public:
 
   bool
   is_void_type(const type_base*) const;
+
+  bool
+  is_void_pointer_type(const type_base_sptr&) const;
+
+  bool
+  is_void_pointer_type(const type_base*) const;
 
   bool
   is_variadic_parameter_type(const type_base*) const;
@@ -244,17 +256,26 @@ public:
   type_base* get_canonical_type(const char* name, unsigned index);
 
 #ifdef WITH_DEBUG_SELF_COMPARISON
-  unordered_map<string, uintptr_t>&
+  const unordered_map<string, uintptr_t>&
   get_type_id_canonical_type_map() const;
+
+  unordered_map<string, uintptr_t>&
+  get_type_id_canonical_type_map();
+
+  const unordered_map<uintptr_t, string>&
+  get_pointer_type_id_map() const;
 
   unordered_map<uintptr_t, string>&
   get_pointer_type_id_map();
 
   string
-  get_type_id_from_pointer(uintptr_t ptr);
+  get_type_id_from_pointer(uintptr_t ptr) const;
+
+  string
+  get_type_id_from_type(const type_base *ptr) const;
 
   uintptr_t
-  get_canonical_type_from_type_id(const char*);
+  get_canonical_type_from_type_id(const char*) const;
 #endif
 
   friend class class_or_union;
@@ -536,6 +557,10 @@ typedef unordered_set<const type_or_decl_base*,
 /// A convenience typedef for a map which key is a string and which
 /// value is a @ref type_base_wptr.
 typedef unordered_map<string, type_base_wptr> string_type_base_wptr_map_type;
+
+/// A convenience typedef for a map which key is a string and which
+/// value is a @ref type_base_sptr.
+typedef unordered_map<string, type_base_sptr> string_type_base_sptr_map_type;
 
 /// A convenience typedef for a map which key is an @ref
 /// interned_string and which value is a @ref type_base_wptr.
@@ -1089,6 +1114,9 @@ public:
 
   elf_symbol_sptr
   get_alias_which_equals(const elf_symbol& other) const;
+
+  elf_symbol_sptr
+  get_alias_with_default_symbol_version() const;
 
   string
   get_aliases_id_string(const string_elf_symbols_map_type& symtab,
@@ -1684,14 +1712,14 @@ public:
   void
   set_is_declaration_only(bool f);
 
-  friend type_base_sptr
-  canonicalize(type_base_sptr);
-
   friend bool
   equals(const decl_base&, const decl_base&, change_kind*);
 
   friend bool
   equals(const var_decl&, const var_decl&, change_kind*);
+
+  friend bool
+  var_equals_modulo_types(const var_decl&, const var_decl&, change_kind*);
 
   friend bool
   maybe_compare_as_member_decls(const decl_base& l,
@@ -1884,9 +1912,6 @@ public:
 
   friend void
   remove_decl_from_scope(decl_base_sptr decl);
-
-  friend type_base_sptr
-  canonicalize(type_base_sptr);
 };//end class scope_decl
 
 bool
@@ -2093,7 +2118,14 @@ public:
   virtual bool
   operator==(const type_decl&) const;
 
-  bool operator!=(const type_decl&)const;
+  virtual bool
+  operator!=(const type_base&)const;
+
+  virtual bool
+  operator!=(const decl_base&)const;
+
+  virtual bool
+  operator!=(const type_decl&)const;
 
   virtual void
   get_qualified_name(interned_string& qualified_name,
@@ -2353,8 +2385,8 @@ equals(const reference_type_def&, const reference_type_def&, change_kind*);
 /// Abstracts a reference type.
 class reference_type_def : public virtual type_base, public virtual decl_base
 {
-  type_base_wptr	pointed_to_type_;
-  bool			is_lvalue_;
+  struct			priv;
+  std::unique_ptr<priv>	priv_;
 
   // Forbidden.
   reference_type_def();
@@ -2554,6 +2586,12 @@ public:
     operator==(const subrange_type& o) const;
 
     bool
+    operator!=(const decl_base& o) const;
+
+    bool
+    operator!=(const type_base& o) const;
+
+    bool
     operator!=(const subrange_type& o) const;
 
     string
@@ -2636,6 +2674,11 @@ array_type_def::subrange_sptr
 is_subrange_type(const type_or_decl_base_sptr &type);
 
 bool
+equals(const array_type_def::subrange_type&,
+       const array_type_def::subrange_type&,
+       change_kind*);
+
+bool
 equals(const enum_type_decl&, const enum_type_decl&, change_kind*);
 
 /// Abstracts a declaration for an enum type.
@@ -2684,6 +2727,9 @@ public:
 
   const enumerators&
   get_enumerators() const;
+
+  const enumerators&
+  get_sorted_enumerators() const;
 
   enumerators&
   get_enumerators();
@@ -2768,6 +2814,10 @@ public:
 }; // end class enum_type_def::enumerator
 
 bool
+is_enumerator_present_in_enum(const enum_type_decl::enumerator &enr,
+			      const enum_type_decl &enom);
+
+bool
 equals(const typedef_decl&, const typedef_decl&, change_kind*);
 
 /// The abstraction of a typedef declaration.
@@ -2817,6 +2867,13 @@ public:
 
   void
   set_underlying_type(const type_base_sptr&);
+
+  virtual void
+  get_qualified_name(interned_string& qualified_name,
+		     bool internal = false) const;
+
+  virtual const interned_string&
+  get_qualified_name(bool internal = false) const;
 
   virtual bool
   traverse(ir_node_visitor&);
@@ -2877,6 +2934,9 @@ bool
 equals(const var_decl&, const var_decl&, change_kind*);
 
 bool
+var_equals_modulo_types(const var_decl&, const var_decl&, change_kind*);
+
+bool
 equals_modulo_cv_qualifier(const array_type_def*, const array_type_def*);
 
 /// Abstracts a variable declaration.
@@ -2911,6 +2971,9 @@ public:
 
   const type_base_sptr
   get_type() const;
+
+  void
+  set_type(type_base_sptr&);
 
   const type_base*
   get_naked_type() const;
@@ -3432,6 +3495,9 @@ public:
   get_template_parameters() const;
 
   virtual bool
+  operator==(const decl_base& o) const;
+
+  virtual bool
   operator==(const template_decl& o) const;
 
   virtual ~template_decl();
@@ -3506,6 +3572,12 @@ public:
 
   virtual bool
   operator==(const type_base&) const;
+
+  virtual bool
+  operator==(const type_decl&) const;
+
+  virtual bool
+  operator==(const decl_base&) const;
 
   virtual bool
   operator==(const template_parameter&) const;
@@ -3584,6 +3656,9 @@ public:
 
   virtual bool
   operator==(const type_base&) const;
+
+  virtual bool
+  operator==(const decl_base&) const;
 
   virtual bool
   operator==(const template_parameter&) const;
@@ -4206,6 +4281,9 @@ public:
   operator==(const type_base&) const;
 
   virtual bool
+  operator==(const class_or_union&) const;
+
+  virtual bool
   operator==(const class_decl&) const;
 
   virtual bool
@@ -4377,6 +4455,9 @@ public:
   operator==(const type_base&) const;
 
   virtual bool
+  operator==(const class_or_union&) const;
+
+  virtual bool
   operator==(const union_decl&) const;
 
   virtual bool
@@ -4545,6 +4626,10 @@ const var_decl*
 lookup_data_member(const type_base* type,
 		   const char* dm_name);
 
+const var_decl_sptr
+lookup_data_member(const type_base_sptr& type,
+		   const var_decl_sptr&  dm);
+
 const function_decl::parameter*
 get_function_parameter(const decl_base* fun,
 		       unsigned parm_num);
@@ -4634,6 +4719,9 @@ public:
 
   virtual bool
   operator==(const member_base& o) const;
+
+  virtual bool
+  operator==(const decl_base&) const;
 
   virtual bool
   operator==(const member_class_template&) const;
