@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022 Red Hat, Inc.
+// Copyright (C) 2022-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -74,8 +74,8 @@ protected:
 
   virtual ~fe_iface();
 
-  void
-  reset(const std::string& corpus_path, environment& e);
+  virtual void
+  initialize(const std::string& corpus_path);
 
   const options_type&
   options() const;

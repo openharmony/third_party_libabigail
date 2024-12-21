@@ -213,6 +213,17 @@ If none of the above properties are provided, then the
 
 The potential properties of this sections are listed below:
 
+* ``file_name_not_regexp``
+
+  Usage:
+
+    ``file_name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Prevents the system from loading the file which name does not match
+  the regular expression specified as value of this property.
+
+
+
 * ``file_name_regexp``
 
   Usage:
@@ -222,14 +233,16 @@ The potential properties of this sections are listed below:
   Prevents the system from loading the file which name matches the
   regular expression specified as value of this property.
 
-* ``file_name_not_regexp``
 
-  Usage:
+* ``label``
 
-    ``file_name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+ Usage:
 
-  Prevents the system from loading the file which name does not match
-  the regular expression specified as value of this property.
+   ``label`` ``=`` <some-value>
+
+ Define a label for the section.  A label is just an informative
+ string that might be used by the tool to refer to a type suppression
+ in error messages.
 
 
 * ``soname_regexp``
@@ -254,16 +267,6 @@ The potential properties of this sections are listed below:
   property.  Note that this property also works on an abixml file if
   it contains a SONAME property.
 
-* ``label``
-
- Usage:
-
-   ``label`` ``=`` <some-value>
-
- Define a label for the section.  A label is just an informative
- string that might be used by the tool to refer to a type suppression
- in error messages.
-
 ``[suppress_type]``
 $$$$$$$$$$$$$$$$$$$
 
@@ -274,259 +277,14 @@ of the following properties must be provided:
 
   ``file_name_regexp``, ``file_name_not_regexp``, ``soname_regexp``,
   ``soname_not_regexp``, ``name``, ``name_regexp``,
-  ``name_not_regexp``, ``type_kind``, ``source_location_not_in``,
-  ``source_location_not_regexp``.
+  ``name_not_regexp``, ``source_location_not_in``,
+  ``source_location_not_regexp``, ``type_kind``.
 
 If none of the above properties are provided, then the
 ``[suppress_type]`` directive is simply ignored.
 
 The potential properties of this sections are listed below:
 
-* ``file_name_regexp``
-
-  Usage:
-
-    ``file_name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  binary file which name matches the regular expression specified as
-  value of this property.
-
-* ``file_name_not_regexp``
-
-  Usage:
-
-    ``file_name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  binary file which name does not match the regular expression
-  specified as value of this property.
-
-
-* ``soname_regexp``
-
-  Usage:
-
-    ``soname_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  shared library which SONAME property matches the regular expression
-  specified as value of this property.
-
-* ``soname_not_regexp``
-
-  Usage:
-
-    ``soname_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  shared library which SONAME property does not match the regular
-  expression specified as value of this property.
-
-* ``name_regexp``
-
- Usage:
-
-   ``name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
- Suppresses change reports involving types whose name matches the
- regular expression specified as value of this property.
-
-
-* ``name_not_regexp``
-
- Usage:
-
-   ``name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
- Suppresses change reports involving types whose name does *NOT* match
- the regular expression specified as value of this property.  Said
- otherwise, this property specifies which types to keep, rather than
- types to suppress from reports.
-
-* ``name``
-
- Usage:
-
-   ``name`` ``=`` <a-value>
-
- Suppresses change reports involving types whose name equals the value
- of this property.
-
-* ``type_kind``
-
- Usage:
-
-   ``type_kind`` ``=`` ``class`` | ``struct`` | ``union`` | ``enum`` |
-		       ``array`` | ``typedef`` | ``builtin``
-
- Suppresses change reports involving a certain kind of type.  The kind
- of type to suppress change reports for is specified by the possible
- values listed above:
-
-   - ``class``: suppress change reports for class types.  Note that
-	 even if class types don't exist for C, this value still
-	 triggers the suppression of change reports for struct types,
-	 in C.  In C++ however, it should do what it suggests.
-
-   - ``struct``: suppress change reports for struct types in C or C++.
-	 Note that the value ``class`` above is a super-set of this
-	 one.
-
-   - ``union``: suppress change reports for union types.
-
-   - ``enum``: suppress change reports for enum types.
-
-   - ``array``: suppress change reports for array types.
-
-   - ``typedef``: suppress change reports for typedef types.
-
-   - ``builtin``: suppress change reports for built-in (or native)
-     types.  Example of built-in types are char, int, unsigned int,
-     etc.
-
- .. _suppr_source_location_not_in_label:
-
-* ``source_location_not_in``
-
- Usage:
-
-    ``source_location_not_in`` ``=`` <``list-of-file-paths``>
-
- Suppresses change reports involving a type which is defined in a file
- which path is *NOT* listed in the value ``list-of-file-paths``.  Note
- that the value is a comma-separated list of file paths e.g, this
- property ::
- 
-   source_location_not_in = libabigail/abg-ir.h, libabigail/abg-dwarf-reader.h 
-
- suppresses change reports about all the types that are *NOT* defined
- in header files whose path end up with the strings
- libabigail/abg-ir.h or libabigail/abg-dwarf-reader.h.
-
- .. _suppr_source_location_not_regexp_label:
-
-* ``source_location_not_regexp``
-
- Usage:
-
-   ``source_location_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
- Suppresses change reports involving a type which is defined in a file
- which path does *NOT* match the :ref:`regular expression
- <suppr_regexp_label>` provided as value of the property. E.g, this
- property ::
-
-   source_location_not_regexp = libabigail/abg-.*\\.h
-
- suppresses change reports involving all the types that are *NOT*
- defined in header files whose path match the regular expression
- provided a value of the property.
-
- .. _suppr_has_data_member_inserted_at_label:
-
-* ``has_data_member_inserted_at``
-
- Usage:
-
-   ``has_data_member_inserted_at`` ``=`` <``offset-in-bit``>
-
- Suppresses change reports involving a type which has at least one
- data member inserted at an offset specified by the property value
- ``offset-in-bit``.  Please note that if a type has a change in which
- at least one of its data members is removed or its size is reduced,
- the type will *NOT* be suppressed by the evaluation of this property.
-
- The value ``offset-in-bit`` is either:
-
-	 - an integer value, expressed in bits, which denotes the
-	   offset of the insertion point of the data member, starting
-	   from the beginning of the relevant structure or class.
-
-	 - the keyword ``end`` which is a named constant which value
-	   equals the offset of the end of the of the structure or
-	   class.
-
-	 - the function call expression
-	   ``offset_of(data-member-name)`` where `data-member-name` is
-	   the name of a given data member of the relevant structure
-	   or class.  The value of this function call expression is an
-	   integer that represents the offset of the data member
-	   denoted by ``data-member-name``.
-
-	 - the function call expression
-	   ``offset_after(data-member-name)`` where `data-member-name`
-	   is the name of a given data member of the relevant
-	   structure or class.  The value of this function call
-	   expression is an integer that represents the offset of the
-	   point that comes right after the region occupied by the
-	   data member denoted by ``data-member-name``.
-
-  .. _suppr_has_data_member_inserted_between_label:
-
-
-* ``has_data_member_inserted_between``
-
- Usage:
-
-   ``has_data_member_inserted_between`` ``=`` {<``range-begin``>, <``range-end``>}
-
- Suppresses change reports involving a type which has at least one
- data member inserted at an offset that is comprised in the range
- between ``range-begin`` and ``range-end``.  Please note that each of
- the values ``range-begin`` and ``range-end`` can be of the same form
- as the :ref:`has_data_member_inserted_at
- <suppr_has_data_member_inserted_at_label>` property above.  Please
- also note that if a type has a change in which at least one of its
- data members is removed or its size is reduced, the type will *NOT* be
- suppressed by the evaluation of this property.
-
- Usage examples of this properties are: ::
-
-   has_data_member_inserted_between = {8, 64}
-
- or: ::
-
-   has_data_member_inserted_between = {16, end}
-
- or: ::
-
-   has_data_member_inserted_between = {offset_after(member1), end}
-
-.. _suppr_has_data_members_inserted_between_label:
-
-
-* ``has_data_members_inserted_between``
-
- Usage:
-
-   ``has_data_members_inserted_between`` ``=`` {<sequence-of-ranges>}
-
- Suppresses change reports involving a type which has multiple data
- member inserted in various offset ranges.  A usage example of this
- property is, for instance: ::
-
-   has_data_members_inserted_between = {{8, 31}, {72, 95}}
-
- This usage example suppresses change reports involving a type which
- has data members inserted in bit offset ranges [8 31] and [72 95].
- The length of the sequence of ranges or this
- ``has_data_members_inserted_between`` is not bounded; it can be as
- long as the system can cope with.  The values of the boundaries of
- the ranges are of the same kind as for the
- :ref:`has_data_member_inserted_at
- <suppr_has_data_member_inserted_at_label>` property above.  Please
- note that if a type has a change in which at least one of its data
- members is removed or its size is reduced, the type will *NOT* be
- suppressed by the evaluation of this property.
-
- Another usage example of this property is thus: ::
-
-   has_data_members_inserted_between =
-     {
-	  {offset_after(member0), offset_of(member1)},
-	  {72, end}
-     }
 
  .. _suppr_accessed_through_property_label:
 
@@ -577,6 +335,49 @@ The potential properties of this sections are listed below:
  types accessed either directly or through pointers
  <example_accessed_through_label>`.
 
+
+.. _suppr_changed_enumerators_label:
+
+* ``changed_enumerators``
+
+  Usage:
+
+    ``changed_enumerators`` ``=`` <list-of-enumerators>
+
+  Suppresses change reports involving changes in the value of
+  enumerators of a given enum type.  This property is applied if the
+  ``type_kind`` property is set to the value ``enum``, at least.  The
+  value of the ``changed_enumerators`` is a comma-separated list of
+  the enumerators that the user expects to change.  For instance: ::
+
+      changed_enumerators = LAST_ENUMERATORS0, LAST_ENUMERATOR1
+
+
+.. _suppr_changed_enumerators_regexp_label:
+
+* ``changed_enumerators_regexp``
+
+  Usage:
+
+    ``changed_enumerators_regexp`` ``=`` <list-of-enumerator-regular-expressions>
+
+  Suppresses change reports involving changes in the value of
+  enumerators of a given enum type.  This property is applied if the
+  ``type_kind`` property is set to the value ``enum``, at least.  The
+  value of the ``changed_enumerators_regexp`` property is a
+  comma-separated list of regular expressions that should match the
+  names of the enumerators that the user expects to change.  For
+  instance: ::
+
+      changed_enumerators_regexp = .*_MAX$, .*_LAST$, .*_NUM$, .*_NBITS$
+
+  In the example above, change reports to any enumerator which name
+  ends with _MAX, _LAST, _NUM or _NBITS will be suppressed.
+
+  Note that for this property to be applied to changes to an enum
+  type, the size of the enum type must *NOT* have changed.
+
+
 * ``drop``
 
  Usage:
@@ -597,6 +398,245 @@ The potential properties of this sections are listed below:
  properties specified: ``name_regexp``, ``name``, ``name_regexp``,
  ``source_location_not_in`` or ``source_location_not_regexp``.
 
+
+* ``file_name_not_regexp``
+
+  Usage:
+
+    ``file_name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  binary file which name does not match the regular expression
+  specified as value of this property.
+
+
+* ``file_name_regexp``
+
+  Usage:
+
+    ``file_name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  binary file which name matches the regular expression specified as
+  value of this property.
+
+
+ .. _suppr_has_data_member_label:
+
+* ``has_data_member``
+
+  Usage:
+
+    ``has_data_member`` ``=`` <``list-of-data-member-names``>
+
+Suppresses change reports involving a type which contains data members
+whose names are provided in the list value of this property.
+
+A usage examples of this property would be: ::
+
+  has_data_member = {private_data_member0, private_data_member1}
+
+
+The property above would match any type which contains at least two
+data members whose names are ``private_data_member0`` and
+``private_data_member1``.
+
+Another usage examples of this property would be: ::
+
+  has_data_member = another_private_data_member
+
+The property above would match any type which contains
+a data member which name is ``another_private_data_member0``.
+
+ .. _suppr_has_data_member_regexp_label:
+
+* ``has_data_member_regexp``
+
+  Usage:
+
+    ``has_data_member_regexp`` ``=`` <``a-regular-expression``>
+
+Suppresses change reports involving a type which contains data members
+whose names match the regular expression provided as the value of this
+property.
+
+A usage examples of this property would be: ::
+
+  has_data_member_regexp = ^private_data_member
+
+The property above would match any type which contains data members
+whose names match the regular expression ``^private_data_member``.  In
+other words, it would match any type which contains data members whose
+names start with the string "private_data_member".
+
+
+ .. _suppr_has_data_member_inserted_at_label:
+
+* ``has_data_member_inserted_at``
+
+ Usage:
+
+   ``has_data_member_inserted_at`` ``=`` <``offset-in-bit``>
+
+ Suppresses change reports involving a type which has at least one
+ data member inserted at an offset specified by the property value
+ ``offset-in-bit``.  Please note that if the size of the type changed,
+ then the type change will *NOT* be suppressed by the evaluation of
+ this property, unless the
+ :ref:`has_size_change<suppr_has_size_change_property_label>` property
+ is present and set to ``yes``.
+
+ The value ``offset-in-bit`` is either:
+
+	 - an integer value, expressed in bits, which denotes the
+	   offset of the insertion point of the data member, starting
+	   from the beginning of the relevant structure or class.
+
+.. _suppr_data_member_offset_selector_expressions_label:
+
+	 - data member offset selector expressions, such as:
+
+	     - the keyword ``end`` which is a named constant which
+	       value equals the offset of the end of the structure or
+	       class.
+
+	     - the keyword ``offset_of_flexible_array_data_member``
+               which is a named constant that evaluates to the offset
+               of the flexible array data member contained in the
+               relevant structure.
+
+	     - the function call expression
+	       ``offset_of(data-member-name)`` where `data-member-name` is
+	       the name of a given data member of the relevant structure
+	       or class.  The value of this function call expression is an
+	       integer that represents the offset of the data member
+	       denoted by ``data-member-name``.
+
+	     - the function call expression
+	       ``offset_after(data-member-name)`` where `data-member-name`
+	       is the name of a given data member of the relevant
+	       structure or class.  The value of this function call
+	       expression is an integer that represents the offset of the
+	       point that comes right after the region occupied by the
+	       data member denoted by ``data-member-name``.
+
+	     - the function call expression
+	       ``offset_of_first_data_member_regexp(data-member-name-regexp)``
+	       where `data-member-name-regexp` is a regular expression
+	       matching a data member.  The value of this function
+	       call expression is an integer that represents the
+	       offset of the first data member which name matches the
+	       regular expression argument.  If no data member of a
+	       given class type matches the regular expression, then
+	       the class type won't match the current directive.
+
+	     - the function call expression
+	       ``offset_of_last_data_member_regexp(data-member-name-regexp)``
+	       where `data-member-name-regexp` is a regular expression
+	       matching a data member.  The value of this function
+	       call expression is an integer that represents the
+	       offset of the last data member which name matches the
+	       regular expression argument.  If no data member of a
+	       given class type matches the regular expression, then
+	       the class type won't match the current directive.
+
+  .. _suppr_has_data_member_inserted_between_label:
+
+
+* ``has_data_member_inserted_between``
+
+ Usage:
+
+   ``has_data_member_inserted_between`` ``=`` {<``range-begin``>, <``range-end``>}
+
+ Suppresses change reports involving a type which has at least one
+ data member inserted at an offset that is comprised in the range
+ between ``range-begin`` and ``range-end``.  Please note that each of
+ the values ``range-begin`` and ``range-end`` can be of the same form
+ as the :ref:`has_data_member_inserted_at
+ <suppr_has_data_member_inserted_at_label>` property above.  Please
+ also note that if the size of the type changed, then the type change
+ will *NOT* be suppressed by the evaluation of this property, unless
+ the :ref:`has_size_change<suppr_has_size_change_property_label>`
+ property is present and set to ``yes``.  Note that data member
+ deletions happening in the range between ``range-begin`` and
+ ``range-end`` won't prevent the type change from being suppressed by
+ the evaluation of this property if the size of the type doesn't
+ change or if the
+ :ref:`has_size_change<suppr_has_size_change_property_label>` property
+ is present and set to ``yes``.
+
+ Usage examples of this properties are: ::
+
+   has_data_member_inserted_between = {8, 64}
+
+ or: ::
+
+   has_data_member_inserted_between = {16, end}
+
+ or: ::
+
+   has_data_member_inserted_between = {offset_after(member1), end}
+
+.. _suppr_has_data_members_inserted_between_label:
+
+
+* ``has_data_members_inserted_between``
+
+ Usage:
+
+   ``has_data_members_inserted_between`` ``=`` {<sequence-of-ranges>}
+
+ Suppresses change reports involving a type which has multiple data
+ member inserted in various offset ranges.  A usage example of this
+ property is, for instance: ::
+
+   has_data_members_inserted_between = {{8, 31}, {72, 95}}
+
+ This usage example suppresses change reports involving a type which
+ has data members inserted in bit offset ranges [8 31] and [72 95].
+ The length of the sequence of ranges or this
+ ``has_data_members_inserted_between`` is not bounded; it can be as
+ long as the system can cope with.  The values of the boundaries of
+ the ranges are of the same kind as for the
+ :ref:`has_data_member_inserted_at
+ <suppr_has_data_member_inserted_at_label>` property above.  Please
+ also note that if the size of the type changed, then the type will
+ *NOT* be suppressed by the evaluation of this property, unless the
+ :ref:`has_size_change<suppr_has_size_change_property_label>` property
+ is present and set to ``yes``.  Note that data member deletions
+ happening in the defined ranges won't prevent the type change from
+ being suppressed by the evaluation of this property if the size of
+ the type doesn't change or if the
+ :ref:`has_size_change<suppr_has_size_change_property_label>` property
+ is present and set to ``yes``.
+
+ Another usage example of this property is thus: ::
+
+   has_data_members_inserted_between =
+     {
+	  {offset_after(member0), offset_of(member1)},
+	  {72, end}
+     }
+
+
+
+ .. _suppr_has_size_change_property_label:
+
+* ``has_size_change``
+
+ Usage:
+
+   ``has_size_change`` ``=`` yes | no
+
+
+This property is to be used in conjunction with the properties
+:ref:`has_data_member_inserted_between<suppr_has_data_member_inserted_between_label>`
+and
+:ref:`has_data_members_inserted_between<suppr_has_data_members_inserted_between_label>`.
+Those properties will not match a type change if the size of the type
+changes, unless the ``has_size_changes`` property is set to ``yes``.
+
  .. _suppr_label_property_label:
 
 * ``label``
@@ -609,21 +649,132 @@ The potential properties of this sections are listed below:
  string that might be used by a tool to refer to a type suppression in
  error messages.
 
-.. _suppr_changed_enumerators_label:
 
-* ``changed_enumerators``
+* ``name``
+
+ Usage:
+
+   ``name`` ``=`` <a-value>
+
+ Suppresses change reports involving types whose name equals the value
+ of this property.
+
+
+* ``name_not_regexp``
+
+ Usage:
+
+   ``name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+ Suppresses change reports involving types whose name does *NOT* match
+ the regular expression specified as value of this property.  Said
+ otherwise, this property specifies which types to keep, rather than
+ types to suppress from reports.
+
+
+* ``name_regexp``
+
+ Usage:
+
+   ``name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+ Suppresses change reports involving types whose name matches the
+ regular expression specified as value of this property.
+
+
+* ``soname_not_regexp``
 
   Usage:
 
-    ``changed_enumerators`` ``=`` <list-of-enumerators>
-    
-  Suppresses change reports involving changes in the value of
-  enumerators of a given enum type.  This property is applied if the
-  ``type_kind`` property is set to the value ``enum``, at least.  The
-  value of the ``changed_enumerators`` is a comma-separated list of
-  the enumerators that the user expects to change.  For instance: ::
+    ``soname_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
 
-      changed_enumerators = LAST_ENUMERATORS0, LAST_ENUMERATOR1
+  Suppresses change reports about ABI artifacts that are defined in a
+  shared library which SONAME property does not match the regular
+  expression specified as value of this property.
+
+
+* ``soname_regexp``
+
+  Usage:
+
+    ``soname_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  shared library which SONAME property matches the regular expression
+  specified as value of this property.
+
+ .. _suppr_source_location_not_in_label:
+
+* ``source_location_not_in``
+
+ Usage:
+
+    ``source_location_not_in`` ``=`` <``list-of-file-paths``>
+
+ Suppresses change reports involving a type which is defined in a file
+ which path is *NOT* listed in the value ``list-of-file-paths``.  Note
+ that the value is a comma-separated list of file paths e.g, this
+ property ::
+ 
+   source_location_not_in = libabigail/abg-ir.h, libabigail/abg-dwarf-reader.h 
+
+ suppresses change reports about all the types that are *NOT* defined
+ in header files whose path end up with the strings
+ libabigail/abg-ir.h or libabigail/abg-dwarf-reader.h.
+
+ .. _suppr_source_location_not_regexp_label:
+
+
+* ``source_location_not_regexp``
+
+ Usage:
+
+   ``source_location_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+ Suppresses change reports involving a type which is defined in a file
+ which path does *NOT* match the :ref:`regular expression
+ <suppr_regexp_label>` provided as value of the property. E.g, this
+ property ::
+
+   source_location_not_regexp = libabigail/abg-.*\\.h
+
+ suppresses change reports involving all the types that are *NOT*
+ defined in header files whose path match the regular expression
+ provided a value of the property.
+
+
+* ``type_kind``
+
+ Usage:
+
+   ``type_kind`` ``=`` ``class`` | ``struct`` | ``union`` | ``enum`` |
+		       ``array`` | ``typedef`` | ``builtin``
+
+ Suppresses change reports involving a certain kind of type.  The kind
+ of type to suppress change reports for is specified by the possible
+ values listed above:
+
+   - ``class``: suppress change reports for class types.  Note that
+	 even if class types don't exist for C, this value still
+	 triggers the suppression of change reports for struct types,
+	 in C.  In C++ however, it should do what it suggests.
+
+   - ``struct``: suppress change reports for struct types in C or C++.
+	 Note that the value ``class`` above is a super-set of this
+	 one.
+
+   - ``union``: suppress change reports for union types.
+
+   - ``enum``: suppress change reports for enum types.
+
+   - ``array``: suppress change reports for array types.
+
+   - ``typedef``: suppress change reports for typedef types.
+
+   - ``builtin``: suppress change reports for built-in (or native)
+     types.  Example of built-in types are char, int, unsigned int,
+     etc.
+
 
 ``[suppress_function]``
 $$$$$$$$$$$$$$$$$$$$$$$$
@@ -646,100 +797,8 @@ If none of the above properties are provided, then the
 
 The potential properties of this sections are:
 
-* ``label``
-
- Usage:
-
-   ``label`` ``=`` <some-value>
-
- This property is the same as the :ref:`label property
- <suppr_label_property_label>` defined above.
-
-
-* ``file_name_regexp``
-
-  Usage:
-
-  ``file_name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  binary file which name matches the regular expression specified as
-  value of this property.
-
-
-* ``file_name_not_regexp``
-
-  Usage:
-
-    ``file_name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  binary file which name does not match the regular expression
-  specified as value of this property.
-
-* ``soname_regexp``
-
-  Usage:
-
-    ``soname_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  shared library which SONAME property matches the regular expression
-  specified as value of this property.
-
-* ``soname_not_regexp``
-
-  Usage:
-
-    ``soname_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
-  Suppresses change reports about ABI artifacts that are defined in a
-  shared library which SONAME property does not match the regular
-  expression specified as value of this property.
-
-
-* ``name``
-
- Usage:
-
-   ``name`` ``=`` <some-value>
-
- Suppresses change reports involving functions whose name equals the
- value of this property.
-
-* ``name_regexp``
-
- Usage:
-
-   ``name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
- Suppresses change reports involving functions whose name matches the
- regular expression specified as value of this property.
-
- Let's consider the case of functions that have several symbol names.
- This happens when the underlying symbol for the function has
- aliases.  Each symbol name is actually one alias name.
-
- In this case, if the regular expression matches the name of
- at least one of the aliases names, then it must match the names of
- all of the aliases of the function for the directive to actually
- suppress the diff reports for said function.
-
-
-* ``name_not_regexp``
-
- Usage:
-
-   ``name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
-
- Suppresses change reports involving functions whose names don't match
- the regular expression specified as value of this property.
-
- The rules for functions that have several symbol names are the same
- rules as for the ``name_regexp`` property above.
 
   .. _suppr_change_kind_property_label:
-
 
 * ``change_kind``
 
@@ -773,6 +832,101 @@ The potential properties of this sections are:
 	   that have all of the changes above.  Note that not
 	   providing the ``change_kind`` property at all is
 	   equivalent to setting it to the value ``all``.
+
+
+* ``drop``
+
+ Usage:
+
+   ``drop`` ``=`` yes | no
+
+ If a function is matched by a suppression specification which
+ contains the "drop" property set to "yes" (or to "true") then the
+ function is not even going to be represented in the internal
+ representation of the ABI being analyzed.  This property makes its
+ enclosing suppression specification to be applied in the :ref:`early
+ suppression specification mode <early_suppression_mode_label>`.  The
+ net effect is that it potentially reduces the memory used to
+ represent the ABI being analyzed.
+
+ Please note that for this property to be effective, the enclosing
+ suppression specification must have at least one of the following
+ properties specified: ``name_regexp``, ``name``, ``name_regexp``,
+ ``source_location_not_in`` or ``source_location_not_regexp``.
+
+
+* ``file_name_not_regexp``
+
+  Usage:
+
+    ``file_name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  binary file which name does not match the regular expression
+  specified as value of this property.
+
+
+* ``file_name_regexp``
+
+  Usage:
+
+  ``file_name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  binary file which name matches the regular expression specified as
+  value of this property.
+
+
+* ``label``
+
+ Usage:
+
+   ``label`` ``=`` <some-value>
+
+ This property is the same as the :ref:`label property
+ <suppr_label_property_label>` defined above.
+
+
+* ``name``
+
+ Usage:
+
+   ``name`` ``=`` <some-value>
+
+ Suppresses change reports involving functions whose name equals the
+ value of this property.
+
+
+* ``name_not_regexp``
+
+ Usage:
+
+   ``name_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+ Suppresses change reports involving functions whose names don't match
+ the regular expression specified as value of this property.
+
+ The rules for functions that have several symbol names are the same
+ rules as for the ``name_regexp`` property above.
+
+
+* ``name_regexp``
+
+ Usage:
+
+   ``name_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+ Suppresses change reports involving functions whose name matches the
+ regular expression specified as value of this property.
+
+ Let's consider the case of functions that have several symbol names.
+ This happens when the underlying symbol for the function has
+ aliases.  Each symbol name is actually one alias name.
+
+ In this case, if the regular expression matches the name of
+ at least one of the aliases names, then it must match the names of
+ all of the aliases of the function for the directive to actually
+ suppress the diff reports for said function.
 
 
 * ``parameter``
@@ -823,6 +977,7 @@ The potential properties of this sections are:
  other words, this is the third parameter and it's a
  reference on a type that starts with the string "foo".
 
+
 * ``return_type_name``
 
  Usage:
@@ -831,6 +986,7 @@ The potential properties of this sections are:
 
  Suppresses change reports involving functions whose return type name
  equals the value of this property.
+
 
 * ``return_type_regexp``
 
@@ -841,6 +997,29 @@ The potential properties of this sections are:
  Suppresses change reports involving functions whose return type name
  matches the regular expression specified as value of this property.
 
+
+* ``soname_regexp``
+
+  Usage:
+
+    ``soname_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  shared library which SONAME property matches the regular expression
+  specified as value of this property.
+
+
+* ``soname_not_regexp``
+
+  Usage:
+
+    ``soname_not_regexp`` ``=`` <:ref:`regular-expression <suppr_regexp_label>`>
+
+  Suppresses change reports about ABI artifacts that are defined in a
+  shared library which SONAME property does not match the regular
+  expression specified as value of this property.
+
+
 * ``symbol_name``
 
  Usage:
@@ -849,6 +1028,7 @@ The potential properties of this sections are:
 
  Suppresses change reports involving functions whose symbol name equals
  the value of this property.
+
 
 * ``symbol_name_regexp``
 
@@ -867,6 +1047,7 @@ The potential properties of this sections are:
  the aliases of the function for the directive to actually suppress
  the diff reports for said function.
 
+
 * ``symbol_name_not_regexp``
 
  Usage:
@@ -875,6 +1056,7 @@ The potential properties of this sections are:
 
  Suppresses change reports involving functions whose symbol name does
  not match the regular expression specified as value of this property.
+
 
 * ``symbol_version``
 
@@ -885,6 +1067,7 @@ The potential properties of this sections are:
  Suppresses change reports involving functions whose symbol version
  equals the value of this property.
 
+
 * ``symbol_version_regexp``
 
  Usage:
@@ -894,25 +1077,6 @@ The potential properties of this sections are:
  Suppresses change reports involving functions whose symbol version
  matches the regular expression specified as value of this property.
 
-* ``drop``
-
- Usage:
-
-   ``drop`` ``=`` yes | no
-
- If a function is matched by a suppression specification which
- contains the "drop" property set to "yes" (or to "true") then the
- function is not even going to be represented in the internal
- representation of the ABI being analyzed.  This property makes its
- enclosing suppression specification to be applied in the :ref:`early
- suppression specification mode <early_suppression_mode_label>`.  The
- net effect is that it potentially reduces the memory used to
- represent the ABI being analyzed.
-
- Please note that for this property to be effective, the enclosing
- suppression specification must have at least one of the following
- properties specified: ``name_regexp``, ``name``, ``name_regexp``,
- ``source_location_not_in`` or ``source_location_not_regexp``.
 
 ``[suppress_variable]``
 $$$$$$$$$$$$$$$$$$$$$$$$

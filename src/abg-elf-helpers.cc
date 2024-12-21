@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2020-2022 Google, Inc.
+// Copyright (C) 2020-2023 Google, Inc.
 
 /// @file
 ///
 /// This contains the definitions of the ELF utilities for the dwarf reader.
+#include "config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
 #include <elfutils/libdwfl.h>
+#include <sstream>
 #include "abg-elf-helpers.h"
 #include "abg-tools-utils.h"
 
@@ -920,10 +922,11 @@ bool
 get_crc_for_symbol(Elf* elf_handle, GElf_Sym* crc_symbol, uint32_t& crc_value)
 {
   size_t crc_section_index = crc_symbol->st_shndx;
-  uint64_t crc_symbol_value = crc_symbol->st_value;
+  GElf_Addr crc_symbol_address =
+      maybe_adjust_et_rel_sym_addr_to_abs_addr(elf_handle, crc_symbol);
   if (crc_section_index == SHN_ABS)
     {
-      crc_value = crc_symbol_value;
+      crc_value = crc_symbol_address;
       return true;
     }
 
@@ -940,10 +943,10 @@ get_crc_for_symbol(Elf* elf_handle, GElf_Sym* crc_symbol, uint32_t& crc_value)
   if (kcrctab_data == NULL)
     return false;
 
-  if (crc_symbol_value < sheader->sh_addr)
+  if (crc_symbol_address < sheader->sh_addr)
     return false;
 
-  size_t offset = crc_symbol_value - sheader->sh_addr;
+  size_t offset = crc_symbol_address - sheader->sh_addr;
   if (offset + sizeof(uint32_t) > kcrctab_data->d_size
       || offset + sizeof(uint32_t) > sheader->sh_size)
     return false;
@@ -1519,13 +1522,17 @@ get_soname_of_elf_file(const string& path, string &soname)
           Elf_Scn* scn = gelf_offscn (elf, phdr->p_offset);
           GElf_Shdr shdr_mem;
           GElf_Shdr* shdr = gelf_getshdr (scn, &shdr_mem);
+	  if (!(shdr == NULL || (shdr->sh_type == SHT_DYNAMIC
+				 || shdr->sh_type == SHT_PROGBITS)))
+	    // This program header doesn't look like one we are
+	    // looking for.  Skip to the next.
+	    continue;
+
           size_t entsize = (shdr != NULL && shdr->sh_entsize != 0
                             ? shdr->sh_entsize
                             : gelf_fsize (elf, ELF_T_DYN, 1, EV_CURRENT));
           int maxcnt = (shdr != NULL
                         ? shdr->sh_size / entsize : INT_MAX);
-          ABG_ASSERT (shdr == NULL || (shdr->sh_type == SHT_DYNAMIC
-				       || shdr->sh_type == SHT_PROGBITS));
           Elf_Data* data = elf_getdata (scn, NULL);
           if (data == NULL)
             break;

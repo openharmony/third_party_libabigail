@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022 Red Hat, Inc.
+// Copyright (C) 2022-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -50,17 +50,21 @@ public:
   ~elf_based_reader();
 
   virtual void
-  reset(const std::string& elf_path,
-	const vector<char**>& debug_info_root_paths);
+  initialize(const std::string& elf_path,
+	     const vector<char**>& debug_info_root_paths);
 
   virtual ir::corpus_sptr
   read_and_add_corpus_to_group(ir::corpus_group& group,
 			       fe_iface::status& status);
+
   virtual void
   initialize(const string&		elf_path,
 	     const vector<char**>&	debug_info_root_paths,
 	     bool			load_all_types,
 	     bool			linux_kernel_mode) = 0;
+
+  virtual void
+  initialize(const std::string& corpus_path);
 };//end class elf_based_reader
 
 typedef std::shared_ptr<elf_based_reader> elf_based_reader_sptr;

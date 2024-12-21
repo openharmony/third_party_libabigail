@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 /// @file
 
@@ -11,12 +11,14 @@
 #include <stdint.h>
 #include <cstddef>
 #include <cstdlib>
+#include <regex.h>
 #include <list>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <typeinfo>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility> // for std::rel_ops, at least.
 #include <vector>
 #include "abg-interned-str.h"
@@ -54,9 +56,37 @@ using std::weak_ptr;
 using std::unordered_map;
 using std::string;
 using std::vector;
+using std::unordered_set;
+
+typedef unordered_set<string> string_set_type;
 
 // Pull in relational operators.
 using namespace std::rel_ops;
+
+namespace comparison
+{
+class diff_context;
+
+/// Convenience typedef for a shared pointer of @ref diff_context.
+typedef shared_ptr<diff_context> diff_context_sptr;
+
+/// Convenience typedef for a weak pointer of @ref diff_context.
+typedef weak_ptr<diff_context> diff_context_wptr;
+
+class diff;
+
+/// Convenience typedef for a shared_ptr for the @ref diff class
+typedef shared_ptr<diff> diff_sptr;
+
+/// Convenience typedef for a weak_ptr for the @ref diff class
+typedef weak_ptr<diff> diff_wptr;
+}
+
+namespace regex
+{
+/// A convenience typedef for a shared pointer of regex_t.
+typedef std::shared_ptr<regex_t> regex_t_sptr;
+}// end namespace regex
 
 namespace ir
 {
@@ -161,6 +191,9 @@ typedef shared_ptr<class_decl> class_decl_sptr;
 
 /// Convenience typedef for a vector of @ref class_decl_sptr
 typedef vector<class_decl_sptr> classes_type;
+
+/// Convenience typedef for a vector of @ref class_or_union_sptr
+typedef vector<class_or_union_sptr> classes_or_unions_type;
 
 /// Convenience typedef for a weak pointer on a @ref class_decl.
 typedef weak_ptr<class_decl> class_decl_wptr;
@@ -419,6 +452,9 @@ typedef_decl_sptr
 is_typedef(const type_or_decl_base_sptr);
 
 const typedef_decl*
+is_typedef(const type_or_decl_base*);
+
+const typedef_decl*
 is_typedef(const type_base*);
 
 typedef_decl*
@@ -445,17 +481,36 @@ is_class_type(const type_or_decl_base*);
 class_decl_sptr
 is_class_type(const type_or_decl_base_sptr&);
 
-bool
-is_declaration_only_class_or_union_type(const type_base *t);
+var_decl_sptr
+has_flexible_array_data_member(const class_decl&);
+
+var_decl_sptr
+has_flexible_array_data_member(const class_decl*);
+
+var_decl_sptr
+has_flexible_array_data_member(const class_decl_sptr&);
 
 bool
-is_declaration_only_class_or_union_type(const type_base_sptr&);
+is_declaration_only_class_or_union_type(const type_base *t,
+					bool look_through_decl_only = false);
+
+bool
+is_declaration_only_class_or_union_type(const type_base_sptr& t,
+					bool look_through_decl_only = false);
 
 class_or_union*
 is_class_or_union_type(const type_or_decl_base*);
 
 class_or_union_sptr
 is_class_or_union_type(const type_or_decl_base_sptr&);
+
+bool
+class_or_union_types_of_same_kind(const class_or_union *,
+				  const class_or_union*);
+
+bool
+class_or_union_types_of_same_kind(const class_or_union_sptr&,
+				  const class_or_union_sptr&);
 
 bool
 is_union_type(const type_or_decl_base&);
@@ -481,6 +536,9 @@ is_pointer_type(const type_or_decl_base*);
 pointer_type_def_sptr
 is_pointer_type(const type_or_decl_base_sptr&);
 
+bool
+is_typedef_ptr_or_ref_to_decl_only_class_or_union_type(const type_base* t);
+
 reference_type_def*
 is_reference_type(type_or_decl_base*);
 
@@ -492,6 +550,15 @@ is_reference_type(const type_or_decl_base_sptr&);
 
 const type_base*
 is_void_pointer_type(const type_base*);
+
+const type_base_sptr
+is_void_pointer_type(const type_base_sptr&);
+
+const type_base*
+is_void_pointer_type_equivalent(const type_base*);
+
+const type_base*
+is_void_pointer_type_equivalent(const type_base&);
 
 qualified_type_def*
 is_qualified_type(const type_or_decl_base*);
@@ -649,6 +716,12 @@ const var_decl_sptr
 get_next_data_member(const class_or_union_sptr&, const var_decl_sptr&);
 
 var_decl_sptr
+get_last_data_member(const class_or_union&);
+
+var_decl_sptr
+get_last_data_member(const class_or_union*);
+
+var_decl_sptr
 get_last_data_member(const class_or_union_sptr&);
 
 bool
@@ -675,6 +748,15 @@ is_anonymous_data_member(const var_decl*);
 bool
 is_anonymous_data_member(const var_decl&);
 
+bool
+is_data_member_of_anonymous_class_or_union(const var_decl&);
+
+bool
+is_data_member_of_anonymous_class_or_union(const var_decl*);
+
+bool
+is_data_member_of_anonymous_class_or_union(const var_decl_sptr&);
+
 const var_decl_sptr
 get_first_non_anonymous_data_member(const var_decl_sptr);
 
@@ -688,8 +770,12 @@ anonymous_data_member_to_class_or_union(const var_decl*);
 class_or_union_sptr
 anonymous_data_member_to_class_or_union(const var_decl_sptr&);
 
+class_or_union_sptr
+anonymous_data_member_to_class_or_union(const var_decl&);
+
 bool
-scope_anonymous_or_typedef_named(const decl_base&);
+anonymous_data_member_exists_in_class(const var_decl& anon_dm,
+				      const class_or_union& clazz);
 
 bool
 is_anonymous_or_typedef_named(const decl_base&);
@@ -732,6 +818,11 @@ get_data_member_offset(const decl_base_sptr);
 
 uint64_t
 get_absolute_data_member_offset(const var_decl&);
+
+bool
+get_next_data_member_offset(const class_or_union*,
+			    const var_decl_sptr&,
+			    uint64_t&);
 
 bool
 get_next_data_member_offset(const class_or_union_sptr&,
@@ -961,6 +1052,9 @@ interned_string
 get_function_type_name(const function_type&, bool internal = false);
 
 interned_string
+get_function_id_or_pretty_representation(function_decl *fn);
+
+interned_string
 get_method_type_name(const method_type_sptr&, bool internal = false);
 
 interned_string
@@ -1030,6 +1124,33 @@ get_class_or_union_flat_representation(const class_or_union_sptr& cou,
 				       bool qualified_name = true);
 
 string
+get_enum_flat_representation(const enum_type_decl& enum_type,
+			     const string& indent,
+			     bool one_line,
+			     bool internal,
+			     bool qualified_names);
+
+string
+get_enum_flat_representation(const enum_type_decl* enum_type,
+			     const string& indent,
+			     bool one_line,
+			     bool internal,
+			     bool qualified_names);
+
+string
+get_enum_flat_representation(const enum_type_decl_sptr& enum_type,
+			     const string& indent,
+			     bool one_line,
+			     bool qualified_names);
+
+string
+get_class_or_enum_flat_representation(const type_base& coe,
+				      const string& indent,
+				      bool one_line,
+				      bool internal,
+				      bool qualified_name);
+
+string
 get_debug_representation(const type_or_decl_base*);
 
 var_decl_sptr
@@ -1055,6 +1176,9 @@ debug(const decl_base* artifact);
 
 bool
 debug_equals(const type_or_decl_base *l, const type_or_decl_base *r);
+
+void
+debug_comp_stack(const environment& env);
 
 bool
 odr_is_relevant(const type_or_decl_base&);
@@ -1137,6 +1261,9 @@ lookup_class_type(const interned_string&, const corpus&);
 const type_base_wptrs_type*
 lookup_class_types(const interned_string&, const corpus&);
 
+const type_base_wptrs_type*
+lookup_union_types(const interned_string&, const corpus&);
+
 bool
 lookup_decl_only_class_types(const interned_string&,
 			     const corpus&,
@@ -1144,6 +1271,9 @@ lookup_decl_only_class_types(const interned_string&,
 
 const type_base_wptrs_type*
 lookup_class_types(const string&, const corpus&);
+
+const type_base_wptrs_type*
+lookup_union_types(const string&, const corpus&);
 
 class_decl_sptr
 lookup_class_type_per_location(const interned_string&, const corpus&);
@@ -1414,6 +1544,12 @@ is_non_canonicalized_type(const type_base *);
 bool
 is_non_canonicalized_type(const type_base_sptr&);
 
+bool
+is_unique_type(const type_base_sptr&);
+
+bool
+is_unique_type(const type_base*);
+
 /// For a given type, return its exemplar type.
 ///
 /// For a given type, its exemplar type is either its canonical type
@@ -1445,6 +1581,13 @@ build_internal_underlying_enum_type_name(const string &base_name,
 					 bool is_anonymous,
 					 uint64_t size);
 
+var_decl_sptr
+find_first_data_member_matching_regexp(const class_or_union& t,
+				       const regex::regex_t_sptr& r);
+
+var_decl_sptr
+find_last_data_member_matching_regexp(const class_or_union& t,
+				      const regex::regex_t_sptr& regex);
 } // end namespace ir
 
 using namespace abigail::ir;

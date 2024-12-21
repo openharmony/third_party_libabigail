@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022 Red Hat, Inc.
+// Copyright (C) 2022-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -132,6 +132,11 @@ find_alt_dwarf_debug_info_path(const vector<char**> root_dirs,
     return false;
 
   string altfile_name = tools_utils::trim_leading_string(alt_file_name, "../");
+  // In case the alt dwarf debug info file is to be found under
+  // "/usr/lib/debug", look for it under the provided root directories
+  // instead.
+  altfile_name = tools_utils::trim_leading_string(altfile_name,
+						  "/usr/lib/debug/");
 
   for (vector<char**>::const_iterator i = root_dirs.begin();
        i != root_dirs.end();
@@ -225,10 +230,10 @@ find_alt_dwarf_debug_info(Dwfl_Module *elf_module,
       // If we reach this point it means we have found the path to the
       // alternate debuginfo file and it's in alt_file_path.  So let's
       // open it and read it.
-      int fd = open(alt_file_path.c_str(), O_RDONLY);
-      if (fd == -1)
+      alt_fd = open(alt_file_path.c_str(), O_RDONLY);
+      if (alt_fd == -1)
 	return result;
-      result = dwarf_begin(fd, DWARF_C_READ);
+      result = dwarf_begin(alt_fd, DWARF_C_READ);
 
 #ifdef LIBDW_HAS_DWARF_GETALT
       Dwarf_Addr bias = 0;
@@ -271,7 +276,10 @@ struct reader::priv
   string				alt_dwarf_path;
   int					alt_dwarf_fd		= 0;
   Elf_Scn*				ctf_section		= nullptr;
+  int					alt_ctf_fd		= 0;
+  Elf*					alt_ctf_handle		= nullptr;
   Elf_Scn*				alt_ctf_section	= nullptr;
+  Elf_Scn*				btf_section		= nullptr;
 
   priv(reader& reeder, const std::string& elf_path,
        const vector<char**>& debug_info_roots)
@@ -281,6 +289,12 @@ struct reader::priv
     initialize(debug_info_roots);
   }
 
+  ~priv()
+  {
+    clear_alt_dwarf_debug_info_data();
+    clear_alt_ctf_debug_info_data();
+  }
+
   /// Reset the private data of @elf elf::reader.
   ///
   /// @param debug_info_roots the vector of new directories where to
@@ -288,11 +302,26 @@ struct reader::priv
   void
   initialize(const vector<char**>& debug_info_roots)
   {
-    debug_info_root_paths = debug_info_roots;
+    clear_alt_dwarf_debug_info_data();
+    clear_alt_ctf_debug_info_data();
+
+    elf_handle = nullptr;
+    symtab_section = nullptr;
+    elf_architecture.clear();
+    dt_needed.clear();
     symt.reset();
+    debug_info_root_paths = debug_info_roots;
+    memset(&offline_callbacks, 0, sizeof(offline_callbacks));
     dwfl_handle.reset();
     elf_module = nullptr;
-    elf_handle = nullptr;
+    dwarf_handle = nullptr;
+    alt_dwarf_handle = nullptr;
+    alt_dwarf_path.clear();
+    alt_dwarf_fd = 0;
+    ctf_section = nullptr;
+    alt_ctf_section = nullptr;
+    alt_ctf_handle = nullptr;
+    alt_ctf_fd = 0;
   }
 
   /// Setup the necessary plumbing to open the ELF file and find all
@@ -348,6 +377,23 @@ struct reader::priv
     return result;
   }
 
+  /// Clear the resources related to the alternate DWARF data.
+  void
+  clear_alt_dwarf_debug_info_data()
+  {
+    if (alt_dwarf_fd)
+      {
+        if (alt_dwarf_handle)
+          {
+            dwarf_end(alt_dwarf_handle);
+            alt_dwarf_handle = nullptr;
+          }
+        close(alt_dwarf_fd);
+        alt_dwarf_fd = 0;
+      }
+    alt_dwarf_path.clear();
+  }
+
   /// Locate the DWARF debug info in the ELF file.
   ///
   /// This also knows how to locate split debug info.
@@ -379,6 +425,22 @@ struct reader::priv
 						 alt_dwarf_fd);
   }
 
+  /// Clear the resources related to the alternate CTF data.
+  void
+  clear_alt_ctf_debug_info_data()
+  {
+    if (alt_ctf_fd)
+      {
+	close(alt_ctf_fd);
+	alt_ctf_fd = 0;
+      }
+    if (alt_ctf_handle)
+      {
+	elf_end(alt_ctf_handle);
+	alt_ctf_handle = nullptr;
+      }
+  }
+
   /// Locate the CTF "alternate" debug information associated with the
   /// current ELF file ( and split out somewhere else).
   ///
@@ -386,6 +448,9 @@ struct reader::priv
   void
   locate_alt_ctf_debug_info()
   {
+    if (alt_ctf_section)
+      return;
+
     Elf_Scn *section =
       elf_helpers::find_section(elf_handle,
 				".gnu_debuglink",
@@ -405,24 +470,20 @@ struct reader::priv
 	  if (!tools_utils::find_file_under_dir(*path, name, file_path))
 	    continue;
 
-	  int fd;
-	  if ((fd = open(file_path.c_str(), O_RDONLY)) == -1)
+	  if ((alt_ctf_fd = open(file_path.c_str(), O_RDONLY)) == -1)
 	    continue;
 
-	  Elf *hdl;
-	  if ((hdl = elf_begin(fd, ELF_C_READ, nullptr)) == nullptr)
-	    {
-	      close(fd);
-	      continue;
-	    }
+	  if ((alt_ctf_handle = elf_begin(alt_ctf_fd,
+					  ELF_C_READ,
+					  nullptr)) == nullptr)
+	    continue;
 
 	  // unlikely .ctf was designed to be present in stripped file
 	  alt_ctf_section =
-	    elf_helpers::find_section(hdl, ".ctf", SHT_PROGBITS);
-          break;
+	    elf_helpers::find_section(alt_ctf_handle, ".ctf", SHT_PROGBITS);
 
-	  elf_end(hdl);
-	  close(fd);
+	  if (alt_ctf_section)
+	    break;
 	}
   }
 
@@ -466,8 +527,8 @@ reader::reader(const string&		elf_path,
 reader::~reader()
 {delete priv_;}
 
-/// Resets (erase) the resources used by the current @ref
-/// elf::reader type.
+/// Re-initialize the resources used by the current @ref elf::reader
+/// type.
 ///
 /// This lets the reader in a state where it's ready to read from
 /// another ELF file.
@@ -477,16 +538,29 @@ reader::~reader()
 /// @param debug_info_roots a vector of directory paths to look into
 /// for split debug information files.
 void
-reader::reset(const std::string&	elf_path,
-	      const vector<char**>&	debug_info_roots)
+reader::initialize(const std::string&		elf_path,
+		   const vector<char**>&	debug_info_roots)
 {
-  fe_iface::options_type opts = options();
-  fe_iface::reset(elf_path, opts.env);
+  fe_iface::initialize(elf_path);
   corpus_path(elf_path);
   priv_->initialize(debug_info_roots);
   priv_->crack_open_elf_file();
   priv_->locate_dwarf_debug_info();
   priv_->locate_ctf_debug_info();
+}
+
+/// Re-initialize the resources used by the current @ref elf::reader
+/// type.
+///
+/// This lets the reader in a state where it's ready to read from
+/// another ELF file.
+///
+/// @param elf_path the new ELF path to read from.
+void
+reader::initialize(const std::string&	elf_path)
+{
+  vector<char**> v;
+  initialize(elf_path, v);
 }
 
 /// Getter of the vector of directory paths to look into for split
@@ -546,6 +620,13 @@ reader::has_dwarf_debug_info() const
 bool
 reader::has_ctf_debug_info() const
 {return (priv_->ctf_section != nullptr);}
+
+/// Test if the binary has BTF debug info.
+///
+/// @return true iff the binary has BTF debug info
+bool
+reader::has_btf_debug_info() const
+{return (priv_->btf_section != nullptr);}
 
 /// Getter of the handle use to access DWARF information from the
 /// alternate split DWARF information.
@@ -640,6 +721,20 @@ reader::find_alternate_ctf_section() const
     priv_->locate_alt_ctf_debug_info();
 
   return priv_->alt_ctf_section;
+}
+
+/// Find and return a pointer to the BTF section of the current ELF
+/// file.
+///
+/// @return a pointer to the BTF section of the current ELF file.
+const Elf_Scn*
+reader::find_btf_section() const
+{
+  if (priv_->btf_section == nullptr)
+    priv_->btf_section =
+      elf_helpers::find_section(priv_->elf_handle,
+				".BTF", SHT_PROGBITS);
+  return priv_->btf_section;
 }
 
 /// Get the value of the DT_NEEDED property of the current ELF file.
@@ -881,11 +976,14 @@ reader::read_corpus(status& status)
   corpus()->set_architecture_name(elf_architecture());
 
   // See if we could find symbol tables.
-  if (!symtab() || !symtab()->has_symbols())
+  if (!symtab())
     {
-      status |= STATUS_NO_SYMBOLS_FOUND;
-      // We found no ELF symbol, so we can't handle the binary.
-      return corpus_sptr();
+      status |= STATUS_NO_SYMBOLS_FOUND | STATUS_OK;
+      // We found no ELF symbol, so we can't handle the binary.  Note
+      // that we could have found a symbol table with no defined &
+      // exported ELF symbols in it.  Both cases are handled as an
+      // empty corpus.
+      return corpus();
     }
 
   // Set symbols information to the corpus.

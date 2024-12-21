@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception -*- mode:
 // C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 //
 //Author: Dodji Seketeli
 
@@ -28,6 +28,7 @@ ABG_BEGIN_EXPORT_DECLARATIONS
 #include "abg-interned-str.h"
 #include "abg-ir.h"
 #include "abg-corpus.h"
+#include "abg-regex.h"
 
 ABG_END_EXPORT_DECLARATIONS
 // </headers defining libabigail's API>
@@ -1040,25 +1041,34 @@ return_comparison_result(T& l, T& r, bool value,
 	  // eventually fails.
 	  env.priv_->add_to_types_with_non_confirmed_propagated_ct(is_type(&r));
 	}
-      else if (value == true && env.priv_->right_type_comp_operands_.empty())
+      else if (value == true
+	       && env.priv_->right_type_comp_operands_.empty()
+	       && is_type(&r)->priv_->canonical_type_propagated()
+	       && !is_type(&r)->priv_->propagated_canonical_type_confirmed())
 	{
 	  // The type provided in the 'r' argument is the type that is
 	  // being canonicalized; 'r' is not a mere subtype being
 	  // compared, it's the whole type being canonicalized.  And
-	  // its canonicalization has just succeeded.  So let's
-	  // confirm the "canonical type propagation" of all the
-	  // sub-types that were compared during the comparison of
-	  // 'r'.
+	  // its canonicalization has just succeeded.
+	  //
+	  // Let's confirm the canonical type resulting from the
+	  // "canonical type propagation" optimization.
 	  env.priv_->confirm_ct_propagation(&r);
 	}
+      else if (value == true
+	       && is_type(&r)->priv_->canonical_type_propagated()
+	       && !is_type(&r)->priv_->propagated_canonical_type_confirmed())
+	// In any other case, we are not sure if propagated types
+	// should be confirmed yet.  So let's mark them as such.
+	env.priv_->add_to_types_with_non_confirmed_propagated_ct(is_type(&r));
       else if (value == false)
 	{
 	  // The comparison of the current sub-type failed.  So all
-	  // the types in
-	  // env.prix_->types_with_non_confirmed_propagated_ct_
+	  // the with non-confirmed propagated types (those in
+	  // env.prix_->types_with_non_confirmed_propagated_ct_)
 	  // should see their tentatively propagated canonical type
 	  // cancelled.
-	  env.priv_->cancel_ct_propagation(&r);
+	  env.priv_->cancel_all_non_confirmed_propagated_canonical_types();
 	}
     }
 
@@ -1078,8 +1088,38 @@ return_comparison_result(T& l, T& r, bool value,
     // shall now confirm the propagation for all those types.
     env.priv_->confirm_ct_propagation();
 
+#ifdef WITH_DEBUG_SELF_COMPARISON
+  if (value == false && env.priv_->right_type_comp_operands_.empty())
+    {
+      for (const auto i : env.priv_->types_with_non_confirmed_propagated_ct_)
+	{
+	  type_base *t = reinterpret_cast<type_base*>(i);
+	  env.priv_->check_abixml_canonical_type_propagation_during_self_comp(t);
+	}
+    }
+#endif
+
   ABG_RETURN(value);
 }
+
+#define CACHE_AND_RETURN_COMPARISON_RESULT(value)			\
+  do									\
+    {									\
+      bool res = return_comparison_result(l, r, value);		\
+      l.get_environment().priv_->cache_type_comparison_result(l, r, res); \
+      return res;							\
+    } while (false)
+
+/// Cache the result of a comparison between too artifacts (l & r) and
+/// return immediately.
+///
+/// @param value the value to cache.
+#define CACHE_COMPARISON_RESULT_AND_RETURN(value)			\
+  do									\
+    {									\
+      l.get_environment().priv_->cache_type_comparison_result(l, r, value); \
+      return value;							\
+    } while (false)
 
 /// Getter of all types types sorted by their pretty representation.
 ///
@@ -1444,6 +1484,8 @@ translation_unit::bind_function_type_life_time(function_type_sptr ftype) const
     ABG_ASSERT(existing_tu == this);
   else
     ftype->set_translation_unit(const_cast<translation_unit*>(this));
+
+  maybe_update_types_lookup_map(ftype);
 }
 
 /// This implements the ir_traversable_base::traverse virtual
@@ -3246,6 +3288,14 @@ struct decl_topo_comp
     if (!f)
       return false;
 
+    // Unique types that are artificially created in the environment
+    // don't have locations.  They ought to be compared on the basis
+    // of their pretty representation before we start looking at IR
+    // nodes' locations down the road.
+    if (is_unique_type(is_type(f)) || is_unique_type(is_type(s)))
+      return (get_pretty_representation(f, /*internal=*/false)
+	      < get_pretty_representation(s, /*internal=*/false));
+
     // If both decls come from an abixml file, keep the order they
     // have from that abixml file.
     if ((!f->get_corpus() && !s->get_corpus())
@@ -3480,8 +3530,13 @@ sort_types(const canonical_type_sptr_set_type& types,
   std::stable_sort(result.begin(), result.end(), comp);
 }
 
-/// Get a @ref type_decl that represents a "void" type for the current
-/// environment.
+/// Get the unique @ref type_decl that represents a "void" type for
+/// the current environment.  This node must be the only one
+/// representing a void type in the system.
+///
+/// Note that upon first use of this IR node (by the relevant
+/// front-end, for instance) it must be added to a scope using e.g,
+/// the @ref add_decl_to_scope() function.
 ///
 /// @return the @ref type_decl that represents a "void" type.
 const type_base_sptr&
@@ -3494,8 +3549,31 @@ environment::get_void_type() const
   return priv_->void_type_;
 }
 
+/// Getter of the "pointer-to-void" IR node that is shared across the
+/// ABI corpus.  This node must be the only one representing a void
+/// pointer type in the system.
+///
+/// Note that upon first use of this IR node (by the relevant
+/// front-end, for instance) it must be added to a scope using e.g,
+/// the @ref add_decl_to_scope() function.
+///
+/// @return the "pointer-to-void" IR node.
+const type_base_sptr&
+environment::get_void_pointer_type() const
+{
+  if (!priv_->void_pointer_type_)
+    priv_->void_pointer_type_.reset(new pointer_type_def(get_void_type(),
+							 0, 0, location()));
+  return priv_->void_pointer_type_;
+}
+
 /// Get a @ref type_decl instance that represents a the type of a
-/// variadic function parameter.
+/// variadic function parameter. This node must be the only one
+/// representing a variadic parameter type in the system.
+///
+/// Note that upon first use of this IR node (by the relevant
+/// front-end, for instance) it must be added to a scope using e.g,
+/// the @ref add_decl_to_scope() function.
 ///
 /// @return the Get a @ref type_decl instance that represents a the
 /// type of a variadic function parameter.
@@ -3504,10 +3582,19 @@ environment::get_variadic_parameter_type() const
 {
   if (!priv_->variadic_marker_type_)
     priv_->variadic_marker_type_.
-      reset(new type_decl(*this,
-			  intern("variadic parameter type"),
+      reset(new type_decl(*this, intern(get_variadic_parameter_type_name()),
 			  0, 0, location()));
   return priv_->variadic_marker_type_;
+}
+
+/// Getter of the name of the variadic parameter type.
+///
+/// @return the name of the variadic parameter type.
+string&
+environment::get_variadic_parameter_type_name()
+{
+  static string variadic_parameter_type_name = "variadic parameter type";
+  return variadic_parameter_type_name;
 }
 
 /// Test if the canonicalization of types created out of the current
@@ -3612,7 +3699,7 @@ environment::is_void_type(const type_base_sptr& t) const
 {
   if (!t)
     return false;
-  return t.get() == get_void_type().get();
+  return is_void_type(t.get());
 }
 
 /// Test if a given type is a void type as defined in the current
@@ -3627,7 +3714,40 @@ environment::is_void_type(const type_base* t) const
 {
   if (!t)
     return false;
-  return t == get_void_type().get();
+  return (t == get_void_type().get()
+	  || (is_type_decl(t) && is_type_decl(t)->get_name() == "void"));
+}
+
+/// Test if a given type is the same as the void pointer type of the
+/// environment.
+///
+/// @param t the IR type to test.
+///
+/// @return true iff @p t is the void pointer returned by
+/// environment::get_void_pointer_type().
+bool
+environment::is_void_pointer_type(const type_base_sptr& t) const
+{
+  if (!t)
+    return false;
+
+  return t.get() == get_void_pointer_type().get();
+}
+
+/// Test if a given type is the same as the void pointer type of the
+/// environment.
+///
+/// @param t the IR type to test.
+///
+/// @return true iff @p t is the void pointer returned by
+/// environment::get_void_pointer_type().
+bool
+environment::is_void_pointer_type(const type_base* t) const
+{
+  if (!t)
+    return false;
+
+  return t == get_void_pointer_type().get();
 }
 
 /// Test if a type is a variadic parameter type as defined in the
@@ -3864,9 +3984,39 @@ environment::get_canonical_type(const char* name, unsigned index)
 ///
 /// @return the set of abixml type-id and the pointer value of the
 /// (canonical) type it's associated to.
-unordered_map<string, uintptr_t>&
+const unordered_map<string, uintptr_t>&
 environment::get_type_id_canonical_type_map() const
-{return priv_->type_id_canonical_type_map_;}
+{return priv_->get_type_id_canonical_type_map();}
+
+/// Get the set of abixml type-id and the pointer value of the
+/// (canonical) type it's associated to.
+///
+/// This is useful for debugging purposes, especially in the context
+/// of the use of the command:
+///   'abidw --debug-abidiff <binary>'.
+///
+/// @return the set of abixml type-id and the pointer value of the
+/// (canonical) type it's associated to.
+unordered_map<string, uintptr_t>&
+environment::get_type_id_canonical_type_map()
+{return priv_->get_type_id_canonical_type_map();}
+
+/// Getter of the map that associates the values of type pointers to
+/// their type-id strings.
+///
+/// Note that this map is populated at abixml reading time, (by
+/// build_type()) when a given XML element representing a type is
+/// read into a corresponding abigail::ir::type_base.
+///
+/// This is used only for the purpose of debugging the
+/// self-comparison process.  That is, when invoking "abidw
+/// --debug-abidiff".
+///
+/// @return the map that associates the values of type pointers to
+/// their type-id strings.
+const unordered_map<uintptr_t, string>&
+environment::get_pointer_type_id_map() const
+{return priv_->get_pointer_type_id_map();}
 
 /// Getter of the map that associates the values of type pointers to
 /// their type-id strings.
@@ -3883,7 +4033,7 @@ environment::get_type_id_canonical_type_map() const
 /// their type-id strings.
 unordered_map<uintptr_t, string>&
 environment::get_pointer_type_id_map()
-{return priv_->pointer_type_id_map_;}
+{return priv_->get_pointer_type_id_map();}
 
 /// Getter of the type-id that corresponds to the value of a pointer
 /// to abigail::ir::type_base that was created from the abixml reader.
@@ -3901,13 +4051,27 @@ environment::get_pointer_type_id_map()
 ///
 /// @return the type-id strings that corresponds
 string
-environment::get_type_id_from_pointer(uintptr_t ptr)
-{
-  auto it = get_pointer_type_id_map().find(ptr);
-  if (it != get_pointer_type_id_map().end())
-    return it->second;
-  return "";
-}
+environment::get_type_id_from_pointer(uintptr_t ptr) const
+{return priv_->get_type_id_from_pointer(ptr);}
+
+/// Getter of the type-id that corresponds to the value of an
+/// abigail::ir::type_base that was created from the abixml reader.
+///
+/// That value is retrieved from the map returned from
+/// environment::get_pointer_type_id_map().
+///
+/// That map is populated at abixml reading time, (by build_type())
+/// when a given XML element representing a type is read into a
+/// corresponding abigail::ir::type_base.
+///
+/// This is used only for the purpose of debugging the
+/// self-comparison process.  That is, when invoking "abidw
+/// --debug-abidiff".
+///
+/// @return the type-id strings that corresponds
+string
+environment::get_type_id_from_type(const type_base *t) const
+{return priv_->get_type_id_from_type(t);}
 
 /// Getter of the canonical type of the artifact designated by a
 /// type-id.
@@ -3924,16 +4088,10 @@ environment::get_type_id_from_pointer(uintptr_t ptr)
 /// @return the set of abixml type-id and the pointer value of the
 /// (canonical) type it's associated to.
 uintptr_t
-environment::get_canonical_type_from_type_id(const char* type_id)
-{
-  if (!type_id)
-    return 0;
-  auto it = get_type_id_canonical_type_map().find(type_id);
-  if (it != get_type_id_canonical_type_map().end())
-    return it->second;
-  return 0;
-}
+environment::get_canonical_type_from_type_id(const char* type_id) const
+{return priv_->get_canonical_type_from_type_id(type_id);}
 #endif
+
 // </environment stuff>
 
 // <type_or_decl_base stuff>
@@ -5088,7 +5246,8 @@ get_decl_name_for_comparison(const decl_base &d)
     }
 
   interned_string n = (is_anonymous_or_typedef_named(d)
-		       || scope_anonymous_or_typedef_named(d))
+		       || d.get_has_anonymous_parent()
+		       || is_typedef(&d))
     ? d.get_name()
     : d.get_qualified_name(/*internal=*/true);
   return n;
@@ -5730,7 +5889,7 @@ get_first_non_anonymous_data_member(const var_decl_sptr anon_dm)
 /// @return the data member that is located right after @p
 /// data_member.
 const var_decl_sptr
-get_next_data_member(const class_or_union_sptr &klass,
+get_next_data_member(const class_or_union *klass,
 		     const var_decl_sptr &data_member)
 {
   if (!klass ||!data_member)
@@ -5751,12 +5910,40 @@ get_next_data_member(const class_or_union_sptr &klass,
   return var_decl_sptr();
 }
 
+/// In the context of a given class or union, this function returns
+/// the data member that is located after a given data member.
+///
+/// @param klass the class or union to consider.
+///
+/// @param the data member to consider.
+///
+/// @return the data member that is located right after @p
+/// data_member.
+const var_decl_sptr
+get_next_data_member(const class_or_union_sptr& klass,
+		     const var_decl_sptr &data_member)
+{return get_next_data_member(klass.get(), data_member);}
+
+/// Get the last data member of a class type.
+///
+/// @param klass the class type to consider.
+var_decl_sptr
+get_last_data_member(const class_or_union& klass)
+{return klass.get_non_static_data_members().back();}
+
+/// Get the last data member of a class type.
+///
+/// @param klass the class type to consider.
+var_decl_sptr
+get_last_data_member(const class_or_union* klass)
+{return get_last_data_member(*klass);}
+
 /// Get the last data member of a class type.
 ///
 /// @param klass the class type to consider.
 var_decl_sptr
 get_last_data_member(const class_or_union_sptr &klass)
-{return klass->get_non_static_data_members().back();}
+{return get_last_data_member(klass.get());}
 
 /// Test if a decl is an anonymous data member.
 ///
@@ -5874,6 +6061,47 @@ is_anonymous_data_member(const var_decl& d)
 	  && is_class_or_union_type(d.get_type()));
 }
 
+/// Test if a @ref var_decl is a data member belonging to an anonymous
+/// type.
+///
+/// @param d the @ref var_decl to consider.
+///
+/// @return true iff @p d is a data member belonging to an anonymous
+/// type.
+bool
+is_data_member_of_anonymous_class_or_union(const var_decl& d)
+{
+  if (is_data_member(d))
+    {
+      scope_decl* scope = d.get_scope();
+      if (scope && scope->get_is_anonymous())
+	return true;
+    }
+  return false;
+}
+
+/// Test if a @ref var_decl is a data member belonging to an anonymous
+/// type.
+///
+/// @param d the @ref var_decl to consider.
+///
+/// @return true iff @p d is a data member belonging to an anonymous
+/// type.
+bool
+is_data_member_of_anonymous_class_or_union(const var_decl* d)
+{return is_data_member_of_anonymous_class_or_union(*d);}
+
+/// Test if a @ref var_decl is a data member belonging to an anonymous
+/// type.
+///
+/// @param d the @ref var_decl to consider.
+///
+/// @return true iff @p d is a data member belonging to an anonymous
+/// type.
+bool
+is_data_member_of_anonymous_class_or_union(const var_decl_sptr& d)
+{return is_data_member_of_anonymous_class_or_union(d.get());}
+
 /// Get the @ref class_or_union type of a given anonymous data member.
 ///
 /// @param d the anonymous data member to consider.
@@ -5886,6 +6114,20 @@ anonymous_data_member_to_class_or_union(const var_decl* d)
   if ((d = is_anonymous_data_member(d)))
     return is_class_or_union_type(d->get_type().get());
   return 0;
+}
+
+/// Get the @ref class_or_union type of a given anonymous data member.
+///
+/// @param d the anonymous data member to consider.
+///
+/// @return the @ref class_or_union type of the anonymous data member
+/// @p d.
+class_or_union_sptr
+anonymous_data_member_to_class_or_union(const var_decl& d)
+{
+  if (is_anonymous_data_member(d))
+    return is_class_or_union_type(d.get_type());
+  return class_or_union_sptr();
 }
 
 /// Test if a data member has annonymous type or not.
@@ -5943,20 +6185,46 @@ anonymous_data_member_to_class_or_union(const var_decl_sptr &d)
   return class_or_union_sptr();
 }
 
-/// Test if the scope of a given decl is anonymous or anonymous with a
-/// naming typedef.
+/// Test if a given anonymous data member exists in a class or union.
 ///
-/// @param d the decl consider.
+/// @param anon_dm the anonymous data member to consider.
 ///
-/// @return true iff the scope of @p d is anonymous or anonymous with
-/// a naming typedef.
+/// @param clazz the class to consider.
+///
+/// @return true iff @p anon_dm exists in the @clazz.
 bool
-scope_anonymous_or_typedef_named(const decl_base& d)
+anonymous_data_member_exists_in_class(const var_decl& anon_dm,
+				      const class_or_union& clazz)
 {
-  if (d.get_has_anonymous_parent()
-      || (d.get_scope() && d.get_scope()->get_naming_typedef()))
-    return true;
-  return false;
+  if (!anon_dm.get_is_anonymous()
+      || !is_class_or_union_type(anon_dm.get_type()))
+    return false;
+
+  class_or_union_sptr cl = is_class_or_union_type(anon_dm.get_type());
+  ABG_ASSERT(cl);
+
+  // Look for the presence of each data member of anon_dm in clazz.
+  //
+  // If one data member of anon_dm is not present in clazz, then the
+  // data member anon_dm is considered to not exist in clazz.
+  for (auto anon_dm_m : cl->get_non_static_data_members())
+    {
+      // If the data member anon_dm_m is not an anonymous data member,
+      // it's easy to look for it.
+      if (!is_anonymous_data_member(anon_dm_m))
+	{
+	  if (!clazz.find_data_member(anon_dm_m->get_name()))
+	    return false;
+	}
+      // If anon_dm_m is itself an anonymous data member then recurse
+      else
+	{
+	  if (!anonymous_data_member_exists_in_class(*anon_dm_m, clazz))
+	    return false;
+	}
+    }
+
+  return true;
 }
 
 /// Test if a given decl is anonymous or has a naming typedef.
@@ -6040,7 +6308,7 @@ get_data_member_offset(const decl_base_sptr d)
 /// @return true iff the data member coming right after @p dm was
 /// found.
 bool
-get_next_data_member_offset(const class_or_union_sptr& klass,
+get_next_data_member_offset(const class_or_union* klass,
 			    const var_decl_sptr& dm,
 			    uint64_t& offset)
 {
@@ -6050,6 +6318,29 @@ get_next_data_member_offset(const class_or_union_sptr& klass,
   offset = get_data_member_offset(next_dm);
   return true;
 }
+
+/// Get the offset of the non-static data member that comes after a
+/// given one.
+///
+/// If there is no data member after after the one given to this
+/// function (maybe because the given one is the last data member of
+/// the class type) then the function return false.
+///
+/// @param klass the class to consider.
+///
+/// @param dm the data member before the one we want to retrieve.
+///
+/// @param offset out parameter.  This parameter is set by the
+/// function to the offset of the data member that comes right after
+/// the data member @p dm, iff the function returns true.
+///
+/// @return true iff the data member coming right after @p dm was
+/// found.
+bool
+get_next_data_member_offset(const class_or_union_sptr& klass,
+			    const var_decl_sptr& dm,
+			    uint64_t& offset)
+{return get_next_data_member_offset(klass.get(), dm, offset);}
 
 /// Get the absolute offset of a data member.
 ///
@@ -8095,7 +8386,8 @@ scope_decl::~scope_decl()
 {}
 
 /// Appends a declaration to a given scope, if the declaration
-/// doesn't already belong to one.
+/// doesn't already belong to one and if the declaration is not for a
+/// type that is supposed to be unique.
 ///
 /// @param decl the declaration to add to the scope
 ///
@@ -8499,7 +8791,9 @@ get_type_name(const type_base_sptr& t, bool qualified, bool internal)
 static bool
 has_generic_anonymous_internal_type_name(const decl_base *d)
 {
-  return is_class_or_union_type(d) || is_enum_type(d);
+  return (is_class_or_union_type(d)
+	  || is_enum_type(d)
+	  || is_subrange_type(d));
 }
 
 /// Return the generic internal name of an anonymous type.
@@ -8529,6 +8823,9 @@ get_generic_anonymous_internal_type_name(const decl_base *d)
   else if (is_enum_type(d))
     result =
       env.intern(tools_utils::get_anonymous_enum_internal_name_prefix());
+  else if (is_subrange_type(d))
+    result =
+      env.intern(tools_utils::get_anonymous_subrange_internal_name_prefix());
   else
     ABG_ASSERT_NOT_REACHED;
 
@@ -8589,6 +8886,8 @@ get_type_name(const type_base* t, bool qualified, bool internal)
       return fn_type->get_cached_name(internal);
     }
 
+  const environment&env = d->get_environment();
+
   // All anonymous types of a given kind get to have the same internal
   // name for internal purpose.  This to allow them to be compared
   // among themselves during type canonicalization.
@@ -8601,11 +8900,22 @@ get_type_name(const type_base* t, bool qualified, bool internal)
 	  return t->get_environment().intern(r);
 	}
 
+      if (is_typedef(t))
+	return d->get_name();
+
       if (qualified)
 	return d->get_qualified_name(internal);
 
-      const environment&env = d->get_environment();
       return env.intern(get_internal_integral_type_name(t));
+    }
+
+  if (d->get_is_anonymous())
+    {
+      if (is_class_or_union_type(t) || is_enum_type(t))
+	return env.intern
+	  (get_class_or_enum_flat_representation (*t, "",
+						  /*one_line=*/true,
+						  internal, qualified));
     }
 
   if (qualified)
@@ -8718,9 +9028,8 @@ get_name_of_qualified_type(const type_base_sptr& underlying_type,
 
   if (!quals_repr.empty())
     {
-      if (is_pointer_type(underlying_type)
-	  || is_reference_type(underlying_type)
-	  || is_array_type(underlying_type))
+      if (is_pointer_type(peel_qualified_type(underlying_type))
+	  || is_reference_type(peel_qualified_type(underlying_type)))
 	{
 	  name += " ";
 	  name += quals_repr;
@@ -8813,6 +9122,30 @@ get_function_type_name(const function_type& fn_type,
   o <<")";
 
   return env.intern(o.str());
+}
+
+/// Get the ID of a function, or, if the ID can designate several
+/// different functions, get its pretty representation.
+///
+/// @param fn the function to consider
+///
+/// @return the function ID of pretty representation of @p fn.
+interned_string
+get_function_id_or_pretty_representation(function_decl *fn)
+{
+  ABG_ASSERT(fn);
+
+  interned_string result = fn->get_environment().intern(fn->get_id());
+
+  if (corpus *c = fn->get_corpus())
+    {
+      corpus::exported_decls_builder_sptr b =
+	c->get_exported_decls_builder();
+      if (b->fn_id_maps_to_several_fns(fn))
+	result = fn->get_environment().intern(fn->get_pretty_representation());
+    }
+
+  return result;
 }
 
 /// Get the name of a given method type and return a copy of it.
@@ -9281,6 +9614,165 @@ get_class_or_union_flat_representation(const class_or_union_sptr& cou,
 					       internal,
 					       qualified_names);}
 
+/// Get the flat representation of an instance of @ref enum_type_decl
+/// type.
+///
+/// The flat representation of a given @ref enum_type_decl type is the
+/// actual definition of the type, for instance:
+///
+///   enum {E_0 =0, E_1 = 1}
+///
+///@param enum_type the enum type to consider.
+///
+///@param indent the identation spaces to use in the representation.
+///
+///@param one_line if true, then the flat representation stands on one
+///line.  Otherwise, it stands on multiple lines.
+///
+///@param qualified_names use qualified names when applicable.
+///Typically, if this is true, the name of the enum is going to be
+///qualified.
+///
+///@return the resulting flat representation.
+string
+get_enum_flat_representation(const enum_type_decl& enum_type,
+			     const string& indent, bool one_line,
+			     bool qualified_names)
+{
+  string repr;
+  std::ostringstream o;
+  string local_indent = "  ";
+
+  repr = indent + "enum ";
+
+  if (!enum_type.get_is_anonymous())
+    o << (qualified_names
+	  ? enum_type.get_qualified_name()
+	  : enum_type.get_name()) + " ";
+
+  o << "{";
+
+  if (!one_line)
+    o << "\n";
+
+  for (const auto &enumerator : enum_type.get_sorted_enumerators())
+    {
+      if (!one_line)
+	o << "\n" + indent;
+
+      o << enumerator.get_name() + "="  << enumerator.get_value() << ", ";
+    }
+
+  if (!one_line)
+    o << "\n" + indent << "}";
+  else
+    o << "}";
+
+  repr =o.str();
+
+  return repr;
+}
+
+/// Get the flat representation of an instance of @ref enum_type_decl
+/// type.
+///
+/// The flat representation of a given @ref enum_type_decl type is the
+/// actual definition of the type, for instance:
+///
+///   enum {E_0 =0, E_1 = 1}
+///
+///@param enum_type the enum type to consider.
+///
+///@param indent the identation spaces to use in the representation.
+///
+///@param one_line if true, then the flat representation stands on one
+///line.  Otherwise, it stands on multiple lines.
+///
+///@param qualified_names use qualified names when applicable.
+///Typically, if this is true, the name of the enum is going to be
+///qualified.
+///
+///@return the resulting flat representation.
+string
+get_enum_flat_representation(const enum_type_decl* enum_type,
+			     const string& indent, bool one_line,
+			     bool qualified_names)
+{
+  if (!enum_type)
+    return "";
+
+  return get_enum_flat_representation(*enum_type, indent,
+				      one_line, qualified_names);
+}
+
+/// Get the flat representation of an instance of @ref enum_type_decl
+/// type.
+///
+/// The flat representation of a given @ref enum_type_decl type is the
+/// actual definition of the type, for instance:
+///
+///   enum {E_0 =0, E_1 = 1}
+///
+///@param enum_type the enum type to consider.
+///
+///@param indent the identation spaces to use in the representation.
+///
+///@param one_line if true, then the flat representation stands on one
+///line.  Otherwise, it stands on multiple lines.
+///
+///@param qualified_names use qualified names when applicable.
+///Typically, if this is true, the name of the enum is going to be
+///qualified.
+///
+///@return the resulting flat representation.
+string
+get_enum_flat_representation(const enum_type_decl_sptr& enum_type,
+			     const string& indent, bool one_line,
+			     bool qualified_names)
+{
+  return get_enum_flat_representation(enum_type.get(),
+				      indent, one_line,
+				      qualified_names);
+}
+
+/// Get the flat representation of an instance of @ref enum_type_decl
+/// type.
+///
+/// The flat representation of a given @ref enum_type_decl type is the
+/// actual definition of the type, for instance:
+///
+///   enum {E_0 =0, E_1 = 1}
+///
+///@param enum_type the enum type to consider.
+///
+///@param indent the identation spaces to use in the representation.
+///
+///@param one_line if true, then the flat representation stands on one
+///line.  Otherwise, it stands on multiple lines.
+///
+///@param qualified_names use qualified names when applicable.
+///Typically, if this is true, the name of the enum is going to be
+///qualified.
+///
+///@return the resulting flat representation.
+string
+get_class_or_enum_flat_representation(const type_base& coe,
+				      const string& indent,
+				      bool one_line,
+				      bool internal,
+				      bool qualified_name)
+
+{
+  string repr;
+  if (const class_or_union* cou = is_class_or_union_type(&coe))
+    repr = get_class_or_union_flat_representation(cou, indent, one_line,
+						  internal, qualified_name);
+  else if (const enum_type_decl* enom = is_enum_type(&coe))
+    repr = get_enum_flat_representation(*enom, indent, one_line, qualified_name);
+
+  return repr;
+}
+
 /// Get the textual representation of a type for debugging purposes.
 ///
 /// If the type is a class/union, this shows the data members, virtual
@@ -9303,6 +9795,15 @@ get_debug_representation(const type_or_decl_base* artifact)
       class_decl *clazz = is_class_type(c);
       string name = c->get_qualified_name();
       std::ostringstream o;
+      if (clazz)
+	{
+	  if (clazz->is_struct())
+	    o << "struct ";
+	  else
+	    o << "class ";
+	}
+      else if (is_union_type(c))
+	o << "union ";
       o << name;
 
       if (clazz)
@@ -9362,7 +9863,7 @@ get_debug_representation(const type_or_decl_base* artifact)
     {
       string name = e->get_qualified_name();
       std::ostringstream o;
-      o << name
+      o << "enum " << name
 	<< " : "
 	<< e->get_underlying_type()->get_pretty_representation(/*internal=*/false,
 							       true)
@@ -9522,6 +10023,52 @@ debug_equals(const type_or_decl_base *l, const type_or_decl_base *r)
     return true;
 
   return (*l == *r);
+}
+
+/// Emit a trace of a comparison operand stack.
+///
+/// @param vect the operand stack to emit the trace for.
+///
+/// @param o the output stream to emit the trace to.
+static void
+debug_comp_vec(const vector<const type_base*>& vect, std::ostringstream& o)
+{
+  for (auto t : vect)
+    {
+      o << "|" << t->get_pretty_representation()
+	<< "@" << std::hex << t << std::dec;
+    }
+  if (!vect.empty())
+    o << "|";
+}
+
+/// Construct a trace of the two comparison operand stacks.
+///
+/// @param the environment in which the comparison operand stacks are.
+///
+/// @return a string representing the trace.
+static string
+print_comp_stack(const environment& env)
+{
+  std::ostringstream o;
+  o << "left-operands: ";
+  debug_comp_vec(env.priv_->left_type_comp_operands_, o);
+  o << "\n" << "right-operands: ";
+  debug_comp_vec(env.priv_->right_type_comp_operands_, o);
+  o << "\n";
+  return o.str();
+}
+
+/// Emit a trace of the two comparison operands stack on the standard
+/// error stream.
+///
+/// @param env the environment the comparison operands stack belong
+/// to.
+void
+debug_comp_stack(const environment& env)
+{
+  std::cerr << print_comp_stack(env);
+  std::cerr << std::endl;
 }
 
 /// By looking at the language of the TU a given ABI artifact belongs
@@ -10084,6 +10631,15 @@ typedef_decl*
 is_typedef(type_base* t)
 {return dynamic_cast<typedef_decl*>(t);}
 
+/// Test whether a type is a typedef.
+///
+/// @param t the declaration of the type to test for.
+///
+/// @return the typedef declaration of the @p t, or NULL if it's not a
+/// typedef.
+const typedef_decl*
+is_typedef(const type_or_decl_base* t)
+{return dynamic_cast<const typedef_decl*>(t);}
 /// Test if a type is an enum. This function looks through typedefs.
 ///
 /// @parm t the type to consider.
@@ -10204,28 +10760,118 @@ class_decl_sptr
 is_class_type(const type_or_decl_base_sptr& d)
 {return dynamic_pointer_cast<class_decl>(d);}
 
+/// Test if the last data member of a class is an array with
+/// non-finite data member.
+///
+/// The flexible data member idiom is a well known C idiom:
+/// https://en.wikipedia.org/wiki/Flexible_array_member.
+///
+/// @param klass the class to consider.
+///
+/// @return the data member which type is a flexible array, if any, or
+/// nil.
+var_decl_sptr
+has_flexible_array_data_member(const class_decl& klass)
+{
+  var_decl_sptr nil;
+  const class_or_union::data_members& dms = klass.get_data_members();
+  if (dms.empty())
+    return nil;
+
+  if (array_type_def_sptr array = is_array_type(dms.back()->get_type()))
+    {// The type of the last data member is an array.
+      if (array->is_infinite())
+	// The array has a non-finite size.  We are thus looking at a
+	// flexible array data member.  Let's return it.
+	return dms.back();
+    }
+
+  return nil;
+}
+
+/// Test if the last data member of a class is an array with
+/// non-finite data member.
+///
+/// The flexible data member idiom is a well known C idiom:
+/// https://en.wikipedia.org/wiki/Flexible_array_member.
+///
+/// @param klass the class to consider.
+///
+/// @return the data member which type is a flexible array, if any, or
+/// nil.
+var_decl_sptr
+has_flexible_array_data_member(const class_decl* klass)
+{
+  if (!klass)
+    return var_decl_sptr();
+
+  return has_flexible_array_data_member(*klass);
+}
+
+/// Test if the last data member of a class is an array with
+/// non-finite data member.
+///
+/// The flexible data member idiom is a well known C idiom:
+/// https://en.wikipedia.org/wiki/Flexible_array_member.
+///
+/// @param klass the class to consider.
+///
+/// @return the data member which type is a flexible array, if any, or
+/// nil.
+var_decl_sptr
+has_flexible_array_data_member(const class_decl_sptr& klass)
+{return has_flexible_array_data_member(klass.get());}
 
 /// Test wheter a type is a declaration-only class.
 ///
 /// @param t the type to considier.
 ///
+/// @param look_through_decl_only if true, then look through the
+/// decl-only class to see if it actually has a class definition in
+/// the same ABI corpus.
+///
 /// @return true iff @p t is a declaration-only class.
 bool
-is_declaration_only_class_or_union_type(const type_base *t)
+is_declaration_only_class_or_union_type(const type_base *t,
+					bool look_through_decl_only)
 {
-  if (const class_or_union *klass = is_class_or_union_type(t))
-    return klass->get_is_declaration_only();
+  if (class_or_union *klass = is_class_or_union_type(t))
+    {
+      if (look_through_decl_only)
+	klass = look_through_decl_only_class(klass);
+      return klass->get_is_declaration_only();
+    }
   return false;
 }
 
+
 /// Test wheter a type is a declaration-only class.
 ///
 /// @param t the type to considier.
 ///
+/// @param look_through_decl_only if true, then look through the
+/// decl-only class to see if it actually has a class definition in
+/// the same ABI corpus.
+///
 /// @return true iff @p t is a declaration-only class.
 bool
-is_declaration_only_class_type(const type_base_sptr& t)
-{return is_declaration_only_class_or_union_type(t.get());}
+is_declaration_only_class_or_union_type(const type_base_sptr& t,
+					bool look_through_decl_only)
+{return is_declaration_only_class_or_union_type(t.get(), look_through_decl_only);}
+
+/// Test wheter a type is a declaration-only class.
+///
+/// @param t the type to considier.
+///
+/// @param look_through_decl_only if true, then look through the
+/// decl-only class to see if it actually has a class definition in
+/// the same ABI corpus.
+///
+/// @return true iff @p t is a declaration-only class.
+bool
+is_declaration_only_class_type(const type_base_sptr& t,
+			       bool look_through_decl_only)
+{return is_declaration_only_class_or_union_type(t.get(), look_through_decl_only);}
 
 /// Test if a type is a @ref class_or_union.
 ///
@@ -10246,6 +10892,36 @@ is_class_or_union_type(const type_or_decl_base* t)
 shared_ptr<class_or_union>
 is_class_or_union_type(const shared_ptr<type_or_decl_base>& t)
 {return dynamic_pointer_cast<class_or_union>(t);}
+
+/// Test if two class or union types are of the same kind.
+///
+/// @param first the first type to consider.
+///
+/// @param second the second type to consider.
+///
+/// @return true iff @p first is of the same kind as @p second.
+bool
+class_or_union_types_of_same_kind(const class_or_union* first,
+				  const class_or_union* second)
+{
+  if ((is_class_type(first) && is_class_type(second))
+      || (is_union_type(first) && is_union_type(second)))
+    return true;
+
+  return false;
+}
+
+/// Test if two class or union types are of the same kind.
+///
+/// @param first the first type to consider.
+///
+/// @param second the second type to consider.
+///
+/// @return true iff @p first is of the same kind as @p second.
+bool
+class_or_union_types_of_same_kind(const class_or_union_sptr& first,
+				  const class_or_union_sptr& second)
+{return class_or_union_types_of_same_kind(first.get(), second.get());}
 
 /// Test if a type is a @ref union_decl.
 ///
@@ -10317,6 +10993,29 @@ pointer_type_def_sptr
 is_pointer_type(const type_or_decl_base_sptr &t)
 {return dynamic_pointer_cast<pointer_type_def>(t);}
 
+
+/// Test if a type is a typedef, pointer or reference to a decl-only
+/// class/union.
+///
+/// This looks into qualified types too.
+///
+/// @param t the type to consider.
+///
+/// @return true iff @p t is a type is a typedef, pointer or reference
+/// to a decl-only class/union.
+bool
+is_typedef_ptr_or_ref_to_decl_only_class_or_union_type(const type_base* t)
+{
+  const type_base * type =
+    peel_typedef_pointer_or_reference_type(t, /*peel_qual_type=*/true);
+
+  if (is_declaration_only_class_or_union_type(type,
+					      /*look_through_decl_only=*/true))
+    return true;
+
+  return false;
+}
+
 /// Test whether a type is a reference_type_def.
 ///
 /// @param t the type to test.
@@ -10347,17 +11046,17 @@ reference_type_def_sptr
 is_reference_type(const type_or_decl_base_sptr& t)
 {return dynamic_pointer_cast<reference_type_def>(t);}
 
-/// Test if a type is a pointer to void type.
+/// Test if a type is equivalent to a pointer to void type.
 ///
 /// Note that this looks trough typedefs or CV qualifiers to look for
 /// the void pointer.
 ///
 /// @param type the type to consider.
 ///
-/// @return the actual void pointer if @p is a void pointer or NULL if
-/// it's not.
+/// @return the actual void pointer if @p is eqivalent to a void
+/// pointer or NULL if it's not.
 const type_base*
-is_void_pointer_type(const type_base* type)
+is_void_pointer_type_equivalent(const type_base* type)
 {
   type = peel_qualified_or_typedef_type(type);
 
@@ -10368,10 +11067,74 @@ is_void_pointer_type(const type_base* type)
   // Look through typedefs in the pointed-to type as well.
   type_base * ty = t->get_pointed_to_type().get();
   ty = peel_qualified_or_typedef_type(ty);
-  if (ty->get_environment().is_void_type(ty))
+  if (ty && ty->get_environment().is_void_type(ty))
     return ty;
 
   return 0;
+}
+
+/// Test if a type is equivalent to a pointer to void type.
+///
+/// Note that this looks trough typedefs or CV qualifiers to look for
+/// the void pointer.
+///
+/// @param type the type to consider.
+///
+/// @return the actual void pointer if @p is eqivalent to a void
+/// pointer or NULL if it's not.
+const type_base*
+is_void_pointer_type_equivalent(const type_base& type)
+{return is_void_pointer_type_equivalent(&type);}
+
+/// Test if a type is a pointer to void type.
+///
+/// @param type the type to consider.
+///
+/// @return the actual void pointer if @p is a void pointer or NULL if
+/// it's not.
+const type_base*
+is_void_pointer_type(const type_base* t)
+{
+  if (!t)
+    return nullptr;
+
+  if (t->get_environment().get_void_pointer_type().get() == t)
+    return t;
+
+  const pointer_type_def* ptr = is_pointer_type(t);
+  if (!ptr)
+    return nullptr;
+
+  if (t->get_environment().is_void_type(ptr->get_pointed_to_type()))
+    return t;
+
+  return nullptr;
+}
+
+/// Test if a type is a pointer to void type.
+///
+/// @param type the type to consider.
+///
+/// @return the actual void pointer if @p is a void pointer or NULL if
+/// it's not.
+const type_base_sptr
+is_void_pointer_type(const type_base_sptr& t)
+{
+  type_base_sptr nil;
+  if (!t)
+    return nil;
+
+  if (t->get_environment().get_void_pointer_type().get() == t.get())
+    return t;
+
+  pointer_type_def* ptr = is_pointer_type(t.get());
+  if (!ptr)
+    return nil;
+
+  if (t->get_environment().is_void_type(ptr->get_pointed_to_type()))
+    return t;
+
+  return nil;
 }
 
 /// Test whether a type is a reference_type_def.
@@ -10767,7 +11530,7 @@ is_subrange_type(const type_or_decl_base_sptr &type)
 /// @return true iff decl is a function template, class template, or
 /// template template parameter.
 bool
-is_template_decl(const shared_ptr<decl_base> decl)
+is_template_decl(const decl_base_sptr& decl)
 {return decl && dynamic_pointer_cast<template_decl>(decl);}
 
 /// This enum describe the kind of entity to lookup, while using the
@@ -12364,6 +13127,22 @@ lookup_decl_only_class_types(const interned_string& qualified_name,
   return !result.empty();
 }
 
+/// Look into a given corpus to find the union type*s* that have a
+/// given qualified name.
+///
+/// @param qualified_name the qualified name of the type to look for.
+///
+/// @param corp the corpus to look into.
+///
+/// @return the vector of union types named @p qualified_name.
+const type_base_wptrs_type *
+lookup_union_types(const interned_string& qualified_name, const corpus& corp)
+{
+  const istring_type_base_wptrs_map_type& m = corp.get_types().union_types();
+
+  return lookup_types_in_map(qualified_name, m);
+}
+
 /// Look into a given corpus to find the class type*s* that have a
 /// given qualified name.
 ///
@@ -12371,12 +13150,27 @@ lookup_decl_only_class_types(const interned_string& qualified_name,
 ///
 /// @param corp the corpus to look into.
 ///
-/// @return the vector of class types that which name is @p qualified_name.
+/// @return the vector of class types which name is @p qualified_name.
 const type_base_wptrs_type*
 lookup_class_types(const string& qualified_name, const corpus& corp)
 {
   interned_string s = corp.get_environment().intern(qualified_name);
   return lookup_class_types(s, corp);
+}
+
+/// Look into a given corpus to find the union types that have a given
+/// qualified name.
+///
+/// @param qualified_name the qualified name of the type to look for.
+///
+/// @param corp the corpus to look into.
+///
+/// @return the vector of union types which name is @p qualified_name.
+const type_base_wptrs_type *
+lookup_union_types(const string& qualified_name, const corpus& corp)
+{
+  interned_string s = corp.get_environment().intern(qualified_name);
+  return lookup_union_types(s, corp);
 }
 
 /// Look up a @ref class_decl from a given corpus by its location.
@@ -13688,6 +14482,8 @@ maybe_update_types_lookup_map(const decl_base_sptr& decl)
     maybe_update_types_lookup_map(array_type);
   else if (array_type_def::subrange_sptr subrange_type = is_subrange_type(decl))
     maybe_update_types_lookup_map(subrange_type);
+  else if (function_type_sptr fn_type = is_function_type(decl))
+    maybe_update_types_lookup_map(fn_type);
   else
     ABG_ASSERT_NOT_REACHED;
 }
@@ -13708,6 +14504,8 @@ maybe_update_types_lookup_map(const type_base_sptr& type)
 {
   if (decl_base_sptr decl = get_type_declaration(type))
     maybe_update_types_lookup_map(decl);
+  else if (function_type_sptr fn_type = is_function_type(type))
+    maybe_update_types_lookup_map(fn_type);
   else
     ABG_ASSERT_NOT_REACHED;
 }
@@ -14077,11 +14875,11 @@ types_defined_same_linux_kernel_corpus_public(const type_base& t1,
 /// @return true iff @p canonical_type equals @p candidate_type.
 ///
 static bool
-compare_types_during_canonicalization(const type_base_sptr& canonical_type,
-				      const type_base_sptr& candidate_type)
+compare_types_during_canonicalization(const type_base& canonical_type,
+				      const type_base& candidate_type)
 {
 #ifdef WITH_DEBUG_TYPE_CANONICALIZATION
-  const environment&env = canonical_type->get_environment();
+  const environment& env = canonical_type.get_environment();
   if (env.debug_type_canonicalization_is_on())
     {
       bool canonical_equality = false, structural_equality = false;
@@ -14092,7 +14890,7 @@ compare_types_during_canonicalization(const type_base_sptr& canonical_type,
       if (canonical_equality != structural_equality)
 	{
 	  std::cerr << "structural & canonical equality different for type: "
-		    << canonical_type->get_pretty_representation(true, true)
+		    << canonical_type.get_pretty_representation(true, true)
 		    << std::endl;
 	  ABG_ASSERT_NOT_REACHED;
 	}
@@ -14100,6 +14898,126 @@ compare_types_during_canonicalization(const type_base_sptr& canonical_type,
     }
 #endif //end WITH_DEBUG_TYPE_CANONICALIZATION
   return canonical_type == candidate_type;
+}
+
+/// Compare a canonical type against a candidate canonical type.
+///
+/// This is ultimately a sub-routine of the
+/// type_base::get_canonical_type_for().
+///
+/// The goal of this function is to ease debugging because it can be
+/// called from within type_base::get_canonical_type_for() from the
+/// prompt of the debugger (with some breakpoint appropriately set) to
+/// debug the comparison that happens during type canonicalization,
+/// between a candidate type being canonicalized, and an existing
+/// canonical type that is registered in the system, in as returned by
+/// environment::get_canonical_types()
+///
+/// @param canonical_type the canonical type to consider.
+///
+/// @param candidate_type the candidate type that is being
+/// canonicalized, and thus compared to @p canonical_type.
+///
+/// @return true iff @p canonical_type compares equal to @p
+/// candidate_type.
+static bool
+compare_canonical_type_against_candidate(const type_base& canonical_type,
+					 const type_base& candidate_type)
+{
+  environment& env = const_cast<environment&>(canonical_type.get_environment());
+
+  // Before the "*it == it" comparison below is done, let's
+  // perform on-the-fly-canonicalization.  For C types, let's
+  // consider that an unresolved struct declaration 'struct S'
+  // is different from a definition 'struct S'.  This is
+  // because normally, at this point all the declarations of
+  // struct S that are compatible with the definition of
+  // struct S have already been resolved to that definition,
+  // during the DWARF parsing.  The remaining unresolved
+  // declaration are thus considered different.  With this
+  // setup we can properly handle cases of two *different*
+  // struct S being defined in the same binary (in different
+  // translation units), and a third struct S being only
+  // declared as an opaque type in a third translation unit of
+  // its own, with no definition in there.  In that case, the
+  // declaration-only struct S should be left alone and not
+  // resolved to any of the two definitions of struct S.
+  bool saved_decl_only_class_equals_definition =
+    env.decl_only_class_equals_definition();
+  env.do_on_the_fly_canonicalization(true);
+  // Compare types by considering that decl-only classes don't
+  // equal their definition.
+  env.decl_only_class_equals_definition(false);
+  env.priv_->allow_type_comparison_results_caching(true);
+  bool equal = (types_defined_same_linux_kernel_corpus_public(canonical_type,
+							      candidate_type)
+		|| compare_types_during_canonicalization(canonical_type,
+							 candidate_type));
+  // Restore the state of the on-the-fly-canonicalization and
+  // the decl-only-class-being-equal-to-a-matching-definition
+  // flags.
+  env.priv_->clear_type_comparison_results_cache();
+  env.priv_->allow_type_comparison_results_caching(false);
+  env.do_on_the_fly_canonicalization(false);
+  env.decl_only_class_equals_definition
+    (saved_decl_only_class_equals_definition);
+  return equal;
+}
+
+/// Compare a canonical type against a candidate canonical type.
+///
+/// This is ultimately a sub-routine of the
+/// type_base::get_canonical_type_for().
+///
+/// The goal of this function is to ease debugging because it can be
+/// called from within type_base::get_canonical_type_for() from the
+/// prompt of the debugger (with some breakpoint appropriately set) to
+/// debug the comparison that happens during type canonicalization,
+/// between a candidate type being canonicalized, and an existing
+/// canonical type that is registered in the system, in as returned by
+/// environment::get_canonical_types()
+///
+/// @param canonical_type the canonical type to consider.
+///
+/// @param candidate_type the candidate type that is being
+/// canonicalized, and thus compared to @p canonical_type.
+///
+/// @return true iff @p canonical_type compares equal to @p
+/// candidate_type.
+static bool
+compare_canonical_type_against_candidate(const type_base* canonical_type,
+					 const type_base* candidate_type)
+{
+  return compare_canonical_type_against_candidate(*canonical_type,
+						  *candidate_type);
+}
+
+/// Compare a canonical type against a candidate canonical type.
+///
+/// This is ultimately a sub-routine of the
+/// type_base::get_canonical_type_for().
+///
+/// The goal of this function is to ease debugging because it can be
+/// called from within type_base::get_canonical_type_for() from the
+/// prompt of the debugger (with some breakpoint appropriately set) to
+/// debug the comparison that happens during type canonicalization,
+/// between a candidate type being canonicalized, and an existing
+/// canonical type that is registered in the system, in as returned by
+/// environment::get_canonical_types()
+///
+/// @param canonical_type the canonical type to consider.
+///
+/// @param candidate_type the candidate type that is being
+/// canonicalized, and thus compared to @p canonical_type.
+///
+/// @return true iff @p canonical_type compares equal to @p
+/// candidate_type.
+static bool
+compare_canonical_type_against_candidate(const type_base_sptr& canonical_type,
+					 const type_base_sptr& candidate_type)
+{
+  return compare_canonical_type_against_candidate(canonical_type.get(),
+						  candidate_type.get());
 }
 
 /// Compute the canonical type for a given instance of @ref type_base.
@@ -14212,38 +15130,7 @@ type_base::get_canonical_type_for(type_base_sptr t)
 	   it != v.rend();
 	   ++it)
 	{
-	  // Before the "*it == it" comparison below is done, let's
-	  // perform on-the-fly-canonicalization.  For C types, let's
-	  // consider that an unresolved struct declaration 'struct S'
-	  // is different from a definition 'struct S'.  This is
-	  // because normally, at this point all the declarations of
-	  // struct S that are compatible with the definition of
-	  // struct S have already been resolved to that definition,
-	  // during the DWARF parsing.  The remaining unresolved
-	  // declaration are thus considered different.  With this
-	  // setup we can properly handle cases of two *different*
-	  // struct S being defined in the same binary (in different
-	  // translation units), and a third struct S being only
-	  // declared as an opaque type in a third translation unit of
-	  // its own, with no definition in there.  In that case, the
-	  // declaration-only struct S should be left alone and not
-	  // resolved to any of the two definitions of struct S.
-	  bool saved_decl_only_class_equals_definition =
-	    env.decl_only_class_equals_definition();
-	  env.do_on_the_fly_canonicalization(true);
-	  // Compare types by considering that decl-only classes don't
-	  // equal their definition.
-	  env.decl_only_class_equals_definition(false);
-	  env.priv_->allow_type_comparison_results_caching(true);
-	  bool equal = (types_defined_same_linux_kernel_corpus_public(**it, *t)
-			|| compare_types_during_canonicalization(*it, t));
-	  // Restore the state of the on-the-fly-canonicalization and
-	  // the decl-only-class-being-equal-to-a-matching-definition
-	  // flags.
-	  env.priv_->allow_type_comparison_results_caching(false);
-	  env.do_on_the_fly_canonicalization(false);
-	  env.decl_only_class_equals_definition
-	    (saved_decl_only_class_equals_definition);
+	  bool equal = compare_canonical_type_against_candidate(*it, t);
 	  if (equal)
 	    {
 	      result = *it;
@@ -14270,17 +15157,31 @@ type_base::get_canonical_type_for(type_base_sptr t)
 		  if (!env.priv_->
 		      check_canonical_type_from_abixml_during_self_comp(t,
 									result))
-		    // The canonical type of the type re-read from abixml
-		    // type doesn't match the canonical type that was
-		    // initially serialized down.
-		    std::cerr << "error: wrong canonical type for '"
-			      << repr
-			      << "' / type: @"
-			      << std::hex
-			      << t.get()
-			      << "/ canon: @"
-			      << result.get()
-			      << std::endl;
+		    {
+		      // The canonical type of the type re-read from abixml
+		      // type doesn't match the canonical type that was
+		      // initially serialized down.
+		      uintptr_t should_have_canonical_type = 0;
+		      string type_id = env.get_type_id_from_type(t.get());
+		      if (type_id.empty())
+			type_id = "type-id-<not-found>";
+		      else
+			should_have_canonical_type =
+			  env.get_canonical_type_from_type_id(type_id.c_str());
+		      std::cerr << "error: wrong canonical type for '"
+				<< repr
+				<< "' / type: @"
+				<< std::hex
+				<< t.get()
+				<< "/ canon: @"
+				<< result.get()
+				<< ", type-id: '"
+				<< type_id
+				<< "'.  Should have had canonical type: "
+				<< std::hex
+				<< should_have_canonical_type
+				<< std::endl;
+		    }
 		}
 	      else //!result
 		{
@@ -14308,12 +15209,12 @@ type_base::get_canonical_type_for(type_base_sptr t)
 			    << repr
 			    << "' from second corpus"
 			    << ", ptr: " << std::hex << t.get()
-			    << "type-id: " << type_id
+			    << " type-id: " << type_id
 			    << std::endl;
 		}
 	    }
 	}
-#endif
+#endif //WITH_DEBUG_SELF_COMPARISON
 
       if (!result)
 	{
@@ -14387,7 +15288,11 @@ maybe_adjust_canonical_type(const type_base_sptr& canonical,
 		  // class doesn't have that member function.  Let's
 		  // copy that member function to the canonical class
 		  // then.
-		  copy_member_function (canonical_class, *i);
+		  {
+		    method_decl_sptr method =
+		      copy_member_function (canonical_class, *i);
+		    canonicalize(method->get_type());
+		  }
 	      }
 	}
     }
@@ -14426,7 +15331,23 @@ canonicalize(type_base_sptr t)
   if (t->get_canonical_type())
     return t->get_canonical_type();
 
+  if (t->get_environment().priv_->do_log())
+    std::cerr << "Canonicalization of type '"
+	      << t->get_pretty_representation(true, true)
+	      << "/@#" << std::hex << t.get() << ": ";
+
+  tools_utils::timer tmr;
+
+  if (t->get_environment().priv_->do_log())
+    tmr.start();
   type_base_sptr canonical = type_base::get_canonical_type_for(t);
+
+  if (t->get_environment().priv_->do_log())
+    tmr.stop();
+
+  if (t->get_environment().priv_->do_log())
+    std::cerr << tmr << "\n";
+
   maybe_adjust_canonical_type(canonical, t);
 
   t->priv_->canonical_type = canonical;
@@ -14456,36 +15377,49 @@ canonicalize(type_base_sptr t)
 	}
 
   if (canonical)
-    if (decl_base_sptr d = is_decl_slow(canonical))
-      {
-	scope_decl *scope = d->get_scope();
-	// Add the canonical type to the set of canonical types
-	// belonging to its scope.
-	if (scope)
-	  {
-	    if (is_type(scope))
-	      // The scope in question is itself a type (e.g, a class
-	      // or union).  Let's call that type ST.  We want to add
-	      // 'canonical' to the set of canonical types belonging
-	      // to ST.
-	      if (type_base_sptr c = is_type(scope)->get_canonical_type())
-		// We want to add 'canonical' to set of canonical
-		// types belonging to the canonical type of ST.  That
-		// way, just looking at the canonical type of ST is
-		// enough to get the types that belong to the scope of
-		// the class of equivalence of ST.
-		scope = is_scope_decl(is_decl(c)).get();
-	    scope->get_canonical_types().insert(canonical);
-	  }
-	// else, if the type doesn't have a scope, it's not meant to be
-	// emitted.  This can be the case for the result of the
-	// function strip_typedef, for instance.
-      }
+    {
+      if (decl_base_sptr d = is_decl_slow(canonical))
+	{
+	  scope_decl *scope = d->get_scope();
+	  // Add the canonical type to the set of canonical types
+	  // belonging to its scope.
+	  if (scope)
+	    {
+	      if (is_type(scope))
+		// The scope in question is itself a type (e.g, a class
+		// or union).  Let's call that type ST.  We want to add
+		// 'canonical' to the set of canonical types belonging
+		// to ST.
+		if (type_base_sptr c = is_type(scope)->get_canonical_type())
+		  // We want to add 'canonical' to set of canonical
+		  // types belonging to the canonical type of ST.  That
+		  // way, just looking at the canonical type of ST is
+		  // enough to get the types that belong to the scope of
+		  // the class of equivalence of ST.
+		  scope = is_scope_decl(is_decl(c)).get();
+	      scope->get_canonical_types().insert(canonical);
+	    }
+	  // else, if the type doesn't have a scope, it's not meant to be
+	  // emitted.  This can be the case for the result of the
+	  // function strip_typedef, for instance.
+	}
+
+#ifdef WITH_DEBUG_CT_PROPAGATION
+      // Update the book-keeping of the set of the types which
+      // propagated canonical type has been cleared.
+      //
+      // If this type 't' which has just been canonicalized was
+      // previously in the set of types which propagated canonical
+      // type has been cleared, then remove it from that set because
+      // its canonical type is now computed and definitely set.
+      const environment& env = t->get_environment();
+      env.priv_->erase_type_with_cleared_propagated_canonical_type(t.get());
+#endif
+    }
 
   t->on_canonical_type_set();
   return canonical;
 }
-
 
 /// Set the definition of this declaration-only @ref decl_base.
 ///
@@ -15174,6 +16108,28 @@ type_decl::operator==(const type_decl& o) const
   const decl_base& other = o;
   return *this == other;
 }
+
+/// Return true if both types equals.
+///
+/// Note that this does not check the scopes of any of the types.
+///
+/// @param o the other type_decl to check against.
+///
+/// @return true iff the current isntance equals @p o
+bool
+type_decl::operator!=(const type_base&o)const
+{return !operator==(o);}
+
+/// Return true if both types equals.
+///
+/// Note that this does not check the scopes of any of the types.
+///
+/// @param o the other type_decl to check against.
+///
+/// @return true iff the current isntance equals @p o
+bool
+type_decl::operator!=(const decl_base&o)const
+{return !operator==(o);}
 
 /// Inequality operator.
 ///
@@ -16241,6 +17197,16 @@ pointer_type_def::set_pointed_to_type(const type_base_sptr& t)
 bool
 equals(const pointer_type_def& l, const pointer_type_def& r, change_kind* k)
 {
+  // In C and C++ languages, a pointer to void equals all other
+  // pointers.
+  if (l.get_translation_unit()
+      && r.get_translation_unit()
+      && is_c_language(l.get_translation_unit()->get_language())
+      && is_c_language(r.get_translation_unit()->get_language())
+      && (is_void_pointer_type_equivalent(&l)
+	  || is_void_pointer_type_equivalent(&r)))
+    return true;
+
   bool result = l.get_pointed_to_type() == r.get_pointed_to_type();
   if (!result)
     if (k)
@@ -16355,7 +17321,10 @@ pointer_type_def::get_qualified_name(bool internal) const
 	    if (pointed_to_type)
 	      priv_->internal_qualified_name_ =
 		get_name_of_pointer_to_type(*pointed_to_type,
-					    /*qualified_name=*/true,
+					    /*qualified_name=*/
+					    is_typedef(pointed_to_type)
+					    ? false
+					    : true,
 					    /*internal=*/true);
 	  return priv_->internal_qualified_name_;
 	}
@@ -16368,7 +17337,10 @@ pointer_type_def::get_qualified_name(bool internal) const
 	  if (pointed_to_type)
 	    priv_->temp_internal_qualified_name_ =
 	      get_name_of_pointer_to_type(*pointed_to_type,
-					  /*qualified_name=*/true,
+					  /*qualified_name=*/
+					  is_typedef(pointed_to_type)
+					  ? false
+					  : true,
 					  /*internal=*/true);
 	  return priv_->temp_internal_qualified_name_;
 	}
@@ -16473,6 +17445,27 @@ operator!=(const pointer_type_def_sptr& l, const pointer_type_def_sptr& r)
 
 // <reference_type_def definitions>
 
+/// Private data structure of the @ref reference_type_def type.
+struct reference_type_def::priv
+{
+
+  type_base_wptr	pointed_to_type_;
+  bool			is_lvalue_;
+  interned_string	internal_qualified_name_;
+  interned_string	temp_internal_qualified_name_;
+
+  priv(const type_base_sptr& t, bool is_lvalue)
+    : pointed_to_type_(type_or_void(t, t->get_environment())),
+      is_lvalue_(is_lvalue)
+  {}
+
+  priv(bool is_lvalue)
+    : is_lvalue_(is_lvalue)
+  {}
+
+  priv() = delete;
+};
+
 /// This function is automatically invoked whenever an instance of
 /// this type is canonicalized.
 ///
@@ -16507,7 +17500,7 @@ reference_type_def::reference_type_def(const type_base_sptr	pointed_to,
 		      | ABSTRACT_DECL_BASE),
     type_base(pointed_to->get_environment(), size_in_bits, align_in_bits),
     decl_base(pointed_to->get_environment(), "", locus, ""),
-    is_lvalue_(lvalue)
+    priv_(new priv(pointed_to, lvalue))
 {
   runtime_type_instance(this);
 
@@ -16528,10 +17521,6 @@ reference_type_def::reference_type_def(const type_base_sptr	pointed_to,
 	name += "&";
       const environment& env = pointed_to->get_environment();
       set_name(env.intern(name));
-
-      pointed_to_type_ =
-	type_base_wptr(type_or_void(pointed_to,
-				    pointed_to->get_environment()));
     }
   catch (...)
     {}
@@ -16564,7 +17553,7 @@ reference_type_def::reference_type_def(const environment& env, bool lvalue,
 		      | ABSTRACT_DECL_BASE),
     type_base(env, size_in_bits, alignment_in_bits),
     decl_base(env, "", locus, ""),
-    is_lvalue_(lvalue)
+    priv_(new priv(lvalue))
 {
   runtime_type_instance(this);
   string name = "void&";
@@ -16572,7 +17561,7 @@ reference_type_def::reference_type_def(const environment& env, bool lvalue,
     name += "&";
 
   set_name(env.intern(name));
-  pointed_to_type_ = type_base_wptr(env.get_void_type());
+  priv_->pointed_to_type_ = type_base_wptr(env.get_void_type());
 }
 
 /// Setter of the pointed_to type of the current reference type.
@@ -16582,7 +17571,7 @@ void
 reference_type_def::set_pointed_to_type(type_base_sptr& pointed_to_type)
 {
   ABG_ASSERT(pointed_to_type);
-  pointed_to_type_ = pointed_to_type;
+  priv_->pointed_to_type_ = pointed_to_type;
 
   decl_base_sptr pto;
   try
@@ -16690,11 +17679,11 @@ reference_type_def::operator==(const reference_type_def& o) const
 
 type_base_sptr
 reference_type_def::get_pointed_to_type() const
-{return pointed_to_type_.lock();}
+{return priv_->pointed_to_type_.lock();}
 
 bool
 reference_type_def::is_lvalue() const
-{return is_lvalue_;}
+{return priv_->is_lvalue_;}
 
 /// Build and return the qualified name of the current instance of the
 /// @ref reference_type_def.
@@ -16724,14 +17713,69 @@ reference_type_def::get_qualified_name(interned_string& qn, bool internal) const
 const interned_string&
 reference_type_def::get_qualified_name(bool internal) const
 {
-  if (peek_qualified_name().empty()
-      || !get_canonical_type())
-    set_qualified_name(get_name_of_reference_to_type
-		       (*look_through_decl_only(get_pointed_to_type()),
-			is_lvalue(),
-			/*qualified_name=*/true,
-			internal));
-  return peek_qualified_name();
+  type_base_sptr pointed_to_type = get_pointed_to_type();
+  pointed_to_type = look_through_decl_only(pointed_to_type);
+
+  if (internal)
+    {
+      if (get_canonical_type())
+	{
+	  if (priv_->internal_qualified_name_.empty())
+	    if (pointed_to_type)
+	      priv_->internal_qualified_name_ =
+		get_name_of_reference_to_type(*pointed_to_type,
+					      is_lvalue(),
+					      /*qualified_name=*/
+					      is_typedef(pointed_to_type)
+					      ? false
+					      : true,
+					      /*internal=*/true);
+	  return priv_->internal_qualified_name_;
+	}
+      else
+	{
+	  // As the type hasn't yet been canonicalized, its structure
+	  // (and so its name) can change.  So let's invalidate the
+	  // cache where we store its name at each invocation of this
+	  // function.
+	  if (pointed_to_type)
+	    priv_->temp_internal_qualified_name_ =
+	      get_name_of_reference_to_type(*pointed_to_type,
+					    is_lvalue(),
+					    /*qualified_name=*/
+					    is_typedef(pointed_to_type)
+					    ? false
+					    : true,
+					    /*internal=*/true);
+	  return priv_->temp_internal_qualified_name_;
+	}
+    }
+  else
+    {
+      if (get_naked_canonical_type())
+	{
+	  set_qualified_name
+	    (get_name_of_reference_to_type(*pointed_to_type,
+					   is_lvalue(),
+					   /*qualified_name=*/true,
+					   /*internal=*/false));
+	  return decl_base::peek_qualified_name();
+	}
+      else
+	{
+	  // As the type hasn't yet been canonicalized, its structure
+	  // (and so its name) can change.  So let's invalidate the
+	  // cache where we store its name at each invocation of this
+	  // function.
+	  if (pointed_to_type)
+	    set_qualified_name
+	      (get_name_of_reference_to_type(*pointed_to_type,
+					     is_lvalue(),
+					     /*qualified_name=*/true,
+					     /*internal=*/false));
+	  return decl_base::peek_qualified_name();
+	}
+    }
 }
 
 /// Get the pretty representation of the current instance of @ref
@@ -17105,8 +18149,12 @@ array_type_def::subrange_type::get_length() const
   if (is_infinite())
     return 0;
 
-  ABG_ASSERT(get_upper_bound() >= get_lower_bound());
-  return get_upper_bound() - get_lower_bound() + 1;
+  // A subrange can have an upper bound that is lower than its lower
+  // bound.  This is possible in Ada for instance.  In that case, the
+  // length of the subrange is considered to be zero.
+  if (get_upper_bound() >= get_lower_bound())
+    return get_upper_bound() - get_lower_bound() + 1;
+  return 0;
 }
 
 /// Test if the length of the subrange type is infinite.
@@ -17255,6 +18303,26 @@ array_type_def::subrange_type::operator==(const subrange_type& o) const
   const type_base &t = o;
   return operator==(t);
 }
+
+/// Equality operator.
+///
+/// @param o the other subrange to test against.
+///
+/// @return true iff @p o equals the current instance of
+/// array_type_def::subrange_type.
+bool
+array_type_def::subrange_type::operator!=(const decl_base& o) const
+{return !operator==(o);}
+
+/// Equality operator.
+///
+/// @param o the other subrange to test against.
+///
+/// @return true iff @p o equals the current instance of
+/// array_type_def::subrange_type.
+bool
+array_type_def::subrange_type::operator!=(const type_base& o) const
+{return !operator==(o);}
 
 /// Inequality operator.
 ///
@@ -17811,6 +18879,7 @@ class enum_type_decl::priv
 {
   type_base_sptr	underlying_type_;
   enumerators		enumerators_;
+  mutable enumerators	sorted_enumerators_;
 
   friend class enum_type_decl;
 
@@ -17876,6 +18945,33 @@ enum_type_decl::enumerators&
 enum_type_decl::get_enumerators()
 {return priv_->enumerators_;}
 
+/// Get the lexicographically sorted vector of enumerators.
+///
+/// @return the lexicographically sorted vector of enumerators.
+const enum_type_decl::enumerators&
+enum_type_decl::get_sorted_enumerators() const
+{
+  if (priv_->sorted_enumerators_.empty())
+    {
+      for (auto e = get_enumerators().rbegin();
+	   e != get_enumerators().rend();
+	   ++e)
+	priv_->sorted_enumerators_.push_back(*e);
+
+      std::sort(priv_->sorted_enumerators_.begin(),
+		priv_->sorted_enumerators_.end(),
+		[](const enum_type_decl::enumerator& l,
+		   const enum_type_decl::enumerator& r)
+		{
+		  if (l.get_name() == r.get_name())
+		    return l.get_value() < r.get_value();
+		  return (l.get_name() < r.get_name());
+		});
+    }
+
+  return priv_->sorted_enumerators_;
+}
+
 /// Get the pretty representation of the current instance of @ref
 /// enum_type_decl.
 ///
@@ -17901,6 +18997,10 @@ enum_type_decl::get_pretty_representation(bool internal,
 
   if (internal && get_is_anonymous())
     r += get_type_name(this, qualified_name, /*internal=*/true);
+  else if (get_is_anonymous())
+    r += get_enum_flat_representation(*this, "",
+				      /*one_line=*/true,
+				      qualified_name);
   else
     r += decl_base::get_pretty_representation(internal,
 					      qualified_name);
@@ -18029,7 +19129,7 @@ enum_has_non_name_change(const enum_type_decl& l,
 ///
 /// @return true iff the enumerator @p enr is present in the enum @p
 /// enom.
-static bool
+bool
 is_enumerator_present_in_enum(const enum_type_decl::enumerator &enr,
 			      const enum_type_decl &enom)
 {
@@ -18500,8 +19600,6 @@ enum_type_decl::enumerator::set_enum_type(enum_type_decl* e)
 struct typedef_decl::priv
 {
   type_base_wptr	underlying_type_;
-  string		internal_qualified_name_;
-  string		temp_internal_qualified_name_;
 
   priv(const type_base_sptr& t)
     : underlying_type_(t)
@@ -18699,10 +19797,15 @@ typedef_decl::get_pretty_representation(bool internal,
 {
 
   string result = "typedef ";
-  if (qualified_name)
-    result += get_qualified_name(internal);
-  else
+  if (internal)
     result += get_name();
+  else
+    {
+      if (qualified_name)
+	result += get_qualified_name(internal);
+      else
+	result += get_name();
+    }
 
   return result;
 }
@@ -18723,6 +19826,38 @@ typedef_decl::set_underlying_type(const type_base_sptr& t)
   priv_->underlying_type_ = t;
   set_size_in_bits(t->get_size_in_bits());
   set_alignment_in_bits(t->get_alignment_in_bits());
+}
+
+/// Implementation of the virtual "get_qualified_name" method.
+///
+/// @param qualified_name the resuling qualified name of the typedef type.
+///
+/// @param internal if true, then it means the qualified name is for
+/// "internal" purposes, meaning mainly for type canonicalization
+/// purposes.
+void
+typedef_decl::get_qualified_name(interned_string& qualified_name,
+				 bool internal) const
+{qualified_name = get_qualified_name(internal);}
+
+/// Implementation of the virtual "get_qualified_name" method.
+///
+/// @param internal if true, then it means the qualified name is for
+/// "internal" purposes, meaning mainly for type canonicalization
+/// purposes.
+///
+/// @return the qualified name.
+const interned_string&
+typedef_decl::get_qualified_name(bool internal) const
+{
+  // Note that the qualified name has been already set by
+  // qualified_name_setter::do_update, which is invoked by
+  // update_qualified_name.  The latter is itself invoked whenever the
+  // typedef is added to its scope, in scope_decl::add_member_decl.
+  if (internal)
+    return decl_base::priv_->internal_qualified_name_;
+  else
+    return decl_base::priv_->qualified_name_;
 }
 
 /// This implements the ir_traversable_base::traverse pure virtual
@@ -18779,6 +19914,16 @@ struct var_decl::priv
       naked_type_(t.get()),
       binding_(b)
   {}
+
+  /// Setter of the type of the variable.
+  ///
+  /// @param t the new variable type.
+  void
+  set_type(type_base_sptr t)
+  {
+    type_ = t;
+    naked_type_ = t.get();
+  }
 }; // end struct var_decl::priv
 
 /// Constructor of the @ref var_decl type.
@@ -18814,6 +19959,13 @@ var_decl::var_decl(const string&	name,
 const type_base_sptr
 var_decl::get_type() const
 {return priv_->type_.lock();}
+
+/// Setter of the type of the variable.
+///
+/// @param the new type of the variable.
+void
+var_decl::set_type(type_base_sptr& t)
+{priv_->set_type(t);}
 
 /// Getter of the type of the variable.
 ///
@@ -18914,10 +20066,12 @@ var_decl::set_scope(scope_decl* scope)
     get_context_rel()->set_scope(scope);
 }
 
-/// Compares two instances of @ref var_decl.
+/// Compares two instances of @ref var_decl without taking their type
+/// into account.
 ///
-/// If the two intances are different, set a bitfield to give some
-/// insight about the kind of differences there are.
+/// If the two intances are different modulo their type, set a
+/// bitfield to give some insight about the kind of differences there
+/// are.
 ///
 /// @param l the first artifact of the comparison.
 ///
@@ -18934,26 +20088,9 @@ var_decl::set_scope(scope_decl* scope)
 ///
 /// @return true if @p l equals @p r, false otherwise.
 bool
-equals(const var_decl& l, const var_decl& r, change_kind* k)
+var_equals_modulo_types(const var_decl& l, const var_decl& r, change_kind* k)
 {
   bool result = true;
-
-  // First test types of variables.  This should be fast because in
-  // the general case, most types should be canonicalized.
-  if (*l.get_naked_type() != *r.get_naked_type())
-    {
-      result = false;
-      if (k)
-	{
-	  if (!types_have_similar_structure(l.get_naked_type(),
-					    r.get_naked_type()))
-	    *k |= (LOCAL_TYPE_CHANGE_KIND);
-	  else
-	    *k |= SUBTYPE_CHANGE_KIND;
-	}
-      else
-	ABG_RETURN_FALSE;
-    }
 
   // If there are underlying elf symbols for these variables,
   // compare them.  And then compare the other parts.
@@ -19022,6 +20159,52 @@ equals(const var_decl& l, const var_decl& r, change_kind* k)
       else
 	ABG_RETURN_FALSE;
     }
+
+  ABG_RETURN(result);
+}
+
+/// Compares two instances of @ref var_decl.
+///
+/// If the two intances are different, set a bitfield to give some
+/// insight about the kind of differences there are.
+///
+/// @param l the first artifact of the comparison.
+///
+/// @param r the second artifact of the comparison.
+///
+/// @param k a pointer to a bitfield that gives information about the
+/// kind of changes there are between @p l and @p r.  This one is set
+/// iff @p k is non-null and the function returns false.
+///
+/// Please note that setting k to a non-null value does have a
+/// negative performance impact because even if @p l and @p r are not
+/// equal, the function keeps up the comparison in order to determine
+/// the different kinds of ways in which they are different.
+///
+/// @return true if @p l equals @p r, false otherwise.
+bool
+equals(const var_decl& l, const var_decl& r, change_kind* k)
+{
+  bool result = true;
+
+  // First test types of variables.  This should be fast because in
+  // the general case, most types should be canonicalized.
+  if (*l.get_naked_type() != *r.get_naked_type())
+    {
+      result = false;
+      if (k)
+	{
+	  if (!types_have_similar_structure(l.get_naked_type(),
+					    r.get_naked_type()))
+	    *k |= (LOCAL_TYPE_CHANGE_KIND);
+	  else
+	    *k |= SUBTYPE_CHANGE_KIND;
+	}
+      else
+	ABG_RETURN_FALSE;
+    }
+
+  result &= var_equals_modulo_types(l, r, k);
 
   ABG_RETURN(result);
 }
@@ -19498,11 +20681,9 @@ function_type::is_variadic() const
 ///
 ///@return true if lhs == rhs, false otherwise.
 bool
-equals(const function_type& l,
-       const function_type& r,
-       change_kind* k)
+equals(const function_type& l, const function_type& r, change_kind* k)
 {
-#define RETURN(value) return return_comparison_result(l, r, value)
+#define RETURN(value) CACHE_AND_RETURN_COMPARISON_RESULT(value)
 
   RETURN_TRUE_IF_COMPARISON_CYCLE_DETECTED(l, r);
 
@@ -19513,8 +20694,8 @@ equals(const function_type& l,
     // comparing them all over again.
     bool cached_result = false;
     if (l.get_environment().priv_->is_type_comparison_cached(l, r,
-							      cached_result))
-      return cached_result;
+							     cached_result))
+      ABG_RETURN(cached_result);
   }
 
   mark_types_as_being_compared(l, r);
@@ -19644,17 +20825,6 @@ equals(const function_type& l,
       else
 	RETURN(result);
     }
-
-  // We are done comparing these two types and we have a full
-  // understanding of how they might be different, if they are.  Let's
-  // cache the result of this comparison -- in case we are asked in a
-  // very near future to compare them again.
-  //
-  // TODO: If further profiling shows its necessity, maybe we should
-  // perform this caching also on the earlier return points of this
-  // function.  That would basically mean to redefine the RETURN macro
-  // to make it perform this caching for us.
-  l.get_environment().priv_->cache_type_comparison_result(l, r, result);
 
   RETURN(result);
 #undef RETURN
@@ -20151,7 +21321,7 @@ function_decl::function_decl(const string&	name,
 /// @return the pretty representation for a function.
 string
 function_decl::get_pretty_representation(bool internal,
-					 bool /*qualified_name*/) const
+					 bool qualified_name) const
 {
   const method_decl* mem_fn =
     dynamic_cast<const method_decl*>(this);
@@ -20175,7 +21345,9 @@ function_decl::get_pretty_representation(bool internal,
       : get_type_declaration(get_type()->get_return_type());
 
   if (type)
-    result += type->get_qualified_name(internal) + " ";
+    result += get_type_name(is_type(type).get(),
+			    qualified_name,
+			    internal) + " ";
 
   result += get_pretty_representation_of_declarator(internal);
 
@@ -20623,6 +21795,19 @@ function_decl::get_id() const
       const environment& env = get_type()->get_environment();
       if (elf_symbol_sptr s = get_symbol())
 	{
+	  string virtual_member_suffix;
+	  if (is_member_function(this))
+	      {
+		method_decl* m = is_method_decl(this);
+		ABG_ASSERT(m);
+		if (get_member_function_is_virtual(m))
+		  {
+		    if (is_declaration_only_class_or_union_type
+			(m->get_type()->get_class_type(),
+			 /*look_through_decl_only=*/true))
+		      virtual_member_suffix += "/o";
+		  }
+	      }
 	  if (s->has_aliases())
 	    // The symbol has several aliases, so let's use a scheme
 	    // that allows all aliased functions to have different
@@ -20631,6 +21816,9 @@ function_decl::get_id() const
 	  else
 	    // Let's use the full symbol name with its version as ID.
 	    priv_->id_ = env.intern(s->get_id_string());
+
+	  if (!virtual_member_suffix.empty())
+	    priv_->id_ = env.intern(priv_->id_ + virtual_member_suffix);
 	}
       else if (!get_linkage_name().empty())
 	priv_->id_= env.intern(get_linkage_name());
@@ -21855,30 +23043,6 @@ class_or_union::operator==(const class_or_union& other) const
   return class_or_union::operator==(o);
 }
 
-/// Dumps a textual representation (to the standard error output) of
-/// the content of the set of classes being currently compared using
-/// the @ref equal overloads.
-///
-/// This function is for debugging purposes.
-///
-/// @param c an artifact that belongs to the environment in which the
-/// classes of interest are being compared.
-void
-dump_classes_being_compared(const type_or_decl_base& c)
-{c.get_environment().priv_->dump_classes_being_compared();}
-
-/// Dumps a textual representation (to the standard error output) of
-/// the content of the set of function types being currently compared
-/// using the @ref equal overloads.
-///
-/// This function is for debugging purposes.
-///
-/// @param c an artifact that belongs to the environment in which the
-/// function types of interest are being compared.
-void
-dump_fn_types_being_compared(const type_or_decl_base& t)
-{t.get_environment().priv_->dump_fn_types_being_compared();}
-
 /// Compares two instances of @ref class_or_union.
 ///
 /// If the two intances are different, set a bitfield to give some
@@ -21901,9 +23065,6 @@ dump_fn_types_being_compared(const type_or_decl_base& t)
 bool
 equals(const class_or_union& l, const class_or_union& r, change_kind* k)
 {
-#define RETURN(value) return return_comparison_result(l, r, value,	\
-						      /*propagate_canonical_type=*/false);
-
   // if one of the classes is declaration-only, look through it to
   // get its definition.
   bool l_is_decl_only = l.get_is_declaration_only();
@@ -21987,7 +23148,7 @@ equals(const class_or_union& l, const class_or_union& r, change_kind* k)
       if (!val)
 	if (k)
 	  *k |= LOCAL_TYPE_CHANGE_KIND;
-      RETURN(val);
+      ABG_RETURN(val);
     }
 
   // No need to go further if the classes have different names or
@@ -22001,6 +23162,15 @@ equals(const class_or_union& l, const class_or_union& r, change_kind* k)
 
   if (types_defined_same_linux_kernel_corpus_public(l, r))
     return true;
+
+  //TODO: Maybe remove this (cycle detection and canonical type
+  //propagation handling) from here and have it only in the equal
+  //overload for class_decl and union_decl because this one ( the
+  //equal overload for class_or_union) is just a sub-routine of these
+  //two above.
+#define RETURN(value)							\
+  return return_comparison_result(l, r, value,				\
+				  /*propagate_canonical_type=*/false);
 
   RETURN_TRUE_IF_COMPARISON_CYCLE_DETECTED(l, r);
 
@@ -22152,7 +23322,7 @@ copy_member_function(const class_or_union_sptr& t, const method_decl* method)
 					    old_type->get_is_const(),
 					    old_type->get_size_in_bits(),
 					    old_type->get_alignment_in_bits()));
-  keep_type_alive(new_type);
+  t->get_translation_unit()->bind_function_type_life_time(new_type);
 
   method_decl_sptr
     new_method(new method_decl(method->get_name(),
@@ -23040,6 +24210,7 @@ method_decl::method_decl(const string&		name,
 void
 method_decl::set_linkage_name(const string& l)
 {
+  string old_lname = get_linkage_name();
   decl_base::set_linkage_name(l);
   // Update the linkage_name -> member function map of the containing
   // class declaration.
@@ -23049,6 +24220,14 @@ method_decl::set_linkage_name(const string& l)
       class_or_union_sptr cl = t->get_class_type();
       method_decl_sptr m(this, sptr_utils::noop_deleter());
       cl->priv_->mem_fns_map_[l] = m;
+      if (!old_lname.empty() && l != old_lname)
+	{
+	  if (method_decl_sptr m = cl->find_member_function_sptr(old_lname))
+	    {
+	      ABG_ASSERT(m.get() == this);
+	      cl->priv_->mem_fns_map_.erase(old_lname);
+	    }
+	}
     }
 }
 
@@ -23527,7 +24706,7 @@ equals(const class_decl& l, const class_decl& r, change_kind* k)
     // over again.
     bool result = false;
     if (l.get_environment().priv_->is_type_comparison_cached(l, r, result))
-      return result;
+      ABG_RETURN(result);
   }
 
   // if one of the classes is declaration-only then we take a fast
@@ -23559,7 +24738,7 @@ equals(const class_decl& l, const class_decl& r, change_kind* k)
 
   mark_types_as_being_compared(l, r);
 
-#define RETURN(value) return return_comparison_result(l, r, value);
+#define RETURN(value) CACHE_AND_RETURN_COMPARISON_RESULT(value)
 
   // Compare bases.
   if (l.get_base_specifiers().size() != r.get_base_specifiers().size())
@@ -23673,17 +24852,6 @@ equals(const class_decl& l, const class_decl& r, change_kind* k)
 	}
     }
 
-  // We are done comparing these two types and we have a full
-  // understanding of how they might be different, if they are.  Let's
-  // cache the result of this comparison -- in case we are asked in a
-  // very near future to compare them again.
-  //
-  // TODO: If further profiling shows its necessity, maybe we should
-  // perform this caching also on the earlier return points of this
-  // function.  That would basically mean to redefine the RETURN macro
-  // to make it perform this caching for us.
-  l.get_environment().priv_->cache_type_comparison_result(l, r, result);
-
   RETURN(result);
 #undef RETURN
 }
@@ -23759,6 +24927,20 @@ class_decl::operator==(const type_base& other) const
   if (!o)
     return false;
   return *this == *o;
+}
+
+/// Equality operator for class_decl.
+///
+/// Re-uses the equality operator that takes a decl_base.
+///
+/// @param other the other class_decl to compare against.
+///
+/// @return true iff the current instance equals the other one.
+bool
+class_decl::operator==(const class_or_union& other) const
+{
+  const decl_base& o = other;
+  return *this == o;
 }
 
 /// Comparison operator for @ref class_decl.
@@ -24112,6 +25294,19 @@ member_class_template::operator==(const member_base& other) const
     }
   catch(...)
     {return false;}
+}
+
+/// Equality operator of the the @ref member_class_template class.
+///
+/// @param other the other @ref member_class_template to compare against.
+///
+/// @return true iff the current instance equals @p other.
+bool
+member_class_template::operator==(const decl_base& other) const
+{
+  if (!decl_base::operator==(other))
+    return false;
+  return as_class_tdecl()->class_tdecl::operator==(other);
 }
 
 /// Comparison operator for the @ref member_class_template
@@ -24554,6 +25749,20 @@ union_decl::operator==(const type_base& other) const
   return *this == *o;
 }
 
+/// Equality operator for union_decl.
+///
+/// Re-uses the equality operator that takes a decl_base.
+///
+/// @param other the other union_decl to compare against.
+///
+/// @return true iff the current instance equals the other one.
+bool
+union_decl::operator==(const class_or_union&other) const
+{
+  const decl_base *o = dynamic_cast<const decl_base*>(&other);
+  return *this == *o;
+}
+
 /// Comparison operator for @ref union_decl.
 ///
 /// @param other the instance of @ref union_decl to compare against.
@@ -24674,6 +25883,9 @@ union_decl::~union_decl()
 bool
 equals(const union_decl& l, const union_decl& r, change_kind* k)
 {
+
+  RETURN_TRUE_IF_COMPARISON_CYCLE_DETECTED(l, r);
+
   {
     // First of all, let's see if these two types haven't already been
     // compared.  If so, and if the result of the comparison has been
@@ -24681,30 +25893,14 @@ equals(const union_decl& l, const union_decl& r, change_kind* k)
     // over again.
     bool result = false;
     if (l.get_environment().priv_->is_type_comparison_cached(l, r, result))
-      return result;
+      ABG_RETURN(result);
   }
-
-#define RETURN(value)				\
-  return return_comparison_result(l, r, value);
 
   bool result = equals(static_cast<const class_or_union&>(l),
 		       static_cast<const class_or_union&>(r),
 		       k);
 
-  mark_types_as_being_compared(l, r);
-
-  // We are done comparing these two types and we have a full
-  // understanding of how they might be different, if they are.  Let's
-  // cache the result of this comparison -- in case we are asked in a
-  // very near future to compare them again.
-  //
-  // TODO: If further profiling shows its necessity, maybe we should
-  // perform this caching also on the earlier return points of this
-  // function.  That would basically mean to redefine the RETURN macro
-  // to make it perform this caching for us.
-  l.get_environment().priv_->cache_type_comparison_result(l, r, result);
-
-  RETURN(result);
+  CACHE_COMPARISON_RESULT_AND_RETURN(result);
 }
 
 /// Copy a method of a @ref union_decl into a new @ref
@@ -24822,6 +26018,20 @@ template_decl::template_decl(const environment& env,
 /// Destructor.
 template_decl::~template_decl()
 {}
+
+/// Equality operator.
+///
+/// @param o the other instance to compare against.
+///
+/// @return true iff @p equals the current instance.
+bool
+template_decl::operator==(const decl_base& o) const
+{
+  const template_decl* other = dynamic_cast<const template_decl*>(&o);
+  if (!other)
+    return false;
+  return *this == *other;
+}
 
 /// Equality operator.
 ///
@@ -24978,6 +26188,11 @@ type_tparameter::type_tparameter(unsigned		index,
   runtime_type_instance(this);
 }
 
+/// Equality operator.
+///
+/// @param other the other template type parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
 bool
 type_tparameter::operator==(const type_base& other) const
 {
@@ -24993,6 +26208,51 @@ type_tparameter::operator==(const type_base& other) const
     {return false;}
 }
 
+/// Equality operator.
+///
+/// @param other the other template type parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
+bool
+type_tparameter::operator==(const type_decl& other) const
+{
+  if (!type_decl::operator==(other))
+    return false;
+
+  try
+    {
+      const type_tparameter& o = dynamic_cast<const type_tparameter&>(other);
+      return template_parameter::operator==(o);
+    }
+  catch (...)
+    {return false;}
+}
+
+/// Equality operator.
+///
+/// @param other the other template type parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
+bool
+type_tparameter::operator==(const decl_base& other) const
+{
+  if (!decl_base::operator==(other))
+    return false;
+
+  try
+    {
+      const type_tparameter& o = dynamic_cast<const type_tparameter&>(other);
+      return template_parameter::operator==(o);
+    }
+  catch (...)
+    {return false;}
+}
+
+/// Equality operator.
+///
+/// @param other the other template type parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
 bool
 type_tparameter::operator==(const template_parameter& other) const
 {
@@ -25005,6 +26265,11 @@ type_tparameter::operator==(const template_parameter& other) const
     {return false;}
 }
 
+/// Equality operator.
+///
+/// @param other the other template type parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
 bool
 type_tparameter::operator==(const type_tparameter& other) const
 {return *this == static_cast<const type_base&>(other);}
@@ -25139,8 +26404,32 @@ template_tparameter::template_tparameter(unsigned		index,
   runtime_type_instance(this);
 }
 
+/// Equality operator.
+///
+/// @param other the other template parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
 bool
 template_tparameter::operator==(const type_base& other) const
+{
+  try
+    {
+      const template_tparameter& o =
+	dynamic_cast<const template_tparameter&>(other);
+      return (type_tparameter::operator==(o)
+	      && template_decl::operator==(o));
+    }
+  catch(...)
+    {return false;}
+}
+
+/// Equality operator.
+///
+/// @param other the other template parameter to compare against.
+///
+/// @return true iff @p other equals the current instance.
+bool
+template_tparameter::operator==(const decl_base& other) const
 {
   try
     {
@@ -25827,8 +27116,8 @@ hash_type_or_decl(const type_or_decl_base_sptr& tod)
 /// This is a subroutine of hash_as_canonical_type_or_constant.
 ///
 /// For now, the only types allowed to be non canonicalized in the
-/// system are decl-only class/union, the void type and variadic
-/// parameter types.
+/// system are (typedefs & pointers to) decl-only class/union, the
+/// void type and variadic parameter types.
 ///
 /// @return true iff @p t is a one of the only types allowed to be
 /// non-canonicalized in the system.
@@ -25838,9 +27127,58 @@ is_non_canonicalized_type(const type_base *t)
   if (!t)
     return true;
 
+  return (// The IR nodes for the types below are unique across the
+	  // entire ABI corpus.  Thus, no need to canonicalize them.
+	  // Maybe we could say otherwise and canonicalize them once
+	  // for all so that they can be removed from here.
+	  is_unique_type(t)
+
+	  // An IR node for the types below can be equal to several
+	  // other types (i.e, a decl-only type t equals a fully
+	  // defined type of the same name in ODR-supported
+	  // languages). Hence, they can't be given a canonical type.
+	  //
+	  // TODO: Maybe add a mode that would detect ODR violations
+	  // that would make a decl-only type co-exists with several
+	  // different definitions of the type in the ABI corpus.
+	  || is_void_pointer_type_equivalent(t)
+	  || is_declaration_only_class_or_union_type(t,
+						     /*look_through_decl_only=*/true)
+	  || is_typedef_ptr_or_ref_to_decl_only_class_or_union_type(t));
+
+}
+
+/// Test if a type is unique in the entire environment.
+///
+/// Examples of unique types are void, void* and variadic parameter
+/// types.
+///
+/// @param t the type to test for.
+///
+/// @return true iff the type @p t is unique in the entire
+/// environment.
+bool
+is_unique_type(const type_base_sptr& t)
+{return is_unique_type(t.get());}
+
+/// Test if a type is unique in the entire environment.
+///
+/// Examples of unique types are void, void* and variadic parameter
+/// types.
+///
+/// @param t the type to test for.
+///
+/// @return true iff the type @p t is unique in the entire
+/// environment.
+bool
+is_unique_type(const type_base* t)
+{
+  if (!t)
+    return false;
+
   const environment& env = t->get_environment();
-  return (is_declaration_only_class_or_union_type(t)
-	  || env.is_void_type(t)
+  return (env.is_void_type(t)
+	  || env.is_void_pointer_type(t)
 	  || env.is_variadic_parameter_type(t));
 }
 
@@ -26141,11 +27479,16 @@ types_have_similar_structure(const type_base* first,
     {
       const array_type_def* ty2 = is_array_type(second);
       // TODO: Handle int[5][2] vs int[2][5] better.
-      if (ty1->get_size_in_bits() != ty2->get_size_in_bits()
-	  || ty1->get_dimension_count() != ty2->get_dimension_count()
-	  || !types_have_similar_structure(ty1->get_element_type(),
-					   ty2->get_element_type(),
-					   /*indirect_type=*/true))
+      if (!indirect_type)
+	{
+	  if (ty1->get_size_in_bits() != ty2->get_size_in_bits()
+	      || ty1->get_dimension_count() != ty2->get_dimension_count())
+	    return false;
+	}
+
+      if (!types_have_similar_structure(ty1->get_element_type(),
+					ty2->get_element_type(),
+					/*indirect_type=*/true))
 	return false;
 
       return true;
@@ -26219,6 +27562,27 @@ lookup_data_member(const type_base* type,
   return cou->find_data_member(dm_name).get();
 }
 
+/// Look for a data member of a given class, struct or union type and
+/// return it.
+///
+/// The data member is designated by its name.
+///
+/// @param type the class, struct or union type to consider.
+///
+/// @param dm the data member to lookup.
+///
+/// @return the data member iff it was found in @type or NULL if no
+/// data member with that name was found.
+const var_decl_sptr
+lookup_data_member(const type_base_sptr& type, const var_decl_sptr& dm)
+{
+  class_or_union_sptr cou = is_class_or_union_type(type);
+  if (!cou)
+    return var_decl_sptr();
+
+  return cou->find_data_member(dm);
+}
+
 /// Get the function parameter designated by its index.
 ///
 /// Note that the first function parameter has index 0.
@@ -26266,6 +27630,50 @@ build_internal_underlying_enum_type_name(const string &base_name,
   o << "-underlying-type-" << size;
 
   return o.str();
+}
+
+/// Find the first data member of a class or union which name matches
+/// a regular expression.
+///
+/// @param t the class or union to consider.
+///
+/// @param r the regular expression to consider.
+///
+/// @return the data member matched by @p r or nil if none was found.
+var_decl_sptr
+find_first_data_member_matching_regexp(const class_or_union& t,
+				       const regex::regex_t_sptr& r)
+{
+  for (auto data_member : t.get_data_members())
+    {
+      if (regex::match(r, data_member->get_name()))
+	return data_member;
+    }
+
+  return var_decl_sptr();
+}
+
+/// Find the last data member of a class or union which name matches
+/// a regular expression.
+///
+/// @param t the class or union to consider.
+///
+/// @param r the regular expression to consider.
+///
+/// @return the data member matched by @p r or nil if none was found.
+var_decl_sptr
+find_last_data_member_matching_regexp(const class_or_union& t,
+				      const regex::regex_t_sptr& regex)
+{
+  auto d = t.get_data_members().rbegin();
+  auto e = t.get_data_members().rend();
+  for (; d != e; ++d)
+    {
+      if (regex::match(regex, (*d)->get_name()))
+	return *d;
+    }
+
+  return var_decl_sptr();
 }
 
 bool
@@ -26746,8 +28154,11 @@ qualified_name_setter::do_update(abigail::ir::decl_base* d)
       if (d->get_name().empty())
 	d->priv_->qualified_name_ = abigail::interned_string();
       else
-	d->priv_->qualified_name_ =
-	  env.intern(d->priv_->qualified_parent_name_ + "::" + d->get_name());
+	{
+	  d->priv_->qualified_name_ =
+	    env.intern(d->priv_->qualified_parent_name_ + "::" + d->get_name());
+	  d->priv_->internal_qualified_name_ = env.intern(d->get_name());
+	}
     }
 
   if (d->priv_->scoped_name_.empty())

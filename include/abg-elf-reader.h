@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022 Red Hat, Inc.
+// Copyright (C) 2022-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -72,9 +72,12 @@ class reader : public fe_iface
 
   ~reader();
 
-  void
-  reset(const std::string&	elf_path,
-	 const vector<char**>&	debug_info_roots);
+  virtual void
+  initialize(const std::string&	elf_path,
+	     const vector<char**>&	debug_info_roots);
+
+  virtual void
+  initialize(const std::string& elf_path);
 
   const vector<char**>&
   debug_info_root_paths() const;
@@ -97,6 +100,9 @@ class reader : public fe_iface
   bool
   has_ctf_debug_info() const;
 
+  bool
+  has_btf_debug_info() const;
+
   const Dwarf*
   alternate_dwarf_debug_info() const;
 
@@ -117,6 +123,9 @@ class reader : public fe_iface
 
   const Elf_Scn*
   find_alternate_ctf_section() const;
+
+  const Elf_Scn*
+  find_btf_section() const;
 
   const vector<string>&
   dt_needed()const;

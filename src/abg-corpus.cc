@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 /// @file
 
@@ -13,6 +13,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <unordered_map>
+#include <set>
 
 #include "abg-internal.h"
 
@@ -109,6 +110,28 @@ corpus::functions&
 corpus::exported_decls_builder::exported_functions()
 {return priv_->fns_;}
 
+/// Test if a given function ID maps to several functions in the same corpus.
+///
+/// The magic of ELF symbol aliases makes it possible for an ELF
+/// symbol alias to designate several different functions.  This
+/// function tests if the ELF symbol of a given function has a aliases
+/// that designates another function or not.
+///
+/// @param fn the function to consider.
+///
+/// @return the set of functions designated by the ELF symbol of @p
+/// fn, or nullptr if the function ID maps to just @p fn.
+std::unordered_set<function_decl*>*
+corpus::exported_decls_builder::fn_id_maps_to_several_fns(function_decl* fn)
+{
+  std::unordered_set<function_decl*> *fns_for_id =
+    priv_->fn_id_is_in_id_fns_map(fn);
+  if (fns_for_id && fns_for_id->size() > 1)
+    return fns_for_id;
+
+  return nullptr;
+}
+
 /// Getter for the reference to the vector of exported variables.
 /// This vector is shared with with the @ref corpus.  It's where the
 /// set of exported variable is ultimately stored.
@@ -133,7 +156,7 @@ corpus::exported_decls_builder::exported_variables()
 ///
 /// @param fn the function to add the set of exported functions.
 void
-corpus::exported_decls_builder::maybe_add_fn_to_exported_fns(const function_decl* fn)
+corpus::exported_decls_builder::maybe_add_fn_to_exported_fns(function_decl* fn)
 {
   if (!fn->get_is_in_public_symbol_table())
     return;
@@ -313,9 +336,15 @@ corpus::priv::get_sorted_fun_symbols() const
 {
   if (!sorted_fun_symbols)
     {
-      auto filter = symtab_->make_filter();
-      filter.set_functions();
-      sorted_fun_symbols = elf_symbols(symtab_->begin(filter), symtab_->end());
+      if (symtab_)
+	{
+	  auto filter = symtab_->make_filter();
+	  filter.set_functions();
+	  sorted_fun_symbols = elf_symbols(symtab_->begin(filter),
+					   symtab_->end());
+	}
+      else
+	sorted_fun_symbols = elf_symbols();
     }
   return *sorted_fun_symbols;
 }
@@ -349,13 +378,18 @@ corpus::priv::get_sorted_undefined_fun_symbols() const
 {
   if (!sorted_undefined_fun_symbols)
     {
-      auto filter = symtab_->make_filter();
-      filter.set_functions();
-      filter.set_undefined_symbols();
-      filter.set_public_symbols(false);
+      if (symtab_)
+	{
+	  auto filter = symtab_->make_filter();
+	  filter.set_functions();
+	  filter.set_undefined_symbols();
+	  filter.set_public_symbols(false);
 
-      sorted_undefined_fun_symbols =
-	elf_symbols(symtab_->begin(filter), symtab_->end());
+	  sorted_undefined_fun_symbols =
+	    elf_symbols(symtab_->begin(filter), symtab_->end());
+	}
+      else
+	sorted_undefined_fun_symbols = elf_symbols();
     }
   return *sorted_undefined_fun_symbols;
 }
@@ -446,10 +480,16 @@ corpus::priv::get_sorted_var_symbols() const
 {
   if (!sorted_var_symbols)
     {
-      auto filter = symtab_->make_filter();
-      filter.set_variables();
+      if (symtab_)
+	{
+	  auto filter = symtab_->make_filter();
+	  filter.set_variables();
 
-      sorted_var_symbols = elf_symbols(symtab_->begin(filter), symtab_->end());
+	  sorted_var_symbols = elf_symbols(symtab_->begin(filter),
+					   symtab_->end());
+	}
+      else
+	sorted_var_symbols = elf_symbols();
     }
   return *sorted_var_symbols;
 }
@@ -483,13 +523,18 @@ corpus::priv::get_sorted_undefined_var_symbols() const
 {
   if (!sorted_undefined_var_symbols)
     {
-      auto filter = symtab_->make_filter();
-      filter.set_variables();
-      filter.set_undefined_symbols();
-      filter.set_public_symbols(false);
+      if (symtab_)
+	{
+	  auto filter = symtab_->make_filter();
+	  filter.set_variables();
+	  filter.set_undefined_symbols();
+	  filter.set_public_symbols(false);
 
-      sorted_undefined_var_symbols =
-	  elf_symbols(symtab_->begin(filter), symtab_->end());
+	  sorted_undefined_var_symbols =
+	    elf_symbols(symtab_->begin(filter), symtab_->end());
+	}
+      else
+	sorted_undefined_var_symbols = elf_symbols();
     }
   return *sorted_undefined_var_symbols;
 }
@@ -611,6 +656,20 @@ const environment&
 corpus::get_environment() const
 {return priv_->env;}
 
+/// Test if logging was requested.
+///
+/// @return true iff logging was requested.
+bool
+corpus::do_log() const
+{return priv_->do_log;}
+
+/// Request logging, or not.
+///
+/// @param f true iff logging is requested.
+void
+corpus::do_log(bool f)
+{priv_->do_log = f;}
+
 /// Add a translation unit to the current ABI Corpus.
 ///
 /// Note that two translation units with the same path (as returned by
@@ -715,7 +774,7 @@ corpus::recording_types_reachable_from_public_interface_supported()
 void
 corpus::record_type_as_reachable_from_public_interfaces(const type_base& t)
 {
-  string repr = get_pretty_representation(&t, /*internal=*/true);
+  string repr = get_pretty_representation(&t, /*internal=*/false);
   interned_string s = t.get_environment().intern(repr);
   priv_->get_public_types_pretty_representations()->insert(s);
 }
@@ -733,7 +792,7 @@ corpus::record_type_as_reachable_from_public_interfaces(const type_base& t)
 bool
 corpus::type_is_reachable_from_public_interfaces(const type_base& t) const
 {
-  string repr = get_pretty_representation(&t, /*internal=*/true);
+  string repr = get_pretty_representation(&t, /*internal=*/false);
   interned_string s = t.get_environment().intern(repr);
 
   return (priv_->get_public_types_pretty_representations()->find(s)
@@ -1278,12 +1337,11 @@ corpus::get_functions() const
 ///
 /// @return the vector functions which ID is @p id, or nil if no
 /// function with that ID was found.
-const vector<function_decl*>*
+const std::unordered_set<function_decl*>*
 corpus::lookup_functions(const string& id) const
 {
   exported_decls_builder_sptr b = get_exported_decls_builder();
-  str_fn_ptrs_map_type::const_iterator i =
-    b->priv_->id_fns_map_.find(id);
+  auto i = b->priv_->id_fns_map_.find(id);
   if (i == b->priv_->id_fns_map_.end())
     return 0;
   return &i->second;
@@ -1597,6 +1655,7 @@ operator&=(corpus::origin &l, corpus::origin r)
 /// Type of the private data of @ref corpus_group
 struct corpus_group::priv
 {
+  std::set<string>		corpora_paths;
   corpora_type			corpora;
   istring_function_decl_ptr_map_type fns_map;
   vector<function_decl*>	fns;
@@ -1686,6 +1745,10 @@ corpus_group::add_corpus(const corpus_sptr& corp)
   if (!corp)
     return;
 
+  if (!corp->get_path().empty()
+      && has_corpus(corp->get_path()))
+    return;
+
   // Ensure the new architecture name matches the current one.
   string cur_arch = get_architecture_name(),
     corp_arch = corp->get_architecture_name();
@@ -1701,11 +1764,26 @@ corpus_group::add_corpus(const corpus_sptr& corp)
 
   priv_->corpora.push_back(corp);
   corp->set_group(this);
+  priv_->corpora_paths.insert(corp->get_path());
 
   /// Add the unreferenced function and variable symbols of this
   /// corpus to the unreferenced symbols of the current corpus group.
   priv_->add_unref_fun_symbols(get_unreferenced_function_symbols());
   priv_->add_unref_var_symbols(get_unreferenced_variable_symbols());
+}
+
+/// Test if a corpus of a given path has been added to the group.
+///
+/// @param path the path to the corpus to consider.
+///
+/// @return true iff a corpus with path @p path is already present in
+/// the group⋅
+bool
+corpus_group::has_corpus(const string& path)
+{
+  if (priv_->corpora_paths.find(path) != priv_->corpora_paths.end())
+    return true;
+  return false;
 }
 
 /// Getter of the vector of corpora held by the current @ref
