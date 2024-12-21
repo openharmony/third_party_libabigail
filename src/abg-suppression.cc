@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2016-2022 Red Hat, Inc.
+// Copyright (C) 2016-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -24,6 +24,7 @@ ABG_BEGIN_EXPORT_DECLARATIONS
 #include "abg-suppression.h"
 #include "abg-tools-utils.h"
 #include "abg-fe-iface.h"
+#include "abg-comparison.h"
 
 ABG_END_EXPORT_DECLARATIONS
 // </headers defining libabigail's API>
@@ -36,8 +37,27 @@ namespace abigail
 namespace suppr
 {
 
+// Inject the abigail::comparison namespace in here.
+using namespace comparison;
+
 using std::dynamic_pointer_cast;
 using regex::regex_t_sptr;
+
+/// @return the string constant "offset_of_flexible_array_data_member".
+static const string&
+OFFSET_OF_FLEXIBLE_ARRAY_DATA_MEMBER_STRING()
+{
+  static string s = "offset_of_flexible_array_data_member";
+  return s;
+}
+
+/// @return the string constant "end";
+static const string&
+END_STRING()
+{
+  static string s = "end";
+  return s;
+}
 
 // <parsing stuff>
 
@@ -268,6 +288,67 @@ suppression_base::has_soname_related_property() const
 {
   return (!(get_soname_regex_str().empty()
 	    && get_soname_not_regex_str().empty()));
+}
+
+/// Constructor of the @ref negated_suppression_base.
+negated_suppression_base::negated_suppression_base()
+{
+}
+
+/// Destructor of the @ref negated_suppression_base.
+negated_suppression_base::~negated_suppression_base()
+{
+}
+
+/// Test if a suppression specification is a negated suppression.
+///
+/// @param s the suppression to consider.
+///
+/// @return true iff @p s is an instance of @ref
+/// negated_suppression_base.
+bool
+is_negated_suppression(const suppression_base& s)
+{
+  bool result = true;
+  try
+    {
+      dynamic_cast<const negated_suppression_base&>(s);
+    }
+  catch (...)
+    {
+      result = false;
+    }
+  return result;
+}
+
+/// Test if a suppression specification is a negated suppression.
+///
+/// @param s the suppression to consider.
+///
+/// @return true a pointer to the @ref negated_suppression_base which
+/// @p s, or nil if it's not a negated suppression.
+/// negated_suppression_base.
+const negated_suppression_base*
+is_negated_suppression(const suppression_base* s)
+{
+  const negated_suppression_base* result = nullptr;
+  result = dynamic_cast<const negated_suppression_base*>(s);
+  return result;
+}
+
+/// Test if a suppression specification is a negated suppression.
+///
+/// @param s the suppression to consider.
+///
+/// @return true a pointer to the @ref negated_suppression_base which
+/// @p s, or nil if it's not a negated suppression.
+/// negated_suppression_base.
+negated_suppression_sptr
+is_negated_suppression(const suppression_sptr& s)
+{
+  negated_suppression_sptr result;
+  result = dynamic_pointer_cast<negated_suppression_base>(s);
+  return result;
 }
 
 /// Check if the SONAMEs of the two binaries being compared match the
@@ -569,6 +650,52 @@ void
 type_suppression::set_reach_kind(reach_kind k)
 {priv_->reach_kind_ = k;}
 
+/// Getter of the "has_size_change" property.
+///
+/// @return the value of the "has_size_change" property.
+bool
+type_suppression::get_has_size_change() const
+{return priv_->has_size_change_;}
+
+/// Setter of the "has_size_change" property.
+///
+/// @param flag the new value of the "has_size_change" property.
+void
+type_suppression::set_has_size_change(bool flag)
+{priv_->has_size_change_ = flag;}
+
+/// Getter of the "potential_data_member_names" property.
+///
+/// @return the set of potential data member names of this
+/// suppression.
+const unordered_set<string>&
+type_suppression::get_potential_data_member_names() const
+{return priv_->potential_data_members_;}
+
+/// Setter of the "potential_data_member_names" property.
+///
+/// @param s the new set of potential data member names of this
+/// suppression.
+void
+type_suppression::set_potential_data_member_names
+(const string_set_type& s) const
+{priv_->potential_data_members_ = s;}
+
+/// Getter of the "potential_data_member_names_regex" string.
+///
+/// @return the "potential_data_member_names_regex" string.
+const string&
+type_suppression::get_potential_data_member_names_regex_str() const
+{return priv_->potential_data_members_regex_str_;}
+
+/// Setter of the "potential_data_member_names_regex" string.
+///
+/// @param d the new "potential_data_member_names_regex" string.
+void
+type_suppression::set_potential_data_member_names_regex_str
+(const string& d) const
+{priv_->potential_data_members_regex_str_ = d;}
+
 /// Setter for the vector of data member insertion ranges that
 /// specifies where a data member is inserted as far as this
 /// suppression specification is concerned.
@@ -658,6 +785,28 @@ type_suppression::get_changed_enumerator_names() const
 void
 type_suppression::set_changed_enumerator_names(const vector<string>& n)
 {priv_->changed_enumerator_names_ = n;}
+
+/// Getter of the vector of the regular expression strings for changed
+/// enumerators that are supposed to be suppressed. Note that this
+/// will be "valid" only if the type suppression has the
+/// 'type_kind = enum' property.
+///
+/// @return the vector of the regular expression strings that are
+/// supposed to match enumertor names to be suppressed.
+const vector<regex::regex_t_sptr>&
+type_suppression::get_changed_enumerators_regexp() const
+{return priv_->changed_enumerators_regexp_;}
+
+/// Setter of the vector of the regular expression strings for changed
+/// enumerators that are supposed to be suppressed. Note that this
+/// will be "valid" only if the type suppression has the
+/// 'type_kind = enum' property.
+///
+/// @param n the vector of the regular expression strings that are
+/// supposed to match enumertor names to be suppressed.
+void
+type_suppression::set_changed_enumerators_regexp(const vector<regex::regex_t_sptr>& n)
+{priv_->changed_enumerators_regexp_ = n;}
 
 /// Evaluate this suppression specification on a given diff node and
 /// say if the diff node should be suppressed or not.
@@ -778,6 +927,43 @@ type_suppression::suppresses_diff(const diff* diff) const
   // Now let's consider class diffs in the context of a suppr spec
   // that contains properties like "has_data_member_inserted_*".
 
+  const class_or_union_diff* cou_diff = is_class_or_union_diff(d);
+  if (cou_diff)
+    {
+      class_or_union_sptr f = cou_diff->first_class_or_union();
+      // We are looking at the a class or union diff ...
+      if (!get_potential_data_member_names().empty())
+	{
+	  // ... and the suppr spec has a:
+	  //
+	  //    "has_data_member = {foo, bar}" property
+	  //
+	  for (string var_name : get_potential_data_member_names())
+	    if (!f->find_data_member(var_name))
+	      return false;
+	}
+
+      if (!get_potential_data_member_names_regex_str().empty())
+	{
+	  if (const regex_t_sptr& data_member_name_regex =
+	      priv_->get_potential_data_member_names_regex())
+	    {
+	      bool data_member_matched = false;
+	      for (var_decl_sptr dm : f->get_data_members())
+		{
+		  if (regex::match(data_member_name_regex, dm->get_name()))
+		    {
+		      data_member_matched = true;
+		      break;
+		    }
+		}
+	      if (!data_member_matched)
+		return false;
+	    }
+	}
+    }
+
+  // Evaluate has_data_member_inserted_*" clauses.
   const class_diff* klass_diff = dynamic_cast<const class_diff*>(d);
   if (klass_diff)
     {
@@ -786,75 +972,54 @@ type_suppression::suppresses_diff(const diff* diff) const
 	{
 	  // ... and the suppr spec contains a
 	  // "has_data_member_inserted_*" clause ...
-	  if (klass_diff->deleted_data_members().empty()
-	      && (klass_diff->first_class_decl()->get_size_in_bits()
-		  <= klass_diff->second_class_decl()->get_size_in_bits()))
+	  if ((klass_diff->first_class_decl()->get_size_in_bits()
+	       == klass_diff->second_class_decl()->get_size_in_bits())
+	      || get_has_size_change())
 	    {
 	      // That "has_data_member_inserted_*" clause doesn't hold
-	      // if the class has deleted data members or shrunk.
+	      // if the class changed size, unless the user specified
+	      // that suppression applies to types that have size
+	      // change.
 
 	      const class_decl_sptr& first_type_decl =
 		klass_diff->first_class_decl();
 
-	      for (string_decl_base_sptr_map::const_iterator m =
-		     klass_diff->inserted_data_members().begin();
-		   m != klass_diff->inserted_data_members().end();
-		   ++m)
+	      if (klass_diff->inserted_data_members().empty()
+		  && klass_diff->changed_data_members().empty())
+		// So there is a has_data_member_inserted_* clause,
+		// but no data member was inserted.  That means the
+		// clause is falsified.
+		return false;
+
+	      // All inserted data members must be in an allowed
+	      // insertion range.
+	      for (const auto& m : klass_diff->inserted_data_members())
 		{
-		  decl_base_sptr member = m->second;
-		  size_t dm_offset = get_data_member_offset(member);
+		  decl_base_sptr member = m.second;
 		  bool matched = false;
 
-		  for (insertion_ranges::const_iterator i =
-			 get_data_member_insertion_ranges().begin();
-		       i != get_data_member_insertion_ranges().end();
-		       ++i)
-		    {
-		      type_suppression::insertion_range_sptr range = *i;
-		      uint64_t range_begin_val = 0, range_end_val = 0;
-		      if (!type_suppression::insertion_range::eval_boundary
-			  (range->begin(), first_type_decl, range_begin_val))
-			break;
-		      if (!type_suppression::insertion_range::eval_boundary
-			  (range->end(), first_type_decl, range_end_val))
-			break;
-
-		      uint64_t range_begin = range_begin_val;
-		      uint64_t range_end = range_end_val;
-
-		      if (insertion_range::boundary_value_is_end(range_begin)
-			  && insertion_range::boundary_value_is_end(range_end))
-			{
-			  // This idiom represents the predicate
-			  // "has_data_member_inserted_at = end"
-			  if (dm_offset >
-			      get_data_member_offset(get_last_data_member
-						     (first_type_decl)))
-			    {
-			      // So the data member was added after
-			      // last data member of the klass.  That
-			      // matches the suppr spec
-			      // "has_data_member_inserted_at = end".
-			      matched = true;
-			      continue;
-			    }
-			}
-
-			if (range_begin > range_end)
-			  // Wrong suppr spec.  Ignore it.
-			  continue;
-
-		      if (dm_offset < range_begin || dm_offset > range_end)
-			// The offset of the added data member doesn't
-			// match the insertion range specified.  So
-			// the diff object won't be suppressed.
-			continue;
-
-		      // If we reached this point, then all the
-		      // insertion range constraints have been
-		      // satisfied.  So
+		  for (const auto& range : get_data_member_insertion_ranges())
+		    if (is_data_member_offset_in_range(is_var_decl(member),
+						       range,
+						       first_type_decl.get()))
 		      matched = true;
-		    }
+
+		  if (!matched)
+		    return false;
+		}
+
+	      // Similarly, each data member that replaced another one
+	      // must be in an allowed insertion range.
+	      for (const auto& m : klass_diff->changed_data_members())
+		{
+		  var_decl_sptr member = m.second->second_var();
+		  bool matched = false;
+
+		  for (const auto& range : get_data_member_insertion_ranges())
+		    if (is_data_member_offset_in_range(member, range,
+						       first_type_decl.get()))
+		      matched = true;
+
 		  if (!matched)
 		    return false;
 		}
@@ -875,9 +1040,12 @@ type_suppression::suppresses_diff(const diff* diff) const
       // ... and yet carries some changed enumerators!
       && !enum_dif->changed_enumerators().empty())
     {
-      // Make sure that all changed enumerators are listed in the
-      // vector of enumerator names returned by the
-      // get_changed_enumerator_names() member function.
+
+      // Make sure that all changed enumerators are either:
+      //  1. listed in the vector of enumerator names returned
+      //     by the get_changed_enumerator_names() member function
+      //  2. match a regular expression returned by the
+      //     get_changed_enumerators_regexp() member function
       bool matched = true;
       for (string_changed_enumerator_map::const_iterator i =
 	     enum_dif->changed_enumerators().begin();
@@ -885,13 +1053,20 @@ type_suppression::suppresses_diff(const diff* diff) const
 	   ++i)
 	{
 	  matched &= true;
-	  if (std::find(get_changed_enumerator_names().begin(),
-			get_changed_enumerator_names().end(),
-			i->first) == get_changed_enumerator_names().end())
-	    {
-	      matched &= false;
-	      break;
-	    }
+	  if ((std::find(get_changed_enumerator_names().begin(),
+			 get_changed_enumerator_names().end(),
+			 i->first) == get_changed_enumerator_names().end())
+	     &&
+	      (std::find_if(get_changed_enumerators_regexp().begin(),
+			    get_changed_enumerators_regexp().end(),
+			    [&] (const regex_t_sptr& enum_regexp)
+		{
+		  return regex::match(enum_regexp, i->first);
+		}) == get_changed_enumerators_regexp().end()))
+	  {
+	    matched &= false;
+	    break;
+	  }
 	}
       if (!matched)
 	return false;
@@ -1323,6 +1498,25 @@ type_suppression::insertion_range::create_fn_call_expr_boundary(const string& s)
   return result;
 }
 
+/// Create a named boundary.
+///
+/// The return value is to be used as a boundary for an instance of
+/// @ref type_suppression::insertion_range.  The value of that
+/// boundary is a named constant that is to be evaluated to an integer
+/// value, in the context of a @ref class_decl.  That evaluate is
+/// performed by the function
+/// type_suppression::insertion_range::eval_boundary().
+///
+/// @param name the name of the boundary.
+///
+/// @return the newly created named boundary.
+type_suppression::insertion_range::named_boundary_sptr
+type_suppression::insertion_range::create_named_boundary(const string& name)
+{
+  named_boundary_sptr result(new named_boundary(name));
+  return result;
+}
+
 /// Evaluate an insertion range boundary to get a resulting integer
 /// value.
 ///
@@ -1335,9 +1529,9 @@ type_suppression::insertion_range::create_fn_call_expr_boundary(const string& s)
 /// @return true iff the evaluation was successful and @p value
 /// contains the resulting value.
 bool
-type_suppression::insertion_range::eval_boundary(boundary_sptr	 boundary,
-						 class_decl_sptr context,
-						 uint64_t&	 value)
+type_suppression::insertion_range::eval_boundary(const boundary_sptr	boundary,
+						 const class_or_union*	context,
+						 uint64_t&		value)
 {
   if (integer_boundary_sptr b = is_integer_boundary(boundary))
     {
@@ -1347,36 +1541,82 @@ type_suppression::insertion_range::eval_boundary(boundary_sptr	 boundary,
   else if (fn_call_expr_boundary_sptr b = is_fn_call_expr_boundary(boundary))
     {
       ini::function_call_expr_sptr fn_call = b->as_function_call_expr();
-      if ((fn_call->get_name() == "offset_of"
-	   || fn_call->get_name() == "offset_after")
+      if (fn_call
+	  && (fn_call->get_name() == "offset_of"
+	      || fn_call->get_name() == "offset_after"
+	      || fn_call->get_name() == "offset_of_first_data_member_regexp"
+	      || fn_call->get_name() == "offset_of_last_data_member_regexp")
 	  && fn_call->get_arguments().size() == 1)
 	{
-	  string member_name = fn_call->get_arguments()[0];
-	  for (class_decl::data_members::const_iterator it =
-		 context->get_data_members().begin();
-	       it != context->get_data_members().end();
-	       ++it)
+	  if (fn_call->get_name() == "offset_of"
+	      || fn_call->get_name() == "offset_after")
 	    {
-	      if (!get_data_member_is_laid_out(**it))
-		continue;
-	      if ((*it)->get_name() == member_name)
+	      string member_name = fn_call->get_arguments()[0];
+	      for (class_decl::data_members::const_iterator it =
+		     context->get_data_members().begin();
+		   it != context->get_data_members().end();
+		   ++it)
 		{
-		  if (fn_call->get_name() == "offset_of")
-		    value = get_data_member_offset(*it);
-		  else if (fn_call->get_name() == "offset_after")
+		  if (!get_data_member_is_laid_out(**it))
+		    continue;
+		  if ((*it)->get_name() == member_name)
 		    {
-		      if (!get_next_data_member_offset(context, *it, value))
+		      if (fn_call->get_name() == "offset_of")
+			value = get_data_member_offset(*it);
+		      else if (fn_call->get_name() == "offset_after")
 			{
-			  value = get_data_member_offset(*it) +
-			    (*it)->get_type()->get_size_in_bits();
+			  if (!get_next_data_member_offset(context, *it, value))
+			    {
+			      value = get_data_member_offset(*it) +
+				(*it)->get_type()->get_size_in_bits();
+			    }
 			}
+		      else
+			// We should not reach this point.
+			abort();
+		      return true;
 		    }
-		  else
-		    // We should not reach this point.
-		    abort();
+		}
+	    }
+	  else if (fn_call->get_name() == "offset_of_first_data_member_regexp"
+		   || fn_call->get_name() == "offset_of_last_data_member_regexp")
+	    {
+	      string name_regexp = fn_call->get_arguments()[0];
+	      auto r = regex::compile(name_regexp);
+	      var_decl_sptr dm;
+
+	      if (fn_call->get_name() == "offset_of_first_data_member_regexp")
+		dm = find_first_data_member_matching_regexp(*context, r);
+	      else if (fn_call->get_name() == "offset_of_last_data_member_regexp")
+		dm = find_last_data_member_matching_regexp(*context, r);
+
+	      if (dm)
+		{
+		  value = get_data_member_offset(dm);
 		  return true;
 		}
 	    }
+	}
+    }
+  else if (named_boundary_sptr b = is_named_boundary(boundary))
+    {
+      if (b->get_name() == OFFSET_OF_FLEXIBLE_ARRAY_DATA_MEMBER_STRING())
+	{
+	  // Look at the last data member of 'context' and make sure
+	  // its type is an array with non-finite size.
+	  if (var_decl_sptr dm = has_flexible_array_data_member(is_class_type(context)))
+	    {
+	      value = get_data_member_offset(dm);
+	      return true;
+	    }
+	}
+      else if (b->get_name() == END_STRING())
+	{
+	  // The 'end' of a struct is represented by the value
+	  // std::numeric_limits<uint64_t>::max(), recognized by
+	  // type_suppression::insertion_range::boundary_value_is_end.
+	  value = std::numeric_limits<uint64_t>::max();
+	  return true;
 	}
     }
   return false;
@@ -1408,7 +1648,8 @@ is_integer_boundary(type_suppression::insertion_range::boundary_sptr b)
 {return dynamic_pointer_cast<type_suppression::insertion_range::integer_boundary>(b);}
 
 /// Tests if a given instance of @ref
-/// type_suppression::insertion_range::boundary is actually an function call expression boundary.
+/// type_suppression::insertion_range::boundary is actually a
+/// function call expression boundary.
 ///
 /// @param b the boundary to test.
 ///
@@ -1419,6 +1660,18 @@ is_integer_boundary(type_suppression::insertion_range::boundary_sptr b)
 type_suppression::insertion_range::fn_call_expr_boundary_sptr
 is_fn_call_expr_boundary(type_suppression::insertion_range::boundary_sptr b)
 {return dynamic_pointer_cast<type_suppression::insertion_range::fn_call_expr_boundary>(b);}
+
+/// Test if a given instance of @ref
+/// type_suppression::insertion_range::boundary is actually a named boundary.
+///
+/// @param b the boundary to consider.
+///
+/// @return the instance of @ref
+/// type_suppression::insertion_range::named_boundary if @p b is a
+/// named boundary, or nil.
+type_suppression::insertion_range::named_boundary_sptr
+is_named_boundary(type_suppression::insertion_range::boundary_sptr b)
+{return dynamic_pointer_cast<type_suppression::insertion_range::named_boundary>(b);}
 
 /// The private data type of @ref
 /// type_suppression::insertion_range::boundary.
@@ -1521,6 +1774,35 @@ type_suppression::insertion_range::fn_call_expr_boundary::operator ini::function
 type_suppression::insertion_range::fn_call_expr_boundary::~fn_call_expr_boundary()
 {}
 
+/// The private data type for the @ref
+/// type_suppression::insertion_range::named_boundary.
+struct type_suppression::insertion_range::named_boundary::priv
+{
+  string name_;
+
+  priv()
+  {}
+
+  priv(const string& name)
+    : name_(name)
+  {}
+}; // end struct type_suppression::insertion_range::named_boundary::priv
+
+/// Constructor for @ref
+/// type_suppression::insertion_range::named_boundary
+///
+/// @param name the name of the @ref named_boundary type.
+type_suppression::insertion_range::named_boundary::named_boundary(const string& name)
+  : priv_(new priv(name))
+{}
+
+/// Getter for the name of the named boundary.
+///
+/// @return the name of the named boundary.
+const string&
+type_suppression::insertion_range::named_boundary::get_name() const
+{return priv_->name_;}
+
 /// Test if an instance of @ref suppression is an instance of @ref
 /// type_suppression.
 ///
@@ -1534,6 +1816,52 @@ is_type_suppression(suppression_sptr suppr)
 {return dynamic_pointer_cast<type_suppression>(suppr);}
 
 // </type_suppression stuff>
+
+// <negated_type_suppression stuff>
+
+/// Constructor for @ref negated_type_suppression.
+///
+/// @param label the label of the suppression.  This is just a free
+/// form comment explaining what the suppression is about.
+///
+/// @param type_name_regexp the regular expression describing the
+/// types about which diff reports should be suppressed.  If it's an
+/// empty string, the parameter is ignored.
+///
+/// @param type_name the name of the type about which diff reports
+/// should be suppressed.  If it's an empty string, the parameter is
+/// ignored.
+///
+/// Note that parameter @p type_name_regexp and @p type_name_regexp
+/// should not necessarily be populated.  It usually is either one or
+/// the other that the user wants.
+negated_type_suppression::negated_type_suppression(const string& label,
+						   const string& type_name_regexp,
+						   const string& type_name)
+  : type_suppression(label, type_name_regexp, type_name),
+    negated_suppression_base()
+{
+}
+
+/// Evaluate this suppression specification on a given diff node and
+/// say if the diff node should be suppressed or not.
+///
+/// @param diff the diff node to evaluate this suppression
+/// specification against.
+///
+/// @return true if @p diff should be suppressed.
+bool
+negated_type_suppression::suppresses_diff(const diff* diff) const
+{
+  return !type_suppression::suppresses_diff(diff);
+}
+
+/// Destructor of the @ref negated_type_suppression type.
+negated_type_suppression::~negated_type_suppression()
+{
+}
+
+// </negated_type_suppression stuff>
 
 /// Parse the value of the "type_kind" property in the "suppress_type"
 /// section.
@@ -1597,7 +1925,8 @@ read_type_suppression(const ini::config::section& section)
 {
   type_suppression_sptr result;
 
-  if (section.get_name() != "suppress_type")
+  if (section.get_name() != "suppress_type"
+      && section.get_name() != "allow_type")
     return result;
 
   static const char *const sufficient_props[] = {
@@ -1624,6 +1953,13 @@ read_type_suppression(const ini::config::section& section)
 
   string drop_artifact_str = drop_artifact
     ? drop_artifact->get_value()->as_string()
+    : "";
+
+  ini::simple_property_sptr has_size_change =
+    is_simple_property(section.find_property("has_size_change"));
+
+  string has_size_change_str = has_size_change
+    ? has_size_change->get_value()->as_string()
     : "";
 
   ini::simple_property_sptr label =
@@ -1720,6 +2056,56 @@ read_type_suppression(const ini::config::section& section)
 	read_suppression_reach_kind(reach_kind_prop->get_value()->as_string());
     }
 
+  // Support has_data_member = {}
+  string_set_type potential_data_member_names;
+  if (ini::property_sptr propertee = section.find_property("has_data_member"))
+    {
+      // This is either has_data_member = {foo, blah} or
+      // has_data_member = foo.
+      ini::tuple_property_value_sptr tv;
+      ini::string_property_value_sptr sv;
+      if (ini::tuple_property_sptr prop = is_tuple_property(propertee))
+	// Value is of the form {foo,blah}
+	tv = prop->get_value();
+      else if (ini::simple_property_sptr prop = is_simple_property(propertee))
+	// Value is of the form foo.
+	sv = prop->get_value();
+
+      // Ensure that the property value has the form {"foo", "blah", ...};
+      // Meaning it's a tuple of one element which is a list or a string.
+      if (tv
+	  && tv->get_value_items().size() == 1
+	  && (is_list_property_value(tv->get_value_items().front())
+	      || is_string_property_value(tv->get_value_items().front())))
+	{
+	  ini::list_property_value_sptr val =
+	    is_list_property_value(tv->get_value_items().front());
+	  if (!val)
+	    {
+	      // We have just one potential data member name,as a
+	      // string_property_value.
+	      string name =
+		is_string_property_value(tv->get_value_items().front())
+		->as_string();
+	      potential_data_member_names.insert(name);
+	    }
+	  else
+	    for (const string& name : val->get_content())
+	      potential_data_member_names.insert(name);
+	}
+      else if (sv)
+	{
+	  string name = sv->as_string();
+	  potential_data_member_names.insert(name);
+	}
+    }
+
+  // Support has_data_member_regexp = str
+  string potential_data_member_names_regexp_str;
+  if (ini::simple_property_sptr prop =
+      is_simple_property(section.find_property("has_data_member_regexp")))
+      potential_data_member_names_regexp_str = prop->get_value()->as_string();
+
   // Support has_data_member_inserted_at
   vector<type_suppression::insertion_range_sptr> insert_ranges;
   bool consider_data_member_insertion = false;
@@ -1730,8 +2116,10 @@ read_type_suppression(const ini::config::section& section)
       //   has_data_member_inserted_at = <one-string-property-value>
       string ins_point = prop->get_value()->as_string();
       type_suppression::insertion_range::boundary_sptr begin, end;
-      if (ins_point == "end")
-	begin = type_suppression::insertion_range::create_integer_boundary(-1);
+      if (ins_point == END_STRING())
+	begin = type_suppression::insertion_range::create_named_boundary(ins_point);
+      else if (ins_point == OFFSET_OF_FLEXIBLE_ARRAY_DATA_MEMBER_STRING())
+	begin = type_suppression::insertion_range::create_named_boundary(ins_point);
       else if (isdigit(ins_point[0]))
 	begin = type_suppression::insertion_range::create_integer_boundary
 	  (atoi(ins_point.c_str()));
@@ -1758,9 +2146,9 @@ read_type_suppression(const ini::config::section& section)
       // and not (for instance):
       //  has_data_member_inserted_between = {{0 , end}, {1, foo}}
       //
-      //  This means that the tuple_property_value contains just one
-      //  value, which is a list_property that itself contains 2
-      //  values.
+      // This means that the tuple_property_value contains just one
+      // value, which is a list_property that itself contains 2
+      // values.
       type_suppression::insertion_range::boundary_sptr begin, end;
       ini::tuple_property_value_sptr v = prop->get_value();
       if (v
@@ -1905,7 +2293,39 @@ read_type_suppression(const ini::config::section& section)
 	changed_enumerator_names.push_back(p->get_value()->as_string());
     }
 
-  result.reset(new type_suppression(label_str, name_regex_str, name_str));
+  /// Support 'changed_enumerators_regexp = .*_foo, bar_[0-9]+, baz'
+  ///
+  /// If the current type is an enum and if it carries changed
+  /// enumerators that match regular expressions listed in the
+  /// changed_enumerators_regexp property value then it should be
+  /// suppressed.
+
+  ini::property_sptr changed_enumerators_regexp_prop =
+    section.find_property("changed_enumerators_regexp");
+
+  vector<regex_t_sptr> changed_enumerators_regexp;
+  if (changed_enumerators_regexp_prop)
+    {
+      if (ini::list_property_sptr p =
+	  is_list_property(changed_enumerators_regexp_prop))
+      {
+	for (string e : p->get_value()->get_content())
+	  changed_enumerators_regexp.push_back(regex::compile(e));
+      }
+      else if (ini::simple_property_sptr p =
+	       is_simple_property(changed_enumerators_regexp_prop))
+      {
+	changed_enumerators_regexp.push_back(
+	  regex::compile(p->get_value()->as_string())
+	);
+      }
+    }
+
+  if (section.get_name() == "suppress_type")
+    result.reset(new type_suppression(label_str, name_regex_str, name_str));
+  else if (section.get_name() == "allow_type")
+    result.reset(new negated_type_suppression(label_str, name_regex_str,
+					      name_str));
 
   if (consider_type_kind)
     {
@@ -1918,6 +2338,13 @@ read_type_suppression(const ini::config::section& section)
       result->set_consider_reach_kind(true);
       result->set_reach_kind(reach_kind);
     }
+
+  if (!potential_data_member_names.empty())
+    result->set_potential_data_member_names(potential_data_member_names);
+
+  if (!potential_data_member_names_regexp_str.empty())
+    result->set_potential_data_member_names_regex_str
+      (potential_data_member_names_regexp_str);
 
   if (consider_data_member_insertion)
     result->set_data_member_insertion_ranges(insert_ranges);
@@ -1950,9 +2377,16 @@ read_type_suppression(const ini::config::section& section)
 	   || !srcloc_not_in.empty())))
     result->set_drops_artifact_from_ir(true);
 
+  if (has_size_change_str == "yes" || has_size_change_str == "true")
+    result->set_has_size_change(true);
+
   if (result->get_type_kind() == type_suppression::ENUM_TYPE_KIND
       && !changed_enumerator_names.empty())
     result->set_changed_enumerator_names(changed_enumerator_names);
+
+  if (result->get_type_kind() == type_suppression::ENUM_TYPE_KIND
+      && !changed_enumerators_regexp.empty())
+    result->set_changed_enumerators_regexp(changed_enumerators_regexp);
 
   return result;
 }
@@ -4834,6 +5268,58 @@ is_type_suppressed(const fe_iface&	fe,
 
   type_is_private = false;
   return false;
+}
+
+/// Test if a data memer offset is in a given insertion range.
+///
+/// @param dm the data member to consider.
+///
+/// @param range the insertion range to consider.
+///
+/// @param the class (or union) type to consider as the context in
+/// which to evaluate the insertion range denoted by @p range.
+///
+/// @return true iff the offset of the data member @p dm is in the
+/// insertion range @p range in the context of the type denoted by @p
+/// context.
+bool
+is_data_member_offset_in_range(const var_decl_sptr& dm,
+			       const type_suppression::insertion_range_sptr& range,
+			       const class_or_union* context)
+{
+  ABG_ASSERT(dm && range && context);
+
+  uint64_t range_begin = 0, range_end = 0;
+  if (!type_suppression::insertion_range::eval_boundary (range->begin(),
+							 context,
+							 range_begin))
+    return false;
+
+  if (!type_suppression::insertion_range::eval_boundary (range->end(),
+							 context,
+							 range_end))
+    return false;
+
+  if (range_begin > range_end)
+    // wrong range, ignore it.
+    return false;
+
+  uint64_t dm_offset = get_data_member_offset(dm);
+  if (type_suppression::insertion_range::boundary_value_is_end(range_begin)
+      && type_suppression::insertion_range::boundary_value_is_end(range_end))
+    {
+      // This idiom represents the predicate
+      // "has_data_member_inserted_at = end"
+      if (dm_offset > get_data_member_offset(get_last_data_member(context)))
+	return true;
+      return false;
+    }
+
+  if (dm_offset < range_begin || dm_offset > range_end)
+    // The offset of the data member is outside the range.
+    return false;
+
+  return true;
 }
 
 }// end namespace suppr

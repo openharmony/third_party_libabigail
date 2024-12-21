@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 ///@file
 
@@ -33,7 +33,8 @@
 #include <ctype.h>
 #include <errno.h>
 #include <libgen.h>
-
+#include <libxml/parser.h>
+#include <libxml/xmlversion.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +47,9 @@
 #include "abg-dwarf-reader.h"
 #ifdef WITH_CTF
 #include "abg-ctf-reader.h"
+#endif
+#ifdef WITH_BTF
+#include "abg-btf-reader.h"
 #endif
 #include "abg-internal.h"
 #include "abg-regex.h"
@@ -72,6 +76,20 @@ using namespace abigail::ini;
 /// on libabigail.
 namespace tools_utils
 {
+
+/// This function needs to be called before any libabigail function.
+///
+/// Users of libabigail must call it prior to using any of the
+/// functions of the library.
+///
+/// It intends to initialize the underlying libraries that might need
+/// initialization, especially, libxml2, in multi-threaded environments.
+void
+initialize()
+{
+  LIBXML_TEST_VERSION;
+  xmlInitParser();
+}
 
 /// Get the value of $libdir variable of the autotools build
 /// system.  This is where shared libraries are usually installed.
@@ -498,8 +516,36 @@ file_has_ctf_debug_info(const string& elf_file_path,
 
   // vmlinux.ctfa could be provided with --debug-info-dir
   for (const auto& path : debug_info_root_paths)
-    if (dir_contains_ctf_archive(*path, vmlinux))
+    if (find_file_under_dir(*path, "vmlinux.ctfa", vmlinux))
       return true;
+
+  return false;
+}
+
+/// Test if an ELF file has BTFG debug info.
+///
+/// @param elf_file_path the path to the ELF file to consider.
+///
+/// @param debug_info_root a vector of pointer to directory to look
+/// for debug info, in case the file is associated to split debug
+/// info.  If there is no split debug info then this vector can be
+/// empty.  Note that convert_char_stars_to_char_star_stars() can be
+/// used to ease the construction of this vector.
+///
+/// @return true iff the ELF file at @elf_file_path is an ELF file
+/// that contains debug info.
+bool
+file_has_btf_debug_info(const string& elf_file_path,
+			const vector<char**>& debug_info_root_paths)
+{
+    if (guess_file_type(elf_file_path) != FILE_TYPE_ELF)
+    return false;
+
+  environment env;
+  elf::reader r(elf_file_path, debug_info_root_paths, env);
+
+  if (r.find_btf_section())
+    return true;
 
   return false;
 }
@@ -521,16 +567,25 @@ is_dir(const string& path)
   if (S_ISDIR(st.st_mode))
     return true;
 
-  string symlink_target_path;
-  if (maybe_get_symlink_target_file_path(path, symlink_target_path))
-    return is_dir(symlink_target_path);
+  if (S_ISLNK(st.st_mode))
+    {
+      string symlink_target_path;
+      if (maybe_get_symlink_target_file_path(path, symlink_target_path))
+	{
+	  if (!get_stat(path, &st))
+	    return false;
 
+	  if (S_ISDIR(st.st_mode))
+	    return true;
+	}
+    }
   return false;
 }
 
-static const char* ANONYMOUS_STRUCT_INTERNAL_NAME = "__anonymous_struct__";
-static const char* ANONYMOUS_UNION_INTERNAL_NAME =  "__anonymous_union__";
-static const char* ANONYMOUS_ENUM_INTERNAL_NAME =   "__anonymous_enum__";
+static const char* ANONYMOUS_STRUCT_INTERNAL_NAME =   "__anonymous_struct__";
+static const char* ANONYMOUS_UNION_INTERNAL_NAME =    "__anonymous_union__";
+static const char* ANONYMOUS_ENUM_INTERNAL_NAME =     "__anonymous_enum__";
+static const char* ANONYMOUS_SUBRANGE_INTERNAL_NAME = "__anonymous_range__";
 
 static int ANONYMOUS_STRUCT_INTERNAL_NAME_LEN =
   strlen(ANONYMOUS_STRUCT_INTERNAL_NAME);
@@ -555,12 +610,22 @@ const char*
 get_anonymous_union_internal_name_prefix()
 {return ANONYMOUS_UNION_INTERNAL_NAME;}
 
+static int ANONYMOUS_SUBRANGE_INTERNAL_NAME_LEN =
+  strlen(ANONYMOUS_SUBRANGE_INTERNAL_NAME);
+
 /// Getter of the prefix for the name of anonymous enums.
 ///
 /// @reaturn the prefix for the name of anonymous enums.
 const char*
 get_anonymous_enum_internal_name_prefix()
 {return ANONYMOUS_ENUM_INTERNAL_NAME;}
+
+/// Getter of the prefix for the name of anonymous range.
+///
+/// @reaturn the prefix for the name of anonymous range.
+const char*
+get_anonymous_subrange_internal_name_prefix()
+{return ANONYMOUS_SUBRANGE_INTERNAL_NAME;}
 
 /// Compare two fully qualified decl names by taking into account that
 /// they might have compontents that are anonymous types/namespace names.
@@ -656,9 +721,6 @@ maybe_get_symlink_target_file_path(const string& file_path,
   DECLARE_STAT(st);
 
   if (!get_stat(file_path, &st))
-    return false;
-
-  if (!S_ISLNK(st.st_mode))
     return false;
 
   char *link_target_path = realpath(file_path.c_str(), NULL);
@@ -1025,9 +1087,9 @@ split_string(const string& input_string,
 /// @return true iff the function could find a prefix for the suffix
 /// @p suffix in the input string @p input_string.
 bool
-string_suffix(const string& input_string,
-	      const string& prefix,
-	      string& suffix)
+string_suffix(const string&	input_string,
+	      const string&	prefix,
+	      string&		suffix)
 {
   // Some basic sanity check before we start hostilities.
   if (prefix.length() >= input_string.length())
@@ -1191,6 +1253,34 @@ execute_command_and_get_output(const string& cmd, vector<string>& lines)
     return false;
 
   return true;
+}
+
+/// Get a vector of arguments from a string containing a
+/// comma-separated list of those arguments.
+///
+/// @param input_str the input string containing the comma-separated
+/// list of arguments The input string has the form
+/// "option=arg1,arg2,arg3,arg4".
+///
+/// @param option if the content of the input string @p input_str is
+/// "option=arg1,arg2,arg3", then this parameter should be "option".
+///
+/// @param arguments this is set by the fonction the the arguments
+/// that were a comma-separated list of arguments on the right hand
+/// side of the '=' sign in the string @p input_str.
+void
+get_comma_separated_args_of_option(const string& input_str,
+				   const string& option,
+				   vector<string>& arguments)
+{
+  string s = input_str;
+
+  string_suffix(s, option, s);
+  if (string_begins_with(s, "\""))
+    s = s.substr(1);
+  if (string_ends_with(s, "\""))
+    s = s.substr(0, s.size() - 1);
+  split_string(s, ",", arguments);
 }
 
 /// Get the SONAMEs of the DSOs advertised as being "provided" by a
@@ -1733,32 +1823,62 @@ get_rpm_arch(const string& str, string& arch)
 
 /// Tests if a given file name designates a kernel package.
 ///
-/// @param file_name the file name to consider.
+/// @param file_path the path to the file to consider.
 ///
 /// @param file_type the type of the file @p file_name.
 ///
 /// @return true iff @p file_name of kind @p file_type designates a
 /// kernel package.
 bool
-file_is_kernel_package(const string& file_name, file_type file_type)
+file_is_kernel_package(const string& file_path, file_type file_type)
 {
   bool result = false;
-  string package_name;
 
   if (file_type == FILE_TYPE_RPM)
     {
-      if (!get_rpm_name(file_name, package_name))
-	return false;
-      result = (package_name == "kernel");
+      if (rpm_contains_file(file_path, "vmlinuz"))
+	result = true;
     }
   else if (file_type == FILE_TYPE_DEB)
     {
-      if (!get_deb_name(file_name, package_name))
-	return false;
-      result = (string_begins_with(package_name, "linux-image"));
+      string file_name;
+      base_name(file_path, file_name);
+      string package_name;
+      if (get_deb_name(file_name, package_name))
+	result = (string_begins_with(package_name, "linux-image"));
     }
 
   return result;
+}
+
+/// Test if an RPM package contains a given file.
+///
+/// @param rpm_path the path to the RPM package.
+///
+/// @param file_name the file name to test the presence for in the
+/// rpm.
+///
+/// @return true iff the file named @file_name is present in the RPM.
+bool
+rpm_contains_file(const string& rpm_path, const string& file_name)
+{
+    vector<string> query_output;
+  // We don't check the return value of this command because on some
+  // system, the command can issue errors but still emit a valid
+  // output.  We'll rather rely on the fact that the command emits a
+  // valid output or not.
+  execute_command_and_get_output("rpm -qlp "
+				 + rpm_path + " 2> /dev/null",
+				 query_output);
+
+  for (auto& line : query_output)
+    {
+      line = trim_white_space(line);
+      if (string_ends_with(line, file_name))
+	return true;
+    }
+
+  return false;
 }
 
 /// Tests if a given file name designates a kernel debuginfo package.
@@ -2090,7 +2210,8 @@ gen_suppr_spec_from_kernel_abi_whitelists
 	   ++section_iter)
 	{
 	  std::string section_name = (*section_iter)->get_name();
-	  if (!string_ends_with(section_name, "whitelist"))
+	  if (!string_ends_with(section_name, "whitelist")
+	      && !string_ends_with(section_name, "stablelist"))
 	    continue;
 	  for (ini::config::properties_type::const_iterator
 		   prop_iter = (*section_iter)->get_properties().begin(),
@@ -2229,13 +2350,20 @@ load_default_user_suppressions(suppr::suppressions_type& supprs)
 ///
 /// @param entry the FTSENT* to consider.
 ///
-/// @param fname the file name (or end of path) to consider.
+/// @param fname the file name (or end of path) to consider.  The file
+/// name can also be a path that is relative to the root directory the
+/// current visit is started from.  The root directory is given by @p
+/// root_dir.
+///
+/// @param root_dir the root dir from which the directory visit is
+/// being performed.
 ///
 /// @return true iff @p entry denotes a file which path ends with @p
 /// fname.
 static bool
 entry_of_file_with_name(const FTSENT *entry,
-			const string& fname)
+			const string& fname,
+			const string& root_dir)
 {
   if (entry == NULL
       || (entry->fts_info != FTS_F && entry->fts_info != FTS_SL)
@@ -2246,6 +2374,11 @@ entry_of_file_with_name(const FTSENT *entry,
   string fpath = ::basename(entry->fts_path);
   if (fpath == fname)
     return true;
+
+  fpath = trim_leading_string(entry->fts_path, root_dir);
+  if (fpath == fname)
+    return true;
+
   return false;
 }
 
@@ -2271,25 +2404,240 @@ find_file_under_dir(const string& root_dir,
   if (!file_hierarchy)
     return false;
 
+  string r = root_dir;
+  if (!string_ends_with(r, "/"))
+    r += "/";
+
   FTSENT *entry;
   while ((entry = fts_read(file_hierarchy)))
     {
+      if (entry_of_file_with_name(entry, file_path_to_look_for, r))
+	{
+	  result = entry->fts_path;
+	  return true;
+	}
       // Skip descendents of symbolic links.
       if (entry->fts_info == FTS_SL || entry->fts_info == FTS_SLNONE)
 	{
 	  fts_set(file_hierarchy, entry, FTS_SKIP);
 	  continue;
 	}
-      if (entry_of_file_with_name(entry, file_path_to_look_for))
-	{
-	  result = entry->fts_path;
-	  return true;
-	}
     }
 
   fts_close(file_hierarchy);
   return false;
 }
+
+/// Find a given file possibly under a set of directories and return
+/// its absolute path.
+///
+/// @param root_dirs the vector of root directories under which to
+/// look for.
+///
+/// @param file_path_to_look_for the file to look for under the
+/// directory @p root_dir.
+///
+/// @param result the resulting path to @p file_path_to_look_for.
+/// This is set iff the file has been found.
+bool
+find_file_under_dirs(const vector<string>& root_dirs,
+		     const string& file_path_to_look_for,
+		     string& result)
+{
+  if (root_dirs.empty())
+    return find_file_under_dir(".", file_path_to_look_for, result);
+
+  for (const auto& root_dir : root_dirs)
+    if (find_file_under_dir(root_dir, file_path_to_look_for, result))
+      return true;
+
+  return false;
+}
+
+/// Get the dependencies of an ABI corpus, which are found in a set of
+/// directories.  Note that the dependencies are listed as properties
+/// of the ABI corpus.
+///
+/// If the corpus has a dependency that is not found under any of the
+/// given directories, then the dependency is ignored and not
+/// returned.
+///
+/// @param korpus the ABI corpus to consider.
+///
+/// @param deps_dirs the list of directories where to look for the
+/// dependencies.
+///
+/// @param dependencies output parameter that is set the dependencies
+/// of the corpus denoted by @p korpus which are found in the
+/// directories @p deps_dirs.  This is set iff the function returns
+/// true.
+///
+/// @return true iff some dependencies of the corpus @p korpus were
+/// found in directories @p deps_dirs.
+bool
+get_dependencies(const corpus&		korpus,
+		 const vector<string>&	deps_dirs,
+		 set<string>&		dependencies)
+{
+  const vector<string>& set_of_needed = korpus.get_needed();
+  if (set_of_needed.empty())
+    return false;
+
+  bool found_at_least_one_dependency =false;
+  for (const auto& n :set_of_needed)
+    {
+      string dependency;
+      if (dependencies.find(n) == dependencies.end()
+	  && find_file_under_dirs(deps_dirs, n, dependency))
+	{
+	  dependencies.insert(dependency);
+	  found_at_least_one_dependency = true;
+	}
+    }
+
+  return found_at_least_one_dependency;
+}
+
+/// For each binary of a vector of binaries, if the binary is present
+/// in at least one of the directories listed in a given vector,
+/// construct a corpus and add it to a corpus group.
+///
+/// @param reader the reader used to read the binaries into an ABI corpus.
+///
+/// @param binaries the vector of binaries to read and add to a corpus
+/// group.
+///
+/// @param deps_dirs the vector of directories where to look for the
+/// binaries in @p binaries.
+///
+/// @param group the corpus group to add the corpus.
+void
+add_binaries_into_corpus_group(const fe_iface_sptr&	reader,
+			       const vector<string>&	binaries,
+			       const vector<string>&	deps_dirs,
+			       corpus_group&		group)
+{
+  vector<string> bins;
+
+  for (const auto& b : binaries)
+    {
+      string bin;
+      if (find_file_under_dirs(deps_dirs, b, bin))
+	bins.push_back(bin);
+    }
+
+  for (const auto& b : bins)
+    {
+      if (group.has_corpus(b))
+	continue;
+
+      reader->initialize(b);
+      fe_iface::status stat = fe_iface::STATUS_UNKNOWN;
+      corpus_sptr c = reader->read_corpus(stat);
+      if (c && (stat & fe_iface::STATUS_OK))
+	group.add_corpus(c);
+    }
+}
+
+/// For each dependency of a given corpus, if it is present in at
+/// least one of the directories listed in a given vector, construct a
+/// corpus and add it to a corpus group.
+///
+/// @param reader the reader used to read the binaries into an ABI corpus.
+///
+/// @param korpus the corpus to consider.
+///
+/// @param deps_dirs the vector of directories where to look for the
+/// dependencies of @p korpus.
+///
+/// @param group the corpus group to add the corpus.
+void
+add_dependencies_into_corpus_group(const fe_iface_sptr&	reader,
+				   const corpus&		korpus,
+				   const vector<string>&	deps_dirs,
+				   corpus_group&		group)
+
+{
+  set<string> deps;
+  if (!get_dependencies(korpus, deps_dirs, deps))
+    return;
+
+  for (const auto& dep: deps)
+    {
+      if (group.has_corpus(dep))
+	continue;
+
+      reader->initialize(dep);
+      fe_iface::status stat = fe_iface::STATUS_UNKNOWN;
+      corpus_sptr c = reader->read_corpus(stat);
+      if (c && (stat & fe_iface::STATUS_OK))
+	{
+	  group.add_corpus(c);
+	  add_dependencies_into_corpus_group(reader, *c, deps_dirs, group);
+	}
+    }
+}
+
+/// Create a corpus group made of a given korpus and a set of binaries
+/// found in a set of directories.
+///
+/// @param reader the reader to use to read the binaries.
+///
+/// @param korpus the ABI corpus to add to the corpus group.
+///
+/// @param binaries the set of binaries to add to the corpus group, if
+/// they are present one of the directories denoted by the vector @p
+/// deps_dirs.
+///
+/// @param bins_dirs the directories where the binaries listed in @p
+/// binaries are to be found.
+///
+/// @return a corpus group made of @p korpus and the binaries listed
+/// in @p binaries and found in at least one of the directories found
+/// in @p bins_dirs.
+corpus_group_sptr
+stick_corpus_and_binaries_into_corpus_group(const fe_iface_sptr&	reader,
+					    const corpus_sptr&		korpus,
+					    const vector<string>&	binaries,
+					    const vector<string>&	bins_dirs)
+{
+    corpus_group_sptr result (new corpus_group(korpus->get_environment(),
+					       korpus->get_path()));
+    result->add_corpus(korpus);
+
+    add_binaries_into_corpus_group(reader, binaries, bins_dirs, *result);
+
+    return result;
+}
+
+/// Create a corpus group made of a given korpus and the subset of its
+/// dependencies that can be found found in a set of directories.
+///
+/// @param reader the reader to use to read the binaries.
+///
+/// @param korpus the ABI corpus to add to the corpus group along with
+/// its dependencies that can be found in a subset of directories.
+///
+/// @param deps_dirs the directories where the dependencies of the ABI
+/// corpus denoted by @p korpus binaries are to be found.
+///
+/// @return a corpus group made of @p korpus and the subset of its
+/// dependencies found in at least one of the directories denoted by
+/// @p deps_dirs.
+corpus_group_sptr
+stick_corpus_and_dependencies_into_corpus_group(const fe_iface_sptr&	reader,
+						const corpus_sptr&	korpus,
+						const vector<string>&	deps_dirs)
+{
+  corpus_group_sptr result (new corpus_group(korpus->get_environment(),
+					     korpus->get_path()));
+  result->add_corpus(korpus);
+
+  add_dependencies_into_corpus_group(reader, *korpus, deps_dirs, *result);
+
+  return result;
+}
+
 /// If we were given suppression specification files or kabi whitelist
 /// files, this function parses those, come up with suppression
 /// specifications as a result, and set them to the read context.
@@ -2310,10 +2658,10 @@ find_file_under_dir(const string& root_dir,
 ///
 /// @param opts the options to consider.
 static void
-load_generate_apply_suppressions(elf_based_reader &rdr,
-				 vector<string>& suppr_paths,
-				 vector<string>& kabi_whitelist_paths,
-				 suppressions_type& supprs)
+load_generate_apply_suppressions(elf_based_reader&	rdr,
+				 vector<string>&	suppr_paths,
+				 vector<string>&	kabi_whitelist_paths,
+				 suppressions_type&	supprs)
 {
   if (supprs.empty())
     {
@@ -2511,19 +2859,29 @@ get_binary_paths_from_kernel_dist(const string&	dist_root,
   string debug_info_root;
   if (dir_exists(dist_root + "/lib/modules"))
     {
-      dist_root + "/lib/modules";
+      kernel_modules_root = dist_root + "/lib/modules";
       debug_info_root = debug_info_root_path.empty()
-	? dist_root
+	? dist_root + "/usr/lib/debug"
 	: debug_info_root_path;
-      debug_info_root += "/usr/lib/debug";
     }
 
   if (dir_is_empty(debug_info_root))
     debug_info_root.clear();
 
   bool found = false;
-  string from = dist_root;
-  if (find_vmlinux_and_module_paths(from, vmlinux_path, module_paths))
+  // If vmlinux_path is empty, we want to look for it under
+  // debug_info_root, because this is where Enterprise Linux packages
+  // put it.  Modules however are to be looked for under
+  // kernel_modules_root.
+  if (// So, Let's look for modules under kernel_modules_root ...
+      find_vmlinux_and_module_paths(kernel_modules_root,
+				    vmlinux_path,
+				    module_paths)
+      // ... and if vmlinux_path is empty, look for vmlinux under the
+      // debug info root.
+      || find_vmlinux_and_module_paths(debug_info_root,
+				       vmlinux_path,
+				       module_paths))
     found = true;
 
   std::sort(module_paths.begin(), module_paths.end());
@@ -2761,7 +3119,10 @@ build_corpus_group_from_kernel_dist_under(const string&	root,
 
   if (verbose)
     std::cerr << "Analysing kernel dist root '"
-	      << root << "' ... " << std::flush;
+	      << root
+	      << "' with vmlinux path: '"
+	      << vmlinux_path
+	      << "' ... " << std::flush;
 
   timer t;
 
@@ -2780,6 +3141,16 @@ build_corpus_group_from_kernel_dist_under(const string&	root,
       char *di_root_ptr = di_root.get();
       vector<char**> di_roots;
       di_roots.push_back(&di_root_ptr);
+
+#ifdef WITH_CTF
+      shared_ptr<char> di_root_ctf;
+      if (requested_fe_kind & corpus::CTF_ORIGIN)
+        {
+          di_root_ctf = make_path_absolute(root.c_str());
+          char *di_root_ctf_ptr = di_root_ctf.get();
+          di_roots.push_back(&di_root_ctf_ptr);
+        }
+#endif
 
       abigail::elf_based_reader_sptr reader =
         create_best_elf_based_reader(vmlinux,
@@ -2852,6 +3223,13 @@ create_best_elf_based_reader(const string& elf_file_path,
 	result = ctf::create_reader(elf_file_path, debug_info_root_paths, env);
 #endif
     }
+  else if (requested_fe_kind & corpus::BTF_ORIGIN)
+    {
+#ifdef WITH_BTF
+      if (file_has_btf_debug_info(elf_file_path, debug_info_root_paths))
+	result = btf::create_reader(elf_file_path, debug_info_root_paths, env);
+#endif
+    }
   else
     {
       // The user hasn't formally requested the use of the CTF front-end.
@@ -2861,6 +3239,14 @@ create_best_elf_based_reader(const string& elf_file_path,
 	// The file has CTF debug info and no DWARF, let's use the CTF
 	// front end even if it wasn't formally requested by the user.
 	result = ctf::create_reader(elf_file_path, debug_info_root_paths, env);
+#endif
+
+#ifdef WITH_BTF
+      if (!file_has_dwarf_debug_info(elf_file_path, debug_info_root_paths)
+	  && file_has_btf_debug_info(elf_file_path, debug_info_root_paths))
+	// The file has BTF debug info and no BTF, let's use the BTF
+	// front-end even if it wasn't formally requested by the user.
+	result = btf::create_reader(elf_file_path, debug_info_root_paths, env);
 #endif
     }
 

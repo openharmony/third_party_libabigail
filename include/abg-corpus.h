@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 
 /// @file
 
@@ -48,7 +48,8 @@ public:
     ELF_ORIGIN        = 1 << 1,
     DWARF_ORIGIN      = 1 << 2,
     CTF_ORIGIN        = 1 << 3,
-    LINUX_KERNEL_BINARY_ORIGIN = 1 << 4
+    BTF_ORIGIN        = 1 << 4,
+    LINUX_KERNEL_BINARY_ORIGIN = 1 << 5
   };
 
 private:
@@ -67,6 +68,12 @@ public:
 
   const environment&
   get_environment() const;
+
+  bool
+  do_log() const;
+
+  void
+  do_log(bool);
 
   void
   add(const translation_unit_sptr&);
@@ -211,7 +218,7 @@ public:
   virtual const functions&
   get_functions() const;
 
-  const vector<function_decl*>*
+  const std::unordered_set<function_decl*>*
   lookup_functions(const string& id) const;
 
   void
@@ -295,13 +302,13 @@ operator&=(corpus::origin &l, corpus::origin r);
 /// parameters needed.
 class corpus::exported_decls_builder
 {
-  class priv;
-  std::unique_ptr<priv> priv_;
-
   // Forbid default construction.
   exported_decls_builder();
 
 public:
+  class priv;
+  std::unique_ptr<priv> priv_;
+
   friend class corpus;
 
   exported_decls_builder(functions& fns,
@@ -320,6 +327,9 @@ public:
   functions&
   exported_functions();
 
+  std::unordered_set<function_decl*>*
+  fn_id_maps_to_several_fns(function_decl*);
+
   const variables&
   exported_variables() const;
 
@@ -327,7 +337,7 @@ public:
   exported_variables();
 
   void
-  maybe_add_fn_to_exported_fns(const function_decl*);
+  maybe_add_fn_to_exported_fns(function_decl*);
 
   void
   maybe_add_var_to_exported_vars(const var_decl*);
@@ -355,6 +365,8 @@ public:
   virtual ~corpus_group();
 
   void add_corpus(const corpus_sptr&);
+
+  bool has_corpus(const string&);
 
   const corpora_type&
   get_corpora() const;

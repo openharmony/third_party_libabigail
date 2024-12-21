@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -22,12 +22,16 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <set>
 #include "abg-config.h"
 #include "abg-tools-utils.h"
 #include "abg-corpus.h"
 #include "abg-dwarf-reader.h"
 #ifdef WITH_CTF
 #include "abg-ctf-reader.h"
+#endif
+#ifdef WITH_BTF
+#include "abg-btf-reader.h"
 #endif
 #include "abg-writer.h"
 #include "abg-reader.h"
@@ -40,7 +44,9 @@ using std::cout;
 using std::ostream;
 using std::ofstream;
 using std::vector;
+using std::set;
 using std::shared_ptr;
+using std::static_pointer_cast;
 using abg_compat::optional;
 using abigail::tools_utils::emit_prefix;
 using abigail::tools_utils::temp_file;
@@ -49,6 +55,9 @@ using abigail::tools_utils::check_file;
 using abigail::tools_utils::build_corpus_group_from_kernel_dist_under;
 using abigail::tools_utils::timer;
 using abigail::tools_utils::create_best_elf_based_reader;
+using abigail::tools_utils::stick_corpus_and_dependencies_into_corpus_group;
+using abigail::tools_utils::stick_corpus_and_binaries_into_corpus_group;
+using abigail::tools_utils::add_dependencies_into_corpus_group;
 using abigail::ir::environment_sptr;
 using abigail::ir::environment;
 using abigail::corpus;
@@ -68,6 +77,7 @@ using abigail::xml_writer::create_write_context;
 using abigail::xml_writer::type_id_style_kind;
 using abigail::xml_writer::write_context_sptr;
 using abigail::xml_writer::write_corpus;
+using abigail::xml_writer::write_corpus_group;
 using abigail::abixml::read_corpus_from_abixml_file;
 
 using namespace abigail;
@@ -81,6 +91,8 @@ struct options
   vector<char**>	prepared_di_root_paths;
   vector<string>	headers_dirs;
   vector<string>	header_files;
+  vector<string>	added_bins_dirs;
+  vector<string>	added_bins;
   string		vmlinux;
   vector<string>	suppression_paths;
   vector<string>	kabi_whitelist_paths;
@@ -101,8 +113,13 @@ struct options
   bool			corpus_group_for_linux;
   bool			show_stats;
   bool			noout;
+  bool			follow_dependencies;
+  bool			list_dependencies;
 #ifdef WITH_CTF
   bool			use_ctf;
+#endif
+#ifdef WITH_BTF
+  bool			use_btf;
 #endif
   bool			show_locs;
   bool			abidiff;
@@ -142,8 +159,13 @@ struct options
       corpus_group_for_linux(false),
       show_stats(),
       noout(),
+      follow_dependencies(),
+      list_dependencies(),
 #ifdef WITH_CTF
       use_ctf(false),
+#endif
+#ifdef WITH_BTF
+      use_btf(false),
 #endif
       show_locs(true),
       abidiff(),
@@ -220,6 +242,12 @@ display_usage(const string& prog_name, ostream& out)
     << "  --vmlinux <path>  the path to the vmlinux binary to consider to emit "
        "the ABI of the union of vmlinux and its modules\n"
     << "  --abidiff  compare the loaded ABI against itself\n"
+    << "  --add-binaries <bin1,bin2,...>  build a corpus group with "
+    "the added inaries\n"
+    << "  --follow-dependencies  build a corpus group with the dependencies\n"
+    << "  --list-dependencies  list the dependencies of a given binary\n"
+    << "  --added-binaries-dir|--abd <dir-of-deps>  where to look for dependencies "
+    "or added binaries\n"
 #ifdef WITH_DEBUG_SELF_COMPARISON
     << "  --debug-abidiff  debug the process of comparing the loaded ABI against itself\n"
 #endif
@@ -234,6 +262,9 @@ display_usage(const string& prog_name, ostream& out)
     "speed-up the analysis of the binary\n"
     << "  --no-assume-odr-for-cplusplus  do not assume the ODR to speed-up the "
     "analysis of the binary\n"
+#ifdef WITH_BTF
+    << "  --btf use BTF instead of DWARF in ELF files\n"
+#endif
     << "  --annotate  annotate the ABI artifacts emitted in the output\n"
     << "  --stats  show statistics about various internal stuff\n"
     << "  --verbose show verbose messages about internal stuff\n";
@@ -280,6 +311,15 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  if (j >= argc)
 	    return false;
 	  opts.headers_dirs.push_back(argv[j]);
+	  ++i;
+	}
+      else if (!strcmp(argv[i], "--added-binaries-dir")
+	       || !strcmp(argv[i], "--abd"))
+	{
+	  int j = i + 1;
+	  if (j >= argc)
+	    return false;
+	  opts.added_bins_dirs.push_back(argv[j]);
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--header-file")
@@ -332,9 +372,35 @@ parse_command_line(int argc, char* argv[], options& opts)
 	}
       else if (!strcmp(argv[i], "--noout"))
 	opts.noout = true;
+      else if (!strcmp(argv[i], "--follow-dependencies"))
+	opts.follow_dependencies = true;
+      else if (!strcmp(argv[i], "--list-dependencies"))
+	opts.list_dependencies = true;
+      else if (!strncmp(argv[i], "--add-binaries=",
+			strlen("--add-binaries=")))
+	tools_utils::get_comma_separated_args_of_option(argv[i],
+							"--add-binaries=",
+							opts.added_bins);
+      else if (!strcmp(argv[i], "--add-binaries"))
+	{
+	  int j = i + 1;
+	  if (j >= argc)
+	    return false;
+
+	  string s = argv[j];
+	  if (s.find(','))
+	    tools_utils::split_string(s, ",", opts.added_bins);
+	  else
+	    opts.added_bins.push_back(s);
+	  ++i;
+	}
 #ifdef WITH_CTF
         else if (!strcmp(argv[i], "--ctf"))
           opts.use_ctf = true;
+#endif
+#ifdef WITH_BTF
+        else if (!strcmp(argv[i], "--btf"))
+          opts.use_btf = true;
 #endif
       else if (!strcmp(argv[i], "--no-architecture"))
 	opts.write_architecture = false;
@@ -582,11 +648,16 @@ load_corpus_and_write_abixml(char* argv[],
 #endif
 
   corpus_sptr corp;
+  corpus_group_sptr corp_group;
   fe_iface::status s = fe_iface::STATUS_UNKNOWN;
   corpus::origin requested_fe_kind = corpus::DWARF_ORIGIN;
 #ifdef WITH_CTF
   if (opts.use_ctf)
     requested_fe_kind = corpus::CTF_ORIGIN;
+#endif
+#ifdef WITH_BTF
+  if (opts.use_btf)
+    requested_fe_kind = corpus::BTF_ORIGIN;
 #endif
 
   // First of all, create a reader to read the ABI from the file
@@ -642,11 +713,6 @@ load_corpus_and_write_abixml(char* argv[],
     emit_prefix(argv[0], cerr)
       << "read corpus from elf file in: " << t << "\n";
 
-  // Clear some resources to gain back some space.
-  t.start();
-  reader.reset();
-  t.stop();
-
   if (opts.do_log)
     emit_prefix(argv[0], cerr)
       << "reset reader ELF in: " << t << "\n";
@@ -689,9 +755,70 @@ load_corpus_and_write_abixml(char* argv[],
 	emit_prefix(argv[0], cerr)
 	  << "Could not read ELF symbol information from "
 	  << opts.in_file_path << "\n";
+      else if (s & fe_iface::STATUS_ALT_DEBUG_INFO_NOT_FOUND)
+	{
+	  emit_prefix(argv[0], cerr)
+	    << "Could not read alternate debug info file";
+	  if (!reader->alternate_dwarf_debug_info_path().empty())
+	    cerr << " '" << reader->alternate_dwarf_debug_info_path() << "'";
+	  cerr << " for '"
+	    << opts.in_file_path << "'.\n";
+	  emit_prefix(argv[0], cerr)
+	    << "You might have forgotten to install some "
+	    "additional needed debug info\n";
+	}
 
       return 1;
     }
+
+  if (opts.list_dependencies)
+    {
+      // Show the dependencies of the corpus and display them.
+      set<string> dependencies;
+      if (tools_utils::get_dependencies(*corp, opts.added_bins_dirs,
+					dependencies))
+	{
+	  cout << "Dependencies of '" << corp->get_path()
+	       << "':\n\t";
+	  int n = 0;
+	  for (const auto& dep : dependencies)
+	    {
+	      if (n)
+		cout << ", ";
+	      cout << dep;
+	      ++n;
+	    }
+	  cout << "\n";
+	}
+    }
+
+  if (!opts.added_bins.empty())
+    corp_group =
+      stick_corpus_and_binaries_into_corpus_group(reader, corp,
+						  opts.added_bins,
+						  opts.added_bins_dirs);
+
+  if (opts.follow_dependencies)
+    {
+      // load the dependencies of the corpus and put them all into a
+      // corpus group.
+
+      // If a corpus_group already exists, use that one ...
+      if (!corp_group->is_empty())
+	add_dependencies_into_corpus_group(reader, *corp,
+					   opts.added_bins_dirs,
+					   *corp_group);
+      else
+	// .. otherwise, create a new corpus group.
+	corp_group =
+	  stick_corpus_and_dependencies_into_corpus_group(reader, corp,
+							  opts.added_bins_dirs);
+    }
+
+  // Clear some resources to gain back some space.
+  t.start();
+  reader.reset();
+  t.stop();
 
   // Now create a write context and write out an ABI XML description
   // of the read corpus.
@@ -712,7 +839,10 @@ load_corpus_and_write_abixml(char* argv[],
       // against the ABI of the input ELF file.
       temp_file_sptr tmp_file = temp_file::create();
       set_ostream(*write_ctxt, tmp_file->get_stream());
-      write_corpus(*write_ctxt, corp, 0);
+      if (corp_group)
+	write_corpus_group(*write_ctxt, corp_group, 0);
+      else
+	write_corpus(*write_ctxt, corp, 0);
       tmp_file->get_stream().flush();
 
 #ifdef WITH_DEBUG_SELF_COMPARISON
@@ -731,7 +861,14 @@ load_corpus_and_write_abixml(char* argv[],
 #endif
       t.start();
       fe_iface::status sts;
-      corpus_sptr corp2 = rdr->read_corpus(sts);
+      corpus_sptr corp2;
+      corpus_group_sptr corp_group2;
+
+      if (corp_group)
+	corp_group2 = abixml::read_corpus_group_from_input(*rdr);
+      else
+      corp2 = rdr->read_corpus(sts);
+
       t.stop();
       if (opts.do_log)
         emit_prefix(argv[0], cerr)
@@ -749,7 +886,11 @@ load_corpus_and_write_abixml(char* argv[],
       set_diff_context(ctxt);
       ctxt->show_locs(opts.show_locs);
       t.start();
-      corpus_diff_sptr diff = compute_diff(corp, corp2, ctxt);
+      corpus_diff_sptr diff =
+	corp_group2
+	? compute_diff(corp_group, corp_group2, ctxt)
+	: compute_diff(corp, corp2, ctxt);
+
       t.stop();
       if (opts.do_log)
         emit_prefix(argv[0], cerr)
@@ -790,7 +931,10 @@ load_corpus_and_write_abixml(char* argv[],
         }
       set_ostream(*write_ctxt, of);
       t.start();
-      write_corpus(*write_ctxt, corp, 0);
+      if (corp_group)
+	write_corpus_group(*write_ctxt, corp_group, 0);
+      else
+	write_corpus(*write_ctxt, corp, 0);
       t.stop();
       if (opts.do_log)
         emit_prefix(argv[0], cerr)
@@ -801,7 +945,10 @@ load_corpus_and_write_abixml(char* argv[],
   else
     {
       t.start();
-      exit_code = !write_corpus(*write_ctxt, corp, 0);
+      exit_code =
+	corp_group
+	? !write_corpus_group(*write_ctxt, corp_group, 0)
+	: !write_corpus(*write_ctxt, corp, 0);
       t.stop();
       if (opts.do_log)
         emit_prefix(argv[0], cerr)

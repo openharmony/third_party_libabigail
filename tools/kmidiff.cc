@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2017-2022 Red Hat, Inc.
+// Copyright (C) 2017-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -56,6 +56,7 @@ struct options
   bool			display_version;
   bool			verbose;
   bool			missing_operand;
+  bool			perform_change_categorization;
   bool			leaf_changes_only;
   bool			show_hexadecimal_values;
   bool			show_offsets_sizes_in_bits;
@@ -63,6 +64,9 @@ struct options
   optional<bool>	exported_interfaces_only;
 #ifdef WITH_CTF
   bool			use_ctf;
+#endif
+#ifdef WITH_BTF
+  bool			use_btf;
 #endif
   string		wrong_option;
   string		kernel_dist_root1;
@@ -81,6 +85,7 @@ struct options
       display_version(),
       verbose(),
       missing_operand(),
+      perform_change_categorization(true),
       leaf_changes_only(true),
       show_hexadecimal_values(true),
       show_offsets_sizes_in_bits(false),
@@ -88,6 +93,10 @@ struct options
 #ifdef WITH_CTF
       ,
       use_ctf(false)
+#endif
+#ifdef WITH_BTF
+    ,
+      use_btf(false)
 #endif
   {}
 }; // end struct options.
@@ -118,6 +127,11 @@ display_usage(const string& prog_name, ostream& out)
 #ifdef WITH_CTF
     << " --ctf use CTF instead of DWARF in ELF files\n"
 #endif
+#ifdef WITH_BTF
+    << " --btf use BTF instead of DWARF in ELF files\n"
+#endif
+    << " --no-change-categorization | -x don't perform categorization "
+    "of changes, for speed purposes\n"
     << " --impacted-interfaces|-i  show interfaces impacted by ABI changes\n"
     << " --full-impact|-f  show the full impact of changes on top-most "
 	 "interfaces\n"
@@ -260,6 +274,13 @@ parse_command_line(int argc, char* argv[], options& opts)
       else if (!strcmp(argv[i], "--ctf"))
 	opts.use_ctf = true;
 #endif
+#ifdef WITH_BTF
+      else if (!strcmp(argv[i], "--btf"))
+	opts.use_btf = true;
+#endif
+      else if (!strcmp(argv[i], "--no-change-categorization")
+	       || !strcmp(argv[i], "-x"))
+	opts.perform_change_categorization = false;
       else if (!strcmp(argv[i], "--impacted-interfaces")
 	       || !strcmp(argv[i], "-i"))
 	opts.show_impacted_interfaces = true;
@@ -330,6 +351,7 @@ set_diff_context(diff_context_sptr ctxt, const options& opts)
   ctxt->show_linkage_names(false);
   ctxt->show_symbols_unreferenced_by_debug_info
     (true);
+  ctxt->perform_change_categorization(opts.perform_change_categorization);
   ctxt->show_leaf_changes_only(opts.leaf_changes_only);
   ctxt->show_impacted_interfaces(opts.show_impacted_interfaces);
   ctxt->show_hex_values(opts.show_hexadecimal_values);
@@ -421,11 +443,15 @@ main(int argc, char* argv[])
 
   corpus_group_sptr group1, group2;
   string debug_info_root_dir;
-  corpus::origin requested_fe_kind =
+  corpus::origin requested_fe_kind = corpus::DWARF_ORIGIN;
 #ifdef WITH_CTF
-   opts.use_ctf ? corpus::CTF_ORIGIN :
+  if (opts.use_ctf)
+    requested_fe_kind = corpus::CTF_ORIGIN;
 #endif
-   corpus::DWARF_ORIGIN;
+#ifdef WITH_BTF
+  if (opts.use_btf)
+    requested_fe_kind = corpus::BTF_ORIGIN;
+#endif
 
   if (!opts.kernel_dist_root1.empty())
     {

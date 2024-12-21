@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2021-2022 Oracle, Inc.
+// Copyright (C) 2021-2023 Oracle, Inc.
 //
 // Author: Jose E. Marchesi
 
@@ -14,6 +14,7 @@
 #include "config.h"
 
 #include <fcntl.h> /* For open(3) */
+#include <sstream>
 #include <iostream>
 #include <memory>
 #include <map>
@@ -61,7 +62,15 @@ process_ctf_base_type(reader *rdr,
 
 static decl_base_sptr
 build_ir_node_for_variadic_parameter_type(reader &rdr,
-                                          translation_unit_sptr tunit);
+                                          const translation_unit_sptr& tunit);
+
+static decl_base_sptr
+build_ir_node_for_void_type(reader& rdr,
+			    const translation_unit_sptr& tunit);
+
+static type_or_decl_base_sptr
+build_ir_node_for_void_pointer_type(reader& rdr,
+				    const translation_unit_sptr& tunit);
 
 static function_type_sptr
 process_ctf_function_type(reader *rdr,
@@ -131,7 +140,7 @@ class reader : public elf_based_reader
 
   /// A map associating CTF type ids with libabigail IR types.  This
   /// is used to reuse already generated types.
-  unordered_map<string,type_base_sptr> types_map;
+  string_type_base_sptr_map_type types_map;
 
   /// A set associating unknown CTF type ids
   std::set<ctf_id_t> unknown_types_set;
@@ -203,8 +212,10 @@ public:
   void
   canonicalize_all_types(void)
   {
-    for (auto t = types_map.begin(); t != types_map.end(); t++)
-      canonicalize (t->second);
+    canonicalize_types
+      (types_map.begin(), types_map.end(),
+       [](const string_type_base_sptr_map_type::const_iterator& i)
+       {return i->second;});
   }
 
   /// Constructor.
@@ -277,7 +288,7 @@ public:
   {
     load_all_types = load_all_types;
     linux_kernel_mode = linux_kernel_mode;
-    reset(elf_path, debug_info_root_paths);
+    elf_based_reader::initialize(elf_path, debug_info_root_paths);
   }
 
   /// Setter of the current translation unit.
@@ -334,12 +345,8 @@ public:
     // for vmlinux.ctfa should be provided with --debug-info-dir
     // option.
     for (const auto& path : debug_info_root_paths())
-      {
-	ctfa_dirname = *path;
-	ctfa_file = ctfa_dirname + "/vmlinux.ctfa";
-	if (file_exists(ctfa_file))
-	  return true;
-      }
+      if (tools_utils::find_file_under_dir(*path, "vmlinux.ctfa", ctfa_file))
+        return true;
 
     return false;
   }
@@ -426,10 +433,10 @@ public:
 	&& corpus_group())
       {
 	tools_utils::base_name(corpus_path(), dict_name);
-
-	if (dict_name != "vmlinux")
-	  // remove .ko suffix
-	  dict_name.erase(dict_name.length() - 3, 3);
+	// remove .* suffix
+	std::size_t pos = dict_name.find(".");
+	if (pos != string::npos)
+	  dict_name.erase(pos);
 
 	std::replace(dict_name.begin(), dict_name.end(), '-', '_');
       }
@@ -729,7 +736,7 @@ process_ctf_typedef(reader *rdr,
 
   const char *typedef_name = ctf_type_name_raw(ctf_dictionary, ctf_type);
   if (corpus_sptr corp = rdr->should_reuse_type_from_corpus_group())
-    if (result = lookup_typedef_type(typedef_name, *corp))
+    if ((result = lookup_typedef_type(typedef_name, *corp)))
       return result;
 
   type_base_sptr utype = rdr->build_type(ctf_dictionary, ctf_utype);
@@ -801,8 +808,9 @@ process_ctf_base_type(reader *rdr,
       && type_encoding.cte_format == CTF_INT_SIGNED)
     {
       /* This is the `void' type.  */
-      type_base_sptr void_type = rdr->env().get_void_type();
-      decl_base_sptr type_declaration = get_type_declaration(void_type);
+      decl_base_sptr type_declaration = build_ir_node_for_void_type(*rdr,
+								    tunit);
+      type_base_sptr void_type = is_type(type_declaration);
       result = is_type_decl(type_declaration);
       canonicalize(result);
     }
@@ -814,7 +822,7 @@ process_ctf_base_type(reader *rdr,
           integral_type int_type;
           if (parse_integral_type(type_name, int_type))
             normalized_type_name = int_type.to_string();
-          if (result = lookup_basic_type(normalized_type_name, *corp))
+          if ((result = lookup_basic_type(normalized_type_name, *corp)))
             return result;
         }
 
@@ -842,19 +850,63 @@ process_ctf_base_type(reader *rdr,
 ///
 /// @param rdr the read context to use.
 ///
+/// @param tunit the translation unit it should belong to.
+///
 /// @return the variadic parameter type.
 static decl_base_sptr
 build_ir_node_for_variadic_parameter_type(reader &rdr,
-                                          translation_unit_sptr tunit)
+                                          const translation_unit_sptr& tunit)
 {
 
   const ir::environment& env = rdr.env();
   type_base_sptr t = env.get_variadic_parameter_type();
   decl_base_sptr type_declaration = get_type_declaration(t);
-  if (!has_scope(type_declaration))
-    add_decl_to_scope(type_declaration, tunit->get_global_scope());
+  add_decl_to_scope(type_declaration, tunit->get_global_scope());
   canonicalize(t);
   return type_declaration;
+}
+
+/// Build the IR node for a void type.
+///
+/// Note that this returns the unique pointer
+/// environment::get_void_type(), which is added to the current
+/// translation unit if it's the first it's being used.
+///
+/// @param rdr the read context to use.
+///
+/// @param tunit the translation unit it should belong to.
+///
+/// @return the void type type.
+static decl_base_sptr
+build_ir_node_for_void_type(reader& rdr, const translation_unit_sptr& tunit)
+{
+  const environment& env = rdr.env();
+  type_base_sptr t = env.get_void_type();
+  add_decl_to_scope(is_decl(t), tunit->get_global_scope());
+  canonicalize(t);
+  return is_decl(t);
+}
+
+/// Build the IR node for a void pointer type.
+///
+/// Note that this returns the unique pointer
+/// environment::get_void_pointer_type(), which is added to the
+/// current translation unit if it's the first it's being used.
+///
+/// @param rdr the read context to use.
+///
+/// @param tunit the translation unit it should belong to.
+///
+/// @return the void pointer type.
+static type_or_decl_base_sptr
+build_ir_node_for_void_pointer_type(reader& rdr,
+				    const translation_unit_sptr& tunit)
+{
+    const environment& env = rdr.env();
+  type_base_sptr t = env.get_void_pointer_type();
+  add_decl_to_scope(is_decl(t), tunit->get_global_scope());
+  canonicalize(t);
+  return is_decl(t);
 }
 
 /// Build and return a function type libabigail IR.
@@ -1036,7 +1088,7 @@ process_ctf_forward_type(reader *rdr,
     {
       if (!type_is_anonymous)
         if (corpus_sptr corp = rdr->should_reuse_type_from_corpus_group())
-          if (result = lookup_class_type(type_name, *corp))
+          if ((result = lookup_class_type(type_name, *corp)))
             return is_type(result);
 
       class_decl_sptr
@@ -1081,7 +1133,7 @@ process_ctf_struct_type(reader *rdr,
 
   if (!struct_type_is_anonymous)
     if (corpus_sptr corp = rdr->should_reuse_type_from_corpus_group())
-      if (result = lookup_class_type(struct_type_name, *corp))
+      if ((result = lookup_class_type(struct_type_name, *corp)))
         return result;
 
   /* The libabigail IR encodes C struct types in `class' IR nodes.  */
@@ -1134,7 +1186,7 @@ process_ctf_union_type(reader *rdr,
 
   if (!union_type_is_anonymous)
     if (corpus_sptr corp = rdr->should_reuse_type_from_corpus_group())
-      if (result = lookup_union_type(union_type_name, *corp))
+      if ((result = lookup_union_type(union_type_name, *corp)))
         return result;
 
   /* Create the corresponding libabigail union IR node.  */
@@ -1440,10 +1492,15 @@ process_ctf_pointer_type(reader *rdr,
   if (result)
     return result;
 
-  result.reset(new pointer_type_def(target_type,
-                                      ctf_type_size(ctf_dictionary, ctf_type) * 8,
-                                      ctf_type_align(ctf_dictionary, ctf_type) * 8,
-                                      location()));
+  if (rdr->env().is_void_type(target_type))
+    result = is_pointer_type(build_ir_node_for_void_pointer_type(*rdr, tunit));
+  else
+    result.reset(new pointer_type_def(target_type,
+				      ctf_type_size(ctf_dictionary,
+						    ctf_type) * 8,
+				      ctf_type_align(ctf_dictionary,
+						     ctf_type) * 8,
+				      location()));
   if (result)
     {
       add_decl_to_scope(result, tunit->get_global_scope());
@@ -1475,7 +1532,7 @@ process_ctf_enum_type(reader *rdr,
 
   if (!enum_name.empty())
     if (corpus_sptr corp = rdr->should_reuse_type_from_corpus_group())
-      if (result = lookup_enum_type(enum_name, *corp))
+      if ((result = lookup_enum_type(enum_name, *corp)))
         return result;
 
   /* Build a signed integral type for the type of the enumerators, aka
