@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2021-2022 Oracle, Inc.
+// Copyright (C) 2021-2023 Oracle, Inc.
 //
 // Author: Guillermo E. Martinez
 
@@ -333,6 +333,15 @@ static InOutSpec in_out_specs[] =
     SEQUENCE_TYPE_ID_STYLE,
     "data/test-read-ctf/test-linux-module.abi",
     "output/test-read-ctf/test-linux-module.abi",
+    "--ctf"
+  },
+  {
+    "data/test-read-ctf/test-alias.o",
+    "",
+    "",
+    SEQUENCE_TYPE_ID_STYLE,
+    "data/test-read-ctf/test-alias.o.abi",
+    "output/test-read-ctf/test-alias.o.abi",
     "--ctf"
   },
   // CTF fallback feature.

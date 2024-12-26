@@ -1,0 +1,4 @@
+[suppress_type]
+ type_kind = struct
+ has_data_member_inserted_at = offset_of_flexible_array_data_member
+ has_size_change = yes
