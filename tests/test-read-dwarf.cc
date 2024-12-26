@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2022 Red Hat, Inc.
+// Copyright (C) 2013-2023 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -548,6 +548,15 @@ static InOutSpec in_out_specs[] =
     SEQUENCE_TYPE_ID_STYLE,
     "data/test-read-dwarf/PR29443-missing-xx.o.abi",
     "output/test-read-dwarf/PR29443-missing-xx.o.abi",
+    NULL,
+  },
+  {
+    "data/test-read-dwarf/PR29692-kdelibs3-libkjava.so.1.0.0",
+    "",
+    "",
+    SEQUENCE_TYPE_ID_STYLE,
+    "data/test-read-dwarf/PR29692-kdelibs3-libkjava.so.1.0.0.abi",
+    "output/test-read-dwarf/PR29692-kdelibs3-libkjava.so.1.0.0.abi",
     NULL,
   },
   // DWARF fallback feature.

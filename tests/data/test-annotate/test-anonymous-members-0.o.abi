@@ -1,4 +1,4 @@
-<abi-corpus version='2.1'>
+<abi-corpus version='2.2'>
   <elf-function-symbols>
     <!-- foo(S&) -->
     <elf-symbol name='_Z3fooR1S' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -13,15 +13,15 @@
     <!-- struct S -->
     <class-decl name='S' size-in-bits='256' is-struct='yes' visibility='default' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='1' column='1' id='type-id-4'>
       <member-type access='public'>
-        <!-- enum S::__anonymous_enum__ -->
-        <enum-decl name='__anonymous_enum__' is-anonymous='yes' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='18' column='1' id='type-id-5'>
+        <!-- enum {five=0, six=1, } -->
+        <enum-decl name='__anonymous_enum__2' is-anonymous='yes' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='22' column='1' id='type-id-5'>
           <underlying-type type-id='type-id-6'/>
-          <enumerator name='one' value='0'/>
-          <enumerator name='two' value='1'/>
+          <enumerator name='five' value='0'/>
+          <enumerator name='six' value='1'/>
         </enum-decl>
       </member-type>
       <member-type access='public'>
-        <!-- enum S::__anonymous_enum__1 -->
+        <!-- enum {four=1, three=0, } -->
         <enum-decl name='__anonymous_enum__1' is-anonymous='yes' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='20' column='1' id='type-id-7'>
           <underlying-type type-id='type-id-6'/>
           <enumerator name='three' value='0'/>
@@ -29,11 +29,11 @@
         </enum-decl>
       </member-type>
       <member-type access='public'>
-        <!-- enum S::__anonymous_enum__2 -->
-        <enum-decl name='__anonymous_enum__2' is-anonymous='yes' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='22' column='1' id='type-id-8'>
+        <!-- enum {one=0, two=1, } -->
+        <enum-decl name='__anonymous_enum__' is-anonymous='yes' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='18' column='1' id='type-id-8'>
           <underlying-type type-id='type-id-6'/>
-          <enumerator name='five' value='0'/>
-          <enumerator name='six' value='1'/>
+          <enumerator name='one' value='0'/>
+          <enumerator name='two' value='1'/>
         </enum-decl>
       </member-type>
       <member-type access='public'>
@@ -103,7 +103,7 @@
       </data-member>
       <data-member access='public' layout-offset-in-bits='64'>
         <!-- S::__anonymous_enum__ S::e1 -->
-        <var-decl name='e1' type-id='type-id-5' visibility='default' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='18' column='1'/>
+        <var-decl name='e1' type-id='type-id-8' visibility='default' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='18' column='1'/>
       </data-member>
       <data-member access='public' layout-offset-in-bits='96'>
         <!-- S::__anonymous_enum__1 S::e2 -->
@@ -111,7 +111,7 @@
       </data-member>
       <data-member access='public' layout-offset-in-bits='128'>
         <!-- S::__anonymous_enum__2 S::e3 -->
-        <var-decl name='e3' type-id='type-id-8' visibility='default' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='22' column='1'/>
+        <var-decl name='e3' type-id='type-id-5' visibility='default' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='22' column='1'/>
       </data-member>
       <data-member access='public' layout-offset-in-bits='160'>
         <!-- union {int a; char b;} -->
@@ -128,8 +128,6 @@
     <type-decl name='unsigned int' size-in-bits='32' id='type-id-14'/>
     <!-- S& -->
     <reference-type-def kind='lvalue' type-id='type-id-4' size-in-bits='64' id='type-id-15'/>
-    <!-- void -->
-    <type-decl name='void' id='type-id-16'/>
     <!-- void foo(S&) -->
     <function-decl name='foo' mangled-name='_Z3fooR1S' filepath='/home/dodji/git/libabigail/fixes/tests/data/test-annotate/test-anonymous-members-0.cc' line='30' column='1' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='_Z3fooR1S'>
       <!-- parameter of type 'S&' -->
@@ -137,5 +135,7 @@
       <!-- void -->
       <return type-id='type-id-16'/>
     </function-decl>
+    <!-- void -->
+    <type-decl name='void' id='type-id-16'/>
   </abi-instr>
 </abi-corpus>
