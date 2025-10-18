@@ -48,12 +48,12 @@ ohos_static_library("libabigail_static") {
     "//third_party/libabigail",
     "//third_party/libabigail/include",
     "//third_party/libabigail/src",
-    "//third_party/libxml2/include",
   ]
 
-  deps = [ "//third_party/libxml2:static_libxml2" ]
-
-  external_deps = [ "elfutils:libdw_static" ]
+  external_deps = [
+    "elfutils:libdw_static",
+    "libxml2:static_libxml2",
+  ]
 
   defines = [ "ABIGAIL_ROOT_SYSTEM_LIBDIR=\"lib\"" ]
 

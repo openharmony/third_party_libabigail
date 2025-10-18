@@ -17,6 +17,9 @@ config("libabigail_defaults") {
   cflags_cc = [
     "-fexceptions",
     "-frtti",
+    "-Wno-unused-variable",
+    "-Wno-unused-value",
+    "-Wno-overloaded-virtual",
   ]
 }
 
