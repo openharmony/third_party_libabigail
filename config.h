@@ -234,10 +234,10 @@
 #define VERSION "2.4"
 
 /* Defined if user enabled BTF usage */
-#define WITH_BTF 1
+/* #define WITH_BTF 1*/
 
 /* struct btf_enum64 is present */
-#define WITH_BTF_ENUM64 1
+/* #define WITH_BTF_ENUM64 1 */
 
 /* The BTF_KIND_DECL_TAG enumerator is present */
 /* #undef WITH_BTF_KIND_DECL_TAG */
@@ -252,7 +252,7 @@
 #define WITH_BTF__TYPE_CNT 1
 
 /* Defined if user enables and system has the libctf library */
-#define WITH_CTF 1
+/* #define WITH_CTF 1*/
 
 /* compile the deb package support in abipkgdiff */
 #define WITH_DEB 1
