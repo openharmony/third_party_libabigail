@@ -26,6 +26,7 @@ ohos_executable("abidiff") {
   deps = [ "//third_party/libabigail/src:libabigail_static" ]
   external_deps = [ "elfutils:libdw_static" ]
 
+  ldflags = [ "-lxml2" ]
   install_enable = false
   subsystem_name = "thirdparty"
   part_name = "libabigail"
@@ -45,6 +46,7 @@ ohos_executable("abidw") {
   deps = [ "//third_party/libabigail/src:libabigail_static" ]
   external_deps = [ "elfutils:libdw_static" ]
 
+  ldflags = [ "-lxml2" ]
   install_enable = false
   subsystem_name = "thirdparty"
   part_name = "libabigail"

@@ -23,8 +23,7 @@
         "ram": "",
         "deps": {
             "components": [
-                "elfutils",
-                "libxml2"
+                "elfutils"
             ],
             "third_party": []
         },
