@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2014-2023 Red Hat, Inc.
+// Copyright (C) 2014-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -34,6 +34,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include "config.h"
 #include "abg-config.h"
 #include "abg-tools-utils.h"
 #include "abg-corpus.h"
@@ -43,6 +44,9 @@
 #include "abg-suppression.h"
 #ifdef WITH_CTF
 #include "abg-ctf-reader.h"
+#endif
+#ifdef WITH_BTF
+#include "abg-btf-reader.h"
 #endif
 
 using std::string;
@@ -55,7 +59,33 @@ using std::shared_ptr;
 
 using namespace abigail;
 
+using abigail::tools_utils::abidiff_status;
+using abigail::tools_utils::base_name;
+using abigail::tools_utils::check_file;
+using abigail::tools_utils::create_best_elf_based_reader;
 using abigail::tools_utils::emit_prefix;
+using abigail::ir::environment;
+using abigail::ir::environment_sptr;
+using abigail::corpus;
+using abigail::corpus_sptr;
+using abigail::ir::elf_symbols;
+using abigail::ir::demangle_cplus_mangled_name;
+using abigail::ir::type_base_sptr;
+using abigail::ir::function_type_sptr;
+using abigail::ir::function_decl;
+using abigail::ir::var_decl;
+using abigail::comparison::diff_context_sptr;
+using abigail::comparison::diff_context;
+using abigail::comparison::diff_sptr;
+using abigail::comparison::corpus_diff;
+using abigail::comparison::corpus_diff_sptr;
+using abigail::comparison::function_type_diff_sptr;
+using abigail::comparison::compute_diff;
+using abigail::comparison::get_default_harmless_categories_bitmap;
+using abigail::comparison::apply_filters_and_categorize_diff_node_tree;
+using abigail::suppr::suppression_sptr;
+using abigail::suppr::suppressions_type;
+using abigail::suppr::read_suppressions;
 
 class options
 {
@@ -67,9 +97,9 @@ public:
   string		app_path;
   string		lib1_path;
   string		lib2_path;
-  shared_ptr<char>	app_di_root_path;
-  shared_ptr<char>	lib1_di_root_path;
-  shared_ptr<char>	lib2_di_root_path;
+  string		app_di_root_path;
+  string		lib1_di_root_path;
+  string		lib2_di_root_path;
   vector<string>	suppression_paths;
   bool			display_help;
   bool			display_version;
@@ -84,6 +114,9 @@ public:
   bool			ignore_soname;
 #ifdef WITH_CTF
   bool			use_ctf;
+#endif
+#ifdef WITH_BTF
+  bool			use_btf;
 #endif
 
   options(const char* program_name)
@@ -103,8 +136,87 @@ public:
     ,
       use_ctf()
 #endif
+#ifdef WITH_BTF
+    ,
+      use_btf()
+#endif
   {}
 }; // end struct options
+
+/// A description of a change of the type of a function.  It contains
+/// the declaration of the function we are interested in, as well as
+/// the differences found in the type of that function.
+struct fn_change
+{
+  const function_decl* decl = nullptr;
+  function_type_diff_sptr diff;
+  bool reverse_direction = false;
+
+  fn_change(const function_decl* decl,
+	    function_type_diff_sptr difference,
+	    bool reverse_dir = false)
+    : decl(decl),
+      diff(difference),
+      reverse_direction(reverse_dir)
+  {}
+}; // end struct fn_change
+
+/// An description of a change of the type of a variable.  It contains
+/// the declaration of the variable we are interested in, as well as
+/// the differences found in the type of that variable.
+struct var_change
+{
+  var_decl_sptr decl = nullptr;
+  diff_sptr diff;
+  bool reverse_direction = false;
+
+  var_change(const var_decl_sptr& var,
+	     diff_sptr difference,
+	     bool reverse_dir)
+    : decl(var),
+      diff(difference),
+      reverse_direction(reverse_dir)
+  {}
+}; // end struct var_change
+
+class options;
+struct fn_changes;
+struct var_changes;
+
+static void
+report_function_changes(const options&			opts,
+			const vector<fn_change>&	fn_changes);
+
+static void
+report_variable_changes(const options&			opts,
+			const vector<var_change>&	var_changes);
+
+static abidiff_status
+compare_expected_against_provided_functions(diff_context_sptr&		ctxt,
+					    corpus_sptr		app_corpus,
+					    corpus_sptr		lib_corpus,
+					    vector<fn_change>&		fn_changes,
+					    bool			reverse_direction = false);
+
+static abidiff_status
+compare_expected_against_provided_variables(diff_context_sptr&		ctxt,
+					    corpus_sptr		app_corpus,
+					    corpus_sptr		lib_corpus,
+					    vector<var_change>&	var_changes,
+					    bool			reverse_direction = false);
+
+static abidiff_status
+perform_compat_check_in_normal_mode(options& opts,
+				    diff_context_sptr& ctxt,
+				    corpus_sptr app_corpus,
+				    corpus_sptr lib1_corpus,
+				    corpus_sptr lib2_corpus);
+
+static abidiff_status
+perform_compat_check_in_weak_mode(options& opts,
+				  diff_context_sptr& ctxt,
+				  corpus_sptr app_corpus,
+				  corpus_sptr lib_corpus);
 
 static void
 display_usage(const string& prog_name, ostream& out)
@@ -136,6 +248,9 @@ display_usage(const string& prog_name, ostream& out)
     "just one version of the library.\n"
 #ifdef WITH_CTF
     << "  --ctf use CTF instead of DWARF in ELF files\n"
+#endif
+#ifdef WITH_BTF
+    << "  --btf use BTF instead of DWARF in ELF files\n"
 #endif
     ;
 }
@@ -180,7 +295,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  // elfutils wants the root path to the debug info to be
 	  // absolute.
 	  opts.app_di_root_path =
-	    abigail::tools_utils::make_path_absolute(argv[i + 1]);
+	    abigail::tools_utils::make_path_absolute(string(argv[i + 1]));
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--lib-debug-info-dir1")
@@ -192,7 +307,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  // elfutils wants the root path to the debug info to be
 	  // absolute.
 	  opts.lib1_di_root_path =
-	    abigail::tools_utils::make_path_absolute(argv[i + 1]);
+	    abigail::tools_utils::make_path_absolute(string(argv[i + 1]));
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--lib-debug-info-dir2")
@@ -204,7 +319,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  // elfutils wants the root path to the debug info to be
 	  // absolute.
 	  opts.lib2_di_root_path =
-	    abigail::tools_utils::make_path_absolute(argv[i + 1]);
+	    abigail::tools_utils::make_path_absolute(string(argv[i + 1]));
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--suppressions")
@@ -244,6 +359,10 @@ parse_command_line(int argc, char* argv[], options& opts)
       else if (!strcmp(argv[i], "--ctf"))
         opts.use_ctf = true;
 #endif
+#ifdef WITH_BTF
+      else if (!strcmp(argv[i], "--btf"))
+        opts.use_btf = true;
+#endif
       else
 	{
 	  opts.unknow_option = argv[i];
@@ -262,30 +381,6 @@ parse_command_line(int argc, char* argv[], options& opts)
 
   return true;
 }
-
-using abigail::tools_utils::check_file;
-using abigail::tools_utils::base_name;
-using abigail::tools_utils::abidiff_status;
-using abigail::ir::environment;
-using abigail::ir::environment_sptr;
-using abigail::corpus;
-using abigail::corpus_sptr;
-using abigail::ir::elf_symbols;
-using abigail::ir::demangle_cplus_mangled_name;
-using abigail::ir::type_base_sptr;
-using abigail::ir::function_type_sptr;
-using abigail::ir::function_decl;
-using abigail::ir::var_decl;
-using abigail::comparison::diff_context_sptr;
-using abigail::comparison::diff_context;
-using abigail::comparison::diff_sptr;
-using abigail::comparison::corpus_diff;
-using abigail::comparison::corpus_diff_sptr;
-using abigail::comparison::function_type_diff_sptr;
-using abigail::comparison::compute_diff;
-using abigail::suppr::suppression_sptr;
-using abigail::suppr::suppressions_type;
-using abigail::suppr::read_suppressions;
 
 /// Create the context of a diff.
 ///
@@ -307,14 +402,7 @@ create_diff_context(const options& opts)
   ctxt->show_locs(opts.show_locs);
   // Intentional logic flip of ignore_soname
   ctxt->show_soname_change(!opts.ignore_soname);
-  ctxt->switch_categories_off
-    (abigail::comparison::ACCESS_CHANGE_CATEGORY
-     | abigail::comparison::COMPATIBLE_TYPE_CHANGE_CATEGORY
-     | abigail::comparison::HARMLESS_DECL_NAME_CHANGE_CATEGORY
-     | abigail::comparison::NON_VIRT_MEM_FUN_CHANGE_CATEGORY
-     | abigail::comparison::STATIC_DATA_MEMBER_CHANGE_CATEGORY
-     | abigail::comparison::HARMLESS_ENUM_CHANGE_CATEGORY
-     | abigail::comparison::HARMLESS_SYMBOL_ALIAS_CHANGE_CATEGORY);
+  ctxt->switch_categories_off(get_default_harmless_categories_bitmap());
 
   // Load suppression specifications, if there are any.
   suppressions_type supprs;
@@ -328,6 +416,251 @@ create_diff_context(const options& opts)
     ctxt->add_suppressions(supprs);
 
   return ctxt;
+}
+
+/// Compare the functions expected by an application against the
+/// functions provides by a library.
+///
+/// The result of the comparison is a vector of @ref fn_change.
+///
+/// The app & libraries are represented by their ABI corpora.
+///
+/// The comparison can also be done in the "reverse direction",
+/// meaning, it compares the functions expected by library (or plugin)
+/// against the functions provided by the application.
+///
+/// @param ctxt the context use to perform the comparison.
+///
+/// @param app_corpus the ABI corpus of the application to consider.
+///
+/// @param lib_corpus the ABI corpus of the library (or plugin) to
+/// consider.
+///
+/// @param fn_changes output parameter.  This is a vector of @ref
+/// fn_change that is populated by this function if it finds changes
+/// between what the application expects and what the library
+/// provides.
+///
+/// @param reverse_direction if this is true, then @lib_corpus is
+/// considered as a plugin and in that case, the functions it expects
+/// are compared against the functions provided by the application.
+///
+/// @return the status of the comparison.
+static abidiff_status
+compare_expected_against_provided_functions(diff_context_sptr&		ctxt,
+					    corpus_sptr		app_corpus,
+					    corpus_sptr		lib_corpus,
+					    vector<fn_change>&		fn_changes,
+					    bool			reverse_direction)
+{
+  abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
+  for (auto expected_fn :
+	 reverse_direction
+	 ? lib_corpus->get_sorted_undefined_functions()
+	 : app_corpus->get_sorted_undefined_functions())
+    {
+      interned_string fn_id = expected_fn->get_id();
+      // ... against the functions exported by the library!
+      const std::unordered_set<function_decl*> *exported_fns =
+	reverse_direction
+	? app_corpus->lookup_functions(fn_id)
+	: lib_corpus->lookup_functions(fn_id);
+      if (exported_fns)
+	{
+	  for (auto exported_fn : *exported_fns)
+	    {
+	      // OK here is where we compare the function expected
+	      // by the application against the function exported by
+	      // the library.
+	      function_type_diff_sptr fn_type_diff =
+		compute_diff(expected_fn->get_type(),
+			     exported_fn->get_type(),
+			     ctxt);
+	      diff_sptr diff_tree = is_diff(fn_type_diff);
+	      apply_filters_and_categorize_diff_node_tree(diff_tree);
+	      if (fn_type_diff && fn_type_diff->to_be_reported())
+		{
+		  // So there is a type change between the function
+		  // expected by the application and the function
+		  // exported by the library.  Let's record that
+		  // change so that we can report about it later.
+		  fn_changes.push_back(fn_change(expected_fn, fn_type_diff, reverse_direction));
+		  status |= abigail::tools_utils::ABIDIFF_ABI_CHANGE;
+		}
+	    }
+	}
+    }
+
+  return status;
+}
+
+/// Compare the variables expected by an application against the
+/// variables provides by a library.
+///
+/// The result of the comparison is a vector of @ref fn_change.
+///
+/// The app & libraries are represented by their ABI corpora.
+///
+/// The comparison can also be done in the "reverse direction",
+/// meaning, it compares the variables expected by library (or plugin)
+/// against the variables provided by the application.
+///
+/// @param ctxt the context use to perform the comparison.
+///
+/// @param app_corpus the ABI corpus of the application to consider.
+///
+/// @param lib_corpus the ABI corpus of the library (or plugin) to
+/// consider.
+///
+/// @param fn_changes output parameter.  This is a vector of @ref
+/// fn_change that is populated by this function if it finds changes
+/// between what the application expects and what the library
+/// provides.
+///
+/// @param reverse_direction if this is true, then @lib_corpus is
+/// considered as a plugin and in that case, the variables it expects
+/// are compared against the variables provided by the application.
+///
+/// @return the status of the comparison.
+static abidiff_status
+compare_expected_against_provided_variables(diff_context_sptr&		ctxt,
+					    corpus_sptr		app_corpus,
+					    corpus_sptr		lib_corpus,
+					    vector<var_change>&	var_changes,
+					    bool			reverse_direction)
+{
+  abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
+  for (auto expected_var :
+	 reverse_direction
+	 ? lib_corpus->get_sorted_undefined_variables()
+	 : app_corpus->get_sorted_undefined_variables())
+    {
+      interned_string var_id = expected_var->get_id();
+      // ... against the variables exported by the library!
+      const std::unordered_set<var_decl_sptr>* exported_vars =
+	reverse_direction
+	? app_corpus->lookup_variables(var_id)
+	: lib_corpus->lookup_variables(var_id);
+      if (exported_vars)
+	{
+	  for (auto exported_var : *exported_vars)
+	    {
+	      // OK here is where we compare the variable expected by
+	      // the application against the variable exported by the
+	      // library.
+	      diff_sptr type_diff =
+		compute_diff(expected_var->get_type(),
+			     exported_var->get_type(),
+			     ctxt);
+	      apply_filters_and_categorize_diff_node_tree(type_diff);
+	      if (type_diff && type_diff->to_be_reported())
+		{
+		  // So there is a type change between the variable
+		  // expected by the application and the variable
+		  // exported by the library.  Let's record that
+		  // change so that we can report about it later.
+		  var_changes.push_back(var_change(expected_var, type_diff, reverse_direction));
+		  status |= abigail::tools_utils::ABIDIFF_ABI_CHANGE;
+		}
+	    }
+	}
+    }
+
+  return status;
+}
+
+/// Report about the changes between functions expected by a binary
+/// and functions provided by another one.
+///
+/// @param opts the command line options received by the current
+/// program.
+///
+/// @param fn_changes the vector of @ref fn_change to report about.
+static void
+report_function_changes(const options&			opts,
+			const vector<fn_change>&	fn_changes)
+{
+  string lib1_path = opts.lib1_path, app_path = opts.app_path;
+
+
+  // If some function changes were detected, then report them.
+  if (!fn_changes.empty())
+    {
+      if (opts.show_base_names)
+	{
+	  base_name(opts.lib1_path, lib1_path);
+	  base_name(opts.app_path, app_path);
+	}
+
+      if (fn_changes.front().reverse_direction)
+	cout << "functions expected by library or plugin "
+	     << "'" << lib1_path << "'\n"
+	     << "have sub-types that are different from what application "
+	     << "'" << app_path << "' "
+	     << "provides:\n\n";
+      else
+	cout << "functions defined in library "
+	     << "'" << lib1_path << "'\n"
+	     << "have sub-types that are different from what application "
+	     << "'" << app_path << "' "
+	     << "expects:\n\n";
+
+      for (auto& change : fn_changes)
+	{
+	  cout << "  "
+	       << change.decl->get_pretty_representation()
+	       << ":\n";
+	  change.diff->report(cout, "    ");
+	  cout << "\n";
+	}
+    }
+}
+
+/// Report about the changes between variables expected by a binary
+/// and variables provided by another one.
+///
+/// @param opts the command line options received by the current
+/// program.
+///
+/// @param var_changes the vector of @ref var_change to report about.
+static void
+report_variable_changes(const options&			opts,
+			const vector<var_change>&	var_changes)
+{
+  string lib1_path = opts.lib1_path, app_path = opts.app_path;
+
+  if (!var_changes.empty())
+    {
+      if (opts.show_base_names)
+	{
+	  base_name(opts.lib1_path, lib1_path);
+	  base_name(opts.app_path, app_path);
+	}
+
+      if (var_changes.front().reverse_direction)
+	cout << "variables defined in library or plugin "
+	     << "'" << lib1_path << "'\n"
+	     << "have sub-types that are different from what application "
+	     << "'" << app_path << "' "
+	     << "expects:\n\n";
+      else
+	cout << "variables defined in library "
+	     << "'" << lib1_path << "'\n"
+	     << "have sub-types that are different from what application "
+	     << "'" << app_path << "' "
+	     << "expects:\n\n";
+
+      for (vector<var_change>::const_iterator i = var_changes.begin();
+	   i != var_changes.end();
+	   ++i)
+	{
+	  cout << "  "
+	       << i->decl->get_pretty_representation()
+	       << ":\n";
+	  i->diff->report(cout, "    ");
+	  cout << "\n";
+	}
+    }
 }
 
 /// Perform a compatibility check of an application corpus linked
@@ -430,44 +763,6 @@ perform_compat_check_in_normal_mode(options& opts,
   return status;
 }
 
-/// A description of a change of the type of a function.  It contains
-/// the declaration of the function we are interested in, as well as
-/// the differences found in the type of that function.
-struct fn_change
-{
-  function_decl* decl;
-  function_type_diff_sptr diff;
-
-  fn_change()
-    : decl()
-  {}
-
-  fn_change(function_decl* decl,
-	    function_type_diff_sptr difference)
-    : decl(decl),
-      diff(difference)
-  {}
-}; // end struct fn_change
-
-/// An description of a change of the type of a variable.  It contains
-/// the declaration of the variable we are interested in, as well as
-/// the differences found in the type of that variable.
-struct var_change
-{
-  var_decl* decl;
-  diff_sptr diff;
-
-  var_change()
-    : decl()
-  {}
-
-  var_change(var_decl* var,
-	     diff_sptr difference)
-    : decl(var),
-      diff(difference)
-  {}
-}; // end struct var_change
-
 /// Perform a compatibility check of an application corpus and a
 /// library corpus.
 ///
@@ -495,42 +790,7 @@ perform_compat_check_in_weak_mode(options& opts,
 
   abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
 
-  // Functions and variables defined and exported by lib_corpus which
-  // symbols are undefined in app_corpus are the artifacts we are
-  // interested in.
-  //
-  // So let's drop all functions and variables from lib_corpus that
-  // are so that their symbols are *NOT* undefined in app_corpus.
-  //
-  // In other words, let's only keep the functiond and variables from
-  // lib_corpus that are consumed by app_corpus.
-
-  for (elf_symbols::const_iterator i =
-	 app_corpus->get_sorted_undefined_fun_symbols().begin();
-       i != app_corpus->get_sorted_undefined_fun_symbols().end();
-       ++i)
-    {
-      string id = (*i)->get_id_string();
-      lib_corpus->get_sym_ids_of_fns_to_keep().push_back(id);
-    }
-
-  for (elf_symbols::const_iterator i =
-	 app_corpus->get_sorted_undefined_var_symbols().begin();
-       i != app_corpus->get_sorted_undefined_var_symbols().end();
-       ++i)
-    {
-      string id = (*i)->get_id_string();
-      lib_corpus->get_sym_ids_of_vars_to_keep().push_back(id);
-    }
-
-  if (!app_corpus->get_sorted_undefined_var_symbols().empty()
-      || !app_corpus->get_sorted_undefined_fun_symbols().empty())
-    lib_corpus->maybe_drop_some_exported_decls();
-
-  // OK now, lib_corpus only contains functions and variables which
-  // symbol are consumed by app_corpus.
-
-  // So we are now going to compare the functions that are exported by
+  // We are now going to compare the functions that are exported by
   // lib_corpus against those that app_corpus expects.
   //
   // In other words, the functions which symbols are defined by
@@ -538,105 +798,35 @@ perform_compat_check_in_weak_mode(options& opts,
   // variables which are undefined in app_corpus.
 
   {
-    function_type_sptr lib_fn_type, app_fn_type;
     vector<fn_change> fn_changes;
-    for (corpus::functions::const_iterator i =
-	   lib_corpus->get_functions().begin();
-	 i != lib_corpus->get_functions().end();
-	 ++i)
-      {
-	// lib_fn_type contains the type of a function that is defined
-	// in lib_corpus.
-	lib_fn_type = (*i)->get_type();
-	ABG_ASSERT(lib_fn_type);
-
-	// app_fn_type contains the the "version" of lib_fn_type that
-	// is expected by app_corpus.
-	app_fn_type = lookup_or_synthesize_fn_type(lib_fn_type, *app_corpus);
-
-	// Now lets compare the type expected by app_corpus against
-	// the type actually provided by lib_fn_type.
-	function_type_diff_sptr fn_type_diff;
-	if (app_fn_type)
-	  fn_type_diff = compute_diff(app_fn_type, lib_fn_type, ctxt);
-
-	// If the two types of functions are different, then let's
-	// store their difference in the "fn_changes" vector.
-	if (fn_type_diff && fn_type_diff->to_be_reported())
-	  fn_changes.push_back(fn_change(*i, fn_type_diff));
-      }
-
-    string lib1_path = opts.lib1_path, app_path = opts.app_path;
-    if (opts.show_base_names)
-      {
-	base_name(opts.lib1_path, lib1_path);
-	base_name(opts.app_path, app_path);
-      }
-
-    // If some function changes were detected, then report them.
-    if (!fn_changes.empty())
-      {
-	cout << "functions defined in library "
-	     << "'" << lib1_path << "'\n"
-	     << "have sub-types that are different from what application "
-	     << "'" << app_path << "' "
-	     << "expects:\n\n";
-	for (vector<fn_change>::const_iterator i = fn_changes.begin();
-	     i != fn_changes.end();
-	     ++i)
-	  {
-	    cout << "  "
-		 << i->decl->get_pretty_representation()
-		 << ":\n";
-	    i->diff->report(cout, "    ");
-	    cout << "\n";
-	  }
-      }
-
-    if (!fn_changes.empty())
-      status |= abigail::tools_utils::ABIDIFF_ABI_CHANGE;
-
-    // OK now, let's do something similar for *variables* changes.
-    //
-    // That is, let's compare the variables expected by app_corpus
-    // against the variables actually provided by lib_corpus and
-    // report the difference that might have been found.
-
-    type_base_sptr lib_var_type, app_var_type;
-    vector<var_change> var_changes;
-    for (corpus::variables::const_iterator i =
-	   lib_corpus->get_variables().begin();
-	 i != lib_corpus->get_variables().end();
-	 ++i)
-      {
-	lib_var_type = (*i)->get_type();
-	ABG_ASSERT(lib_var_type);
-	app_var_type = lookup_type(lib_var_type, *app_corpus);
-	diff_sptr type_diff;
-	if (app_var_type)
-	  type_diff = compute_diff(app_var_type, lib_var_type, ctxt);
-	if (type_diff && type_diff->to_be_reported())
-	  var_changes.push_back(var_change(*i, type_diff));
-      }
-    if (!var_changes.empty())
-      {
-	cout << "variables defined in library "
-	     << "'" << lib1_path << "'\n"
-	     << "have sub-types that are different from what application "
-	     << "'" << app_path << "' "
-	     << "expects:\n\n";
-	for (vector<var_change>::const_iterator i = var_changes.begin();
-	     i != var_changes.end();
-	     ++i)
-	  {
-	    cout << "  "
-		 << i->decl->get_pretty_representation()
-		 << ":\n";
-	    i->diff->report(cout, "    ");
-	    cout << "\n";
-	  }
-      }
+    status = compare_expected_against_provided_functions(ctxt, app_corpus, lib_corpus,
+							 fn_changes, /*reverse_direction=*/false);
+    report_function_changes(opts, fn_changes);
   }
+
+  {
+    vector<fn_change> fn_changes;
+    status |= compare_expected_against_provided_functions(ctxt, app_corpus, lib_corpus,
+							  fn_changes, /*reverse_direction=*/true);
+    report_function_changes(opts, fn_changes);
+  }
+
+  // Similarly, we are now going to compare the variables that are
+  // exported by lib_corpus against those that app_corpus expects.
+  {
+    vector<var_change> var_changes;
+    status |= compare_expected_against_provided_variables(ctxt, app_corpus, lib_corpus,
+							  var_changes, /*reverse_direction=*/false);
+    report_variable_changes(opts, var_changes);
+  }
+
+  {
+    vector<var_change> var_changes;
+    status |= compare_expected_against_provided_variables(ctxt, app_corpus, lib_corpus,
+							  var_changes, /*reverse_direction=*/true);
+    report_variable_changes(opts, var_changes);
+  }
+
   return status;
 }
 
@@ -655,7 +845,7 @@ perform_compat_check_in_weak_mode(options& opts,
 static corpus_sptr
 read_corpus(options			opts,
 	    abigail::fe_iface::status&	status,
-	    const vector<char**>	di_roots,
+	    const vector<string>	di_roots,
 	    environment		&env,
 	    const string		&path)
 {
@@ -672,19 +862,22 @@ read_corpus(options			opts,
       break;
     case abigail::tools_utils::FILE_TYPE_ELF:
       {
+	corpus::origin requested_fe_kind = corpus::DWARF_ORIGIN;
 #ifdef WITH_CTF
 	if (opts.use_ctf)
-	  {
-	    rdr = ctf::create_reader(path, env);
-	    ABG_ASSERT(rdr);
-
-	    retval = ctf::read_corpus(rdr.get(), status);
-	  }
-	else
+	  requested_fe_kind = corpus::CTF_ORIGIN;
 #endif
-	  retval = dwarf::read_corpus_from_elf(path, di_roots, env,
-					       /*load_all_types=*/opts.weak_mode,
-					       status);
+#ifdef WITH_BTF
+	if (opts.use_btf)
+	  requested_fe_kind = corpus::BTF_ORIGIN;
+#endif
+
+	rdr = create_best_elf_based_reader (path, di_roots, env, requested_fe_kind,
+					    /*load_all_types=*/opts.weak_mode,
+					    status);
+	ABG_ASSERT(rdr);
+	rdr->options().load_undefined_interfaces = true;
+	retval = rdr->read_corpus(status);
       }
       break;
     case abigail::tools_utils::FILE_TYPE_XML_CORPUS:
@@ -702,6 +895,7 @@ read_corpus(options			opts,
     case abigail::tools_utils::FILE_TYPE_DIR:
     case abigail::tools_utils::FILE_TYPE_TAR:
     case abigail::tools_utils::FILE_TYPE_NATIVE_BI:
+    case abigail::tools_utils::FILE_TYPE_XZ:
       break;
     }
 
@@ -712,6 +906,8 @@ int
 main(int argc, char* argv[])
 {
   options opts(argv[0]);
+
+  abigail::tools_utils::initialize();
 
   if (!parse_command_line(argc, argv, opts))
     {
@@ -782,9 +978,10 @@ main(int argc, char* argv[])
     return abigail::tools_utils::ABIDIFF_OK;
 
   // Read the application ELF file.
-  char * app_di_root = opts.app_di_root_path.get();
-  vector<char**> app_di_roots;
-  app_di_roots.push_back(&app_di_root);
+  string& app_di_root = opts.app_di_root_path;
+  vector<string> app_di_roots;
+  if (!app_di_root.empty())
+    app_di_roots.push_back(app_di_root);
   abigail::fe_iface::status status = abigail::fe_iface::STATUS_UNKNOWN;
   environment env;
 
@@ -842,9 +1039,10 @@ main(int argc, char* argv[])
   if (!abigail::tools_utils::check_file(opts.lib1_path, cerr, opts.prog_name))
     return abigail::tools_utils::ABIDIFF_ERROR;
 
-  char * lib1_di_root = opts.lib1_di_root_path.get();
-  vector<char**> lib1_di_roots;
-  lib1_di_roots.push_back(&lib1_di_root);
+  string& lib1_di_root = opts.lib1_di_root_path;
+  vector<string> lib1_di_roots;
+  if (!lib1_di_root.empty())
+    lib1_di_roots.push_back(lib1_di_root);
   corpus_sptr lib1_corpus = read_corpus(opts, status,
 					lib1_di_roots,
 					env, opts.lib1_path);
@@ -877,9 +1075,10 @@ main(int argc, char* argv[])
   if (!opts.weak_mode)
     {
       ABG_ASSERT(!opts.lib2_path.empty());
-      char * lib2_di_root = opts.lib2_di_root_path.get();
-      vector<char**> lib2_di_roots;
-      lib2_di_roots.push_back(&lib2_di_root);
+      string& lib2_di_root = opts.lib2_di_root_path;
+      vector<string> lib2_di_roots;
+      if (!lib2_di_root.empty())
+	lib2_di_roots.push_back(lib2_di_root);
       lib2_corpus = read_corpus(opts, status,
 				lib2_di_roots, env,
 				opts.lib2_path);

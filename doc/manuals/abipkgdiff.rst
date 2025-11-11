@@ -5,13 +5,17 @@ abipkgdiff
 ===========
 
 ``abipkgdiff`` compares the Application Binary Interfaces (ABI) of the
-`ELF`_ binaries contained in two software packages.  The software
-package formats currently supported are `Deb`_, `RPM`_, `tar`_
-archives (either compressed or not) and plain directories that contain
-binaries.
+`ELF`_ binaries contained in two sets of software packages.  The
+software package formats currently supported are `Deb`_, `RPM`_,
+`tar`_ archives (either compressed or not) and plain directories that
+contain binaries.
+
+The ABI of the binaries contained in the second set of packages is
+compared against the ABI of the binaries contained in the first set of
+packages.
 
 For a comprehensive ABI change report that includes changes about
-function and variable sub-types, the two input packages must be
+function and variable sub-types, the two input package sets must be
 accompanied with their debug information packages that contain debug
 information either in `DWARF`_, `CTF`_ or in `BTF`_ formats.  Please
 note however that some packages contain binaries that embed the debug
@@ -34,10 +38,20 @@ Invocation
 
 ::
 
-  abipkgdiff [option] <package1> <package2>
+  abipkgdiff [options] <package1> <package2>
 
 ``package1`` and ``package2`` are the packages that contain the
 binaries to be compared.
+
+An alternate invocation style would be:
+
+::
+
+  abipkgdiff [options] --set1 <pkg1-v1> <pkg2-v1> <pkg3-v1> \
+                       --set2 <pkg1-v2> <pkg2-v2> <pkg3-v2>
+
+where the ABI of binaries contained in the second set of packages are
+compared against binaries contained in the first set of packages.
 
 
 Environment
@@ -80,13 +94,43 @@ documented further below) to provide a suppression specification.
 Options
 =======
 
-  * ``--help | -h``
+  * ``--allow-non-exported-interfaces``
 
-    Display a short help about the command and exit.
+    When looking at the debug information accompanying a binary, this
+    tool analyzes the descriptions of the types reachable by the
+    interfaces (functions and variables) that are visible outside of
+    their translation unit.  Once that analysis is done, an ABI corpus
+    is constructed by only considering the subset of types reachable
+    from interfaces associated to `ELF`_ symbols that are defined and
+    exported by the binary.  It's those final ABI Corpora that are
+    compared by this tool.
 
-  * `--version | -v`
+    The problem with that approach however is that analyzing all the
+    interfaces that are visible from outside their translation unit
+    can amount to a lot of data, especially when those binaries are
+    applications, as opposed to shared libraries.  One example of such
+    applications is the `Linux Kernel`_.  Analyzing massive ABI
+    Corpora like these can be extremely slow.
 
-    Display the version of the program and exit.
+    In the presence of an "average sized" binary however one can
+    afford having libabigail analyze all interfaces that are visible
+    outside of their translation unit, using this option.
+
+    Note that this option is turned on by default, unless we are in
+    the presence of the `Linux Kernel`_.
+
+
+  * ``--btf``
+
+     This is used to compare packages with `BTF`_ debug information,
+     if present.
+
+
+  * ``--ctf``
+
+     This is used to compare packages with `CTF`_ debug information,
+     if present.
+
 
   * ``--debug-info-pkg1 | --d1`` <path>
 
@@ -99,6 +143,7 @@ Options
     instances of this options can be provided, along with those
     several different debug info packages.
 
+
   * ``--debug-info-pkg2 | --d2`` <path>
 
     For cases where the debug information for *package2* is split out
@@ -110,6 +155,7 @@ Options
     instances of this options can be provided, along with those
     several different debug info packages.
 
+
   * ``--devel-pkg1 | --devel1`` <path>
 
     Specifies where to find the `Development Package`_ associated with
@@ -120,6 +166,7 @@ Options
     filters out reports about ABI changes to types that are *NOT*
     defined in these header files.
 
+
   * ``--devel-pkg2 | --devel2`` <path>
 
     Specifies where to find the `Development Package`_ associated with
@@ -129,6 +176,7 @@ Options
     compared) are defined.  When this option is provided, the tool
     filters out reports about ABI changes to types that are *NOT*
     defined in these header files.
+
 
   * ``--drop-private-types``
 
@@ -148,24 +196,106 @@ Options
     consumption of the tool on binaries with a lot of publicly defined
     and exported types.
 
+
   * ``--dso-only``
 
     Compare ELF files that are shared libraries, only.  Do not compare
     executable files, for instance.
 
-  * ``--private-dso``
 
-    By default, ``abipkgdiff`` does not compare DSOs that are private
-    to the RPM package.  A private DSO is a DSO which SONAME is *NOT*
-    advertised in the "provides" property of the RPM.
+  * ``--exported-interfaces-only``
 
-    This option instructs ``abipkgdiff`` to *also* compare DSOs that
-    are *NOT* advertised in the "provides" property of the RPM.
+    By default, when looking at the debug information accompanying a
+    binary, this tool analyzes the descriptions of the types reachable
+    by the interfaces (functions and variables) that are visible
+    outside of their translation unit.  Once that analysis is done, an
+    ABI corpus is constructed by only considering the subset of types
+    reachable from interfaces associated to `ELF`_ symbols that are
+    defined and exported by the binary.  It's those final ABI Corpora
+    that are compared by this tool.
 
-    Please note that the fact that (by default) ``abipkgdiff`` skips
-    private DSO is a feature that is available only for RPMs, at the
-    moment.  We would happily accept patches adding that feature for
-    other package formats.
+    The problem with that approach however is that analyzing all the
+    interfaces that are visible from outside their translation unit
+    can amount to a lot of data, especially when those binaries are
+    applications, as opposed to shared libraries.  One example of such
+    applications is the `Linux Kernel`_.  Analyzing massive ABI
+    corpora like these can be extremely slow.
+
+    To mitigate that performance issue, this option allows libabigail
+    to only analyze types that are reachable from interfaces
+    associated with defined and exported `ELF`_ symbols.
+
+    Note that this option is turned on by default when analyzing the
+    `Linux Kernel`_.  Otherwise, it's turned off by default.
+
+
+  * ``--fail-no-dbg``
+
+    Make the program fail and return a non-zero exit code if couldn't
+    read any of the debug information that comes from the debug info
+    packages that were given on the command line.  If no debug info
+    package were provided on the command line then this option is not
+    active.
+
+    Note that the non-zero exit code returned by the program as a
+    result of this option is the constant ``ABIDIFF_ERROR``.  To know
+    the numerical value of that constant, please refer to the
+    :ref:`exit code documentation <abidiff_return_value_label>`.
+
+
+  * ``--full-impact|-f``
+
+    When comparing two Linux Kernel packages, this function instructs
+    ``abipkgdiff`` to emit the so-called ``full impact report``, which
+    is the default report kind emitted by the ``abidiff`` tool: ::
+
+	$ abidiff libtest-v0.so libtest-v1.so
+	Functions changes summary: 0 Removed, 1 Changed, 0 Added function
+	Variables changes summary: 0 Removed, 0 Changed, 0 Added variable
+
+	1 function with some indirect sub-type change:
+
+	  [C]'function void fn(C&)' at test-v1.cc:13:1 has some indirect sub-type changes:
+	    parameter 1 of type 'C&' has sub-type changes:
+	      in referenced type 'struct C' at test-v1.cc:7:1:
+		type size hasn't changed
+		1 data member change:
+		 type of 'leaf* C::m0' changed:
+		   in pointed to type 'struct leaf' at test-v1.cc:1:1:
+		     type size changed from 32 to 64 bits
+		     1 data member insertion:
+		       'char leaf::m1', at offset 32 (in bits) at test-v1.cc:4:1
+
+	$
+
+
+  * ``--harmless``
+
+    In the diff report, display only the :ref:`harmless
+    <harmlesschangeconcept_label>` changes.  By default, the harmless
+    changes are filtered out of the diff report keep the clutter to a
+    minimum and have a greater chance to spot real ABI issues.
+
+
+  * ``--help | -h``
+
+    Display a short help about the command and exit.
+
+
+  * ``--impacted-interfaces``
+
+    When showing leaf changes, this option instructs abipkgdiff to
+    show the list of impacted interfaces.  This option is thus to be
+    used in addition to the ``--leaf-changes-only`` option, or, when
+    comparing two Linux Kernel packages.  Otherwise, it's simply
+    ignored.
+
+
+  * ``--keep-tmp-files``
+
+    Do not erase the temporary directory files that are created during
+    the execution of the tool.
+
 
   * ``--leaf-changes-only|-l`` only show leaf changes, so don't show
     impact analysis report.  This option implies ``--redundant``
@@ -228,38 +358,89 @@ Options
     option ``--full-impact`` which is documented later below.
 
 
-  * ``--impacted-interfaces``
+  * ``--linux-kernel-abi-whitelist | -w`` <*path-to-whitelist*>
 
-    When showing leaf changes, this option instructs abipkgdiff to
-    show the list of impacted interfaces.  This option is thus to be
-    used in addition to the ``--leaf-changes-only`` option, or, when
-    comparing two Linux Kernel packages.  Otherwise, it's simply
-    ignored.
+    When comparing two Linux kernel RPM packages, this option points
+    to the white list of names of ELF symbols of functions and
+    variables that must be compared for ABI changes.  That white list
+    is called a "Linux kernel ABI white list".
 
-  * ``--full-impact|-f``
+    Any other function or variable which ELF symbol are not present in
+    that white list will not be considered by the ABI comparison
+    process.
 
-    When comparing two Linux Kernel packages, this function instructs
-    ``abipkgdiff`` to emit the so-called ``full impact report``, which
-    is the default report kind emitted by the ``abidiff`` tool: ::
+    If this option is not provided -- thus if no white list is
+    provided -- then the ABI of all publicly defined and exported
+    functions and global variables by the Linux Kernel binaries are
+    compared.
 
-	$ abidiff libtest-v0.so libtest-v1.so
-	Functions changes summary: 0 Removed, 1 Changed, 0 Added function
-	Variables changes summary: 0 Removed, 0 Changed, 0 Added variable
+    Please note that if a white list package is given in parameter,
+    this option handles it just fine, like if the --wp option was
+    used.
 
-	1 function with some indirect sub-type change:
 
-	  [C]'function void fn(C&)' at test-v1.cc:13:1 has some indirect sub-type changes:
-	    parameter 1 of type 'C&' has sub-type changes:
-	      in referenced type 'struct C' at test-v1.cc:7:1:
-		type size hasn't changed
-		1 data member change:
-		 type of 'leaf* C::m0' changed:
-		   in pointed to type 'struct leaf' at test-v1.cc:1:1:
-		     type size changed from 32 to 64 bits
-		     1 data member insertion:
-		       'char leaf::m1', at offset 32 (in bits) at test-v1.cc:4:1
+  * ``--no-abignore``
 
-	$
+    Do not search the package for the presence of suppression files.
+
+
+  * ``--no-added-binaries``
+
+    Do not show the list of binaries that got added to the second
+    package.
+
+    Please note that the presence of such added binaries is not
+    considered like an ABI change by this tool; as such, it doesn't
+    have any impact on the exit code of the tool.  It does only have
+    an informational value.  Removed binaries are, however, considered
+    as an ABI change.
+
+
+  * ``--no-added-syms``
+
+    Do not show the list of functions, variables, or any symbol that
+    was added.
+
+
+  * ``--no-assume-odr-for-cplusplus``
+
+    When analysing a binary originating from C++ code using `DWARF`_
+    debug information, libabigail assumes the `One Definition Rule`_
+    to speed-up the analysis.  In that case, when several types have
+    the same name in the binary, they are assumed to all be equal.
+
+    This option disables that assumption and instructs libabigail to
+    actually actually compare the types to determine if they are
+    equal.
+
+
+  * ``--no-default-suppression``
+
+    Do not load the :ref:`default suppression specification files
+    <abipkgdiff_default_supprs_label>`.
+
+
+  * ``--no-leverage-dwarf-factorization``
+
+    When analysing a binary which `DWARF`_ debug information was
+    processed with the `DWZ`_ tool, the type information is supposed
+    to be already factorized.  That context is used by libabigail to
+    perform some speed optimizations.
+
+    This option disables those optimizations.
+
+
+  * ``--no-linkage-name``
+
+    In the resulting report, do not display the linkage names of
+    the added, removed, or changed functions or variables.
+
+
+  * ``--no-parallel``
+
+    By default, ``abipkgdiff`` will use all the processors it has available to
+    execute concurrently.  This option tells it not to extract packages or run
+    comparisons in parallel.
 
 
   * ``--non-reachable-types|-t``
@@ -284,55 +465,75 @@ Options
     global functions and variables are analyzed, so the tool detects
     and reports changes on these reachable types only.
 
-  * ``--exported-interfaces-only``
 
-    By default, when looking at the debug information accompanying a
-    binary, this tool analyzes the descriptions of the types reachable
-    by the interfaces (functions and variables) that are visible
-    outside of their translation unit.  Once that analysis is done, an
-    ABI corpus is constructed by only considering the subset of types
-    reachable from interfaces associated to `ELF`_ symbols that are
-    defined and exported by the binary.  It's those final ABI Corpora
-    that are compared by this tool.
+  * ``--no-show-locs``
 
-    The problem with that approach however is that analyzing all the
-    interfaces that are visible from outside their translation unit
-    can amount to a lot of data, especially when those binaries are
-    applications, as opposed to shared libraries.  One example of such
-    applications is the `Linux Kernel`_.  Analyzing massive ABI
-    corpora like these can be extremely slow.
+   Do not show information about where in the *second shared library*
+   the respective type was changed.
 
-    To mitigate that performance issue, this option allows libabigail
-    to only analyze types that are reachable from interfaces
-    associated with defined and exported `ELF`_ symbols.
 
-    Note that this option is turned on by default when analyzing the
-    `Linux Kernel`_.  Otherwise, it's turned off by default.
+  * ``--no-show-relative-offset-changes``
 
-  * ``--allow-non-exported-interfaces``
+     Without this option, when the offset of a data member changes,
+     the change report not only mentions the older and newer offset,
+     but it also mentions by how many bits the data member changes.
+     With this option, the latter is not shown.
 
-    When looking at the debug information accompanying a binary, this
-    tool analyzes the descriptions of the types reachable by the
-    interfaces (functions and variables) that are visible outside of
-    their translation unit.  Once that analysis is done, an ABI corpus
-    is constructed by only considering the subset of types reachable
-    from interfaces associated to `ELF`_ symbols that are defined and
-    exported by the binary.  It's those final ABI Corpora that are
-    compared by this tool.
 
-    The problem with that approach however is that analyzing all the
-    interfaces that are visible from outside their translation unit
-    can amount to a lot of data, especially when those binaries are
-    applications, as opposed to shared libraries.  One example of such
-    applications is the `Linux Kernel`_.  Analyzing massive ABI
-    Corpora like these can be extremely slow.
+  * ``--no-unreferenced-symbols``
 
-    In the presence of an "average sized" binary however one can
-    afford having libabigail analyze all interfaces that are visible
-    outside of their translation unit, using this option.
+    In the resulting report, do not display change information about
+    function and variable symbols that are not referenced by any debug
+    information.  Note that for these symbols not referenced by any
+    debug information, the change information displayed is either
+    added or removed symbols.
 
-    Note that this option is turned on by default, unless we are in
-    the presence of the `Linux Kernel`_.
+
+  * ``--show-bits``
+
+    Show sizes and offsets in bits, not bytes.  This option is
+    activated by default.
+
+
+  * ``--show-bytes``
+
+    Show sizes and offsets in bytes, not bits.  By default, sizes and
+    offsets are shown in bits.
+
+
+  * ``--show-dec``
+
+    Show sizes and offsets in decimal base.  This option is activated
+    by default.
+
+
+  * ``--show-hex``
+
+    Show sizes and offsets in hexadecimal base.
+
+
+  * ``--show-identical-binaries``
+
+   Show the names of the all binaries compared, including the
+   binaries whose ABI compare equal.  By default, when this option is
+   not provided, only binaries with ABI changes are mentionned in the
+   output.
+
+
+  * ``--private-dso``
+
+    By default, ``abipkgdiff`` does not compare DSOs that are private
+    to the RPM package.  A private DSO is a DSO which SONAME is *NOT*
+    advertised in the "provides" property of the RPM.
+
+    This option instructs ``abipkgdiff`` to *also* compare DSOs that
+    are *NOT* advertised in the "provides" property of the RPM.
+
+    Please note that the fact that (by default) ``abipkgdiff`` skips
+    private DSO is a feature that is available only for RPMs, at the
+    moment.  We would happily accept patches adding that feature for
+    other package formats.
+
 
   *  ``--redundant``
 
@@ -340,48 +541,36 @@ Options
     change is a change that has been displayed elsewhere in a given
     report.
 
-  * ``--harmless``
 
-    In the diff report, display only the :ref:`harmless
-    <harmlesschangeconcept_label>` changes.  By default, the harmless
-    changes are filtered out of the diff report keep the clutter to a
-    minimum and have a greater chance to spot real ABI issues.
+  * ``--self-check``
 
-  * ``--no-linkage-name``
+    This is used to test the underlying Libabigail library.  When in
+    used, the command expects only on input package, along with its
+    associated debug info packages.  The command then compares each
+    binary inside the package against its own ABIXML
+    representation. The result of the comparison should yield the
+    empty set if Libabigail behaves correctly.  Otherwise, it means
+    there is an issue that ought to be fixed.  This option is used by
+    people interested in Libabigail development for regression testing
+    purposes.  Here is an example of the use of this option: ::
 
-    In the resulting report, do not display the linkage names of
-    the added, removed, or changed functions or variables.
+      $ abipkgdiff --self-check --d1 mesa-libGLU-debuginfo-9.0.1-3.fc33.x86_64.rpm  mesa-libGLU-9.0.1-3.fc33.x86_64.rpm
+       ==== SELF CHECK SUCCEEDED for 'libGLU.so.1.3.1' ====
+      $
 
-  * ``--no-added-syms``
+  * ``--set1`` <package1-path> <package2-path> <package2-path> ...
 
-    Do not show the list of functions, variables, or any symbol that
-    was added.
+    Specifies the first set of packages whose binaries are to be
+    compared against the second one.  Note that the second set of
+    packages is to be specified using the option ``--set2``.
 
-  * ``--no-added-binaries``
 
-    Do not show the list of binaries that got added to the second
-    package.
+  * ``--set2`` <package1-path> <package2-path> <package2-path> ...
 
-    Please note that the presence of such added binaries is not
-    considered like an ABI change by this tool; as such, it doesn't
-    have any impact on the exit code of the tool.  It does only have
-    an informational value.  Removed binaries are, however, considered
-    as an ABI change.
+    Specifies the second set of packages whose binaries are to be
+    compared against the second one.  Note that the first set of
+    packages is to be specified using the option ``--set1``.
 
-  * ``--no-abignore``
-
-    Do not search the package for the presence of suppression files.
-
-  * ``--no-parallel``
-
-    By default, ``abipkgdiff`` will use all the processors it has available to
-    execute concurrently.  This option tells it not to extract packages or run
-    comparisons in parallel.
-
-  * ``--no-default-suppression``
-
-    Do not load the :ref:`default suppression specification files
-    <abipkgdiff_default_supprs_label>`.
 
   * ``--suppressions | --suppr`` <*path-to-suppressions*>
 
@@ -394,25 +583,11 @@ Options
     the :ref:`default suppression specification files
     <abipkgdiff_default_supprs_label>` are loaded .
 
-  * ``--linux-kernel-abi-whitelist | -w`` <*path-to-whitelist*>
 
-    When comparing two Linux kernel RPM packages, this option points
-    to the white list of names of ELF symbols of functions and
-    variables that must be compared for ABI changes.  That white list
-    is called a "Linux kernel ABI white list".
+  * `--version | -v`
 
-    Any other function or variable which ELF symbol are not present in
-    that white list will not be considered by the ABI comparison
-    process.
+    Display the version of the program and exit.
 
-    If this option is not provided -- thus if no white list is
-    provided -- then the ABI of all publicly defined and exported
-    functions and global variables by the Linux Kernel binaries are
-    compared.
-
-    Please note that if a white list package is given in parameter,
-    this option handles it just fine, like if the --wp option was
-    used.
 
   * ``--wp`` <*path-to-whitelist-package*>
 
@@ -444,120 +619,17 @@ Options
     functions and global variables by the Linux Kernel binaries are
     compared.
 
-  * ``--no-unreferenced-symbols``
-
-    In the resulting report, do not display change information about
-    function and variable symbols that are not referenced by any debug
-    information.  Note that for these symbols not referenced by any
-    debug information, the change information displayed is either
-    added or removed symbols.
-    
-  * ``--no-show-locs``
-
-   Do not show information about where in the *second shared library*
-   the respective type was changed.
-
-  * ``--show-bytes``
-
-    Show sizes and offsets in bytes, not bits.  By default, sizes and
-    offsets are shown in bits.
-
-  * ``--show-bits``
-
-    Show sizes and offsets in bits, not bytes.  This option is
-    activated by default.
-
-  * ``--show-hex``
-
-    Show sizes and offsets in hexadecimal base.
-
-  * ``--show-dec``
-
-    Show sizes and offsets in decimal base.  This option is activated
-    by default.
-
-  *  ``--no-show-relative-offset-changes``
-
-     Without this option, when the offset of a data member changes,
-     the change report not only mentions the older and newer offset,
-     but it also mentions by how many bits the data member changes.
-     With this option, the latter is not shown.
-
-  * ``--show-identical-binaries``
-
-   Show the names of the all binaries compared, including the
-   binaries whose ABI compare equal.  By default, when this option is
-   not provided, only binaries with ABI changes are mentionned in the
-   output.
-
-  * ``--fail-no-dbg``
-
-    Make the program fail and return a non-zero exit code if couldn't
-    read any of the debug information that comes from the debug info
-    packages that were given on the command line.  If no debug info
-    package were provided on the command line then this option is not
-    active.
-
-    Note that the non-zero exit code returned by the program as a
-    result of this option is the constant ``ABIDIFF_ERROR``.  To know
-    the numerical value of that constant, please refer to the
-    :ref:`exit code documentation <abidiff_return_value_label>`.
-
-  * ``--keep-tmp-files``
-
-    Do not erase the temporary directory files that are created during
-    the execution of the tool.
 
   * ``--verbose``
 
     Emit verbose progress messages.
 
 
-  * ``--self-check``
+  * ``--verbose-diff``
 
-    This is used to test the underlying Libabigail library.  When in
-    used, the command expects only on input package, along with its
-    associated debug info packages.  The command then compares each
-    binary inside the package against its own ABIXML
-    representation. The result of the comparison should yield the
-    empty set if Libabigail behaves correctly.  Otherwise, it means
-    there is an issue that ought to be fixed.  This option is used by
-    people interested in Libabigail development for regression testing
-    purposes.  Here is an example of the use of this option: ::
+    Emit timed verbose progress messages about the diffing process.
+    This option implies the --verbose one.
 
-      $ abipkgdiff --self-check --d1 mesa-libGLU-debuginfo-9.0.1-3.fc33.x86_64.rpm  mesa-libGLU-9.0.1-3.fc33.x86_64.rpm
-       ==== SELF CHECK SUCCEEDED for 'libGLU.so.1.3.1' ====
-      $
-  * ``--no-assume-odr-for-cplusplus``
-
-    When analysing a binary originating from C++ code using `DWARF`_
-    debug information, libabigail assumes the `One Definition Rule`_
-    to speed-up the analysis.  In that case, when several types have
-    the same name in the binary, they are assumed to all be equal.
-
-    This option disables that assumption and instructs libabigail to
-    actually actually compare the types to determine if they are
-    equal.
-
-  * ``--no-leverage-dwarf-factorization``
-
-    When analysing a binary which `DWARF`_ debug information was
-    processed with the `DWZ`_ tool, the type information is supposed
-    to be already factorized.  That context is used by libabigail to
-    perform some speed optimizations.
-
-    This option disables those optimizations.
-
-
-  * ``--ctf``
-
-     This is used to compare packages with `CTF`_ debug information,
-     if present.
-
-  * ``--btf``
-
-     This is used to compare packages with `BTF`_ debug information,
-     if present.
 
 .. _abipkgdiff_return_value_label:
 

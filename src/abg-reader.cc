@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 /// @file
 ///
@@ -21,11 +21,14 @@
 #include <memory>
 #include <sstream>
 #include <unordered_map>
+#include <algorithm>
 
 #include "abg-suppression-priv.h"
 
 #include "abg-internal.h"
+#include "abg-ir-priv.h"
 #include "abg-symtab-reader.h"
+#include "abg-ir-priv.h"
 
 // <headers defining libabigail's API go under here>
 ABG_BEGIN_EXPORT_DECLARATIONS
@@ -55,6 +58,10 @@ using std::dynamic_pointer_cast;
 using std::vector;
 using std::istream;
 
+/// Convenience typedef for an unordered map of string to a vector of
+/// strings.
+typedef unordered_map<string, vector<string>> string_strings_map_type;
+
 class reader;
 
 static bool	read_is_declaration_only(xmlNodePtr, bool&);
@@ -63,6 +70,7 @@ static bool	read_tracking_non_reachable_types(xmlNodePtr, bool&);
 static bool	read_is_non_reachable_type(xmlNodePtr, bool&);
 static bool	read_naming_typedef_id_string(xmlNodePtr, string&);
 static bool	read_type_id_string(xmlNodePtr, string&);
+static bool	read_name(xmlNodePtr, string&);
 #ifdef WITH_DEBUG_SELF_COMPARISON
 static bool	maybe_map_type_with_type_id(const type_base_sptr&,
 					    xmlNodePtr);
@@ -93,7 +101,9 @@ read_elf_needed_from_input(reader& rdr, vector<string>& needed);
 static bool
 read_symbol_db_from_input(reader&			rdr,
 			  string_elf_symbols_map_sptr&	fn_symdb,
-			  string_elf_symbols_map_sptr&	var_symdb);
+			  string_elf_symbols_map_sptr&	var_symdb,
+			  string_strings_map_type&	non_resolved_fn_syms_aliases,
+			  string_strings_map_type&	non_resolved_var_syms_aliases);
 
 static translation_unit_sptr
 read_translation_unit_from_input(fe_iface& rdr);
@@ -103,6 +113,17 @@ build_ir_node_for_void_type(reader& rdr);
 
 static decl_base_sptr
 build_ir_node_for_void_pointer_type(reader& rdr);
+
+static decl_base_sptr
+build_ir_node_for_variadic_parameter_type(reader& rdr);
+
+static void
+resolve_symbol_aliases(string_elf_symbols_map_sptr&	fn_syms,
+		       string_elf_symbols_map_sptr&	var_syms,
+		       string_strings_map_type&	non_resolved_fn_sym_aliases,
+		       string_strings_map_type&	non_resolved_var_sym_aliases);
+static bool
+read_type_hash_and_cti(xmlNodePtr, uint64_t& hash, uint64_t& cti);
 
 /// The ABIXML reader object.
 ///
@@ -156,6 +177,7 @@ private:
   deque<shared_ptr<decl_base> >			m_decls_stack;
   bool							m_tracking_non_reachable_types;
   bool							m_drop_undefined_syms;
+  bool							m_drop_hash_value;
 #ifdef WITH_SHOW_TYPE_USE_IN_ABILINT
   unordered_map<type_or_decl_base*,
 		vector<type_or_decl_base*>>		m_artifact_used_by_map;
@@ -170,8 +192,25 @@ public:
       m_reader(reader),
       m_corp_node(),
       m_tracking_non_reachable_types(),
-      m_drop_undefined_syms()
+      m_drop_undefined_syms(),
+      m_drop_hash_value()
   {
+  }
+
+  /// The initializer of the reader.
+  ///
+  /// Resets the reader so that it can be re-used to read another
+  /// binary and build a corpus that is part of the same corpus group.
+  ///
+  /// In other words, the same reader is used to analyse all the
+  /// binaries that are part of the same corpus group.
+  ///
+  /// @param corpus_path the new corpus path.
+  void
+  initialize(const string& corpus_path)
+  {
+    fe_iface::initialize(corpus_path);
+    clear_types_to_canonicalize();
   }
 
   /// Test if logging was requested.
@@ -770,10 +809,12 @@ public:
   {
     ABG_ASSERT(decl);
     if (scope)
-      add_decl_to_scope(decl, scope);
-    if (!decl->get_translation_unit())
-      decl->set_translation_unit(get_translation_unit());
-    ABG_ASSERT(decl->get_translation_unit());
+      {
+	add_decl_to_scope(decl, scope);
+	if (!decl->get_translation_unit())
+	  decl->set_translation_unit(get_translation_unit());
+	ABG_ASSERT(decl->get_translation_unit());
+      }
     push_decl(decl);
   }
 
@@ -875,18 +916,6 @@ public:
   {
   }
 
-  /// Clear all the data that must absolutely be cleared at the end of
-  /// the parsing of an ABI corpus.
-  void
-  clear_per_corpus_data()
-  {
-    clear_type_map();
-    clear_types_to_canonicalize();
-    clear_xml_node_decl_map();
-    clear_id_xml_node_map();
-    clear_decls_stack();
-  }
-
 #ifdef WITH_DEBUG_SELF_COMPARISON
   /// Perform a debugging routine for the "self-comparison" mode.
   ///
@@ -956,91 +985,46 @@ public:
   }
 #endif
 
-  /// Test if a type should be canonicalized early.  If so,
-  /// canonicalize it right away.  Otherwise, schedule it for late
-  /// canonicalizing; that is, schedule it so that it's going to be
-  /// canonicalized when the translation unit is fully read.
-  ///
-  /// @param t the type to consider for canonicalizing.
-  void
-  maybe_canonicalize_type(type_base_sptr t,
-			  bool force_delay = false)
-  {
-    if (!t)
-      return;
-
-    if (t->get_canonical_type())
-      return;
-
-    // If this class has some non-canonicalized sub type, then wait
-    // for the when we've read all the translation unit to
-    // canonicalize all of its non-canonicalized sub types and then we
-    // can canonicalize this one.
-    //
-    // Also, if this is a declaration-only class, wait for the end of
-    // the translation unit reading so that we have its definition and
-    // then we'll use that for canonicalizing it.
-    if (!force_delay
-	&& !type_has_non_canonicalized_subtype(t)
-	&& !is_class_type(t)
-	&& !is_union_type(t)
-	// Below are types that *must* be canonicalized only after
-	// they are added to their context; but then this function
-	// might be called to early, before they are actually added to
-	// their context.
-	//
-	// TODO: make sure this function is called after types are
-	// added to their context, so that we can try to
-	// early-canonicalize some of these types, reducing the size
-	// of the set of types to put on the side, waiting for being
-	// canonicalized.
-	&& !is_method_type(t)
-	&& !is_reference_type(t)
-	&& !is_pointer_type(t)
-	&& !is_array_type(t)
-	&& !is_qualified_type(t)
-	&& !is_typedef(t)
-	&& !is_enum_type(t)
-	&& !is_function_type(t))
-      {
-	canonicalize(t);
-#ifdef WITH_DEBUG_SELF_COMPARISON
-	maybe_check_abixml_canonical_type_stability(t);
-#endif
-      }
-    else
-      {
-	// We do not want to try to canonicalize a class type that
-	// hasn't been properly added to its context.
-	if (class_decl_sptr c = is_class_type(t))
-	  ABG_ASSERT(c->get_scope());
-
-	schedule_type_for_late_canonicalizing(t);
-      }
-  }
-
   /// Schedule a type for being canonicalized after the current
   /// translation unit is read.
   ///
   /// @param t the type to consider for canonicalization.
   void
-  schedule_type_for_late_canonicalizing(type_base_sptr t)
-  {m_types_to_canonicalize.push_back(t);}
+  schedule_type_for_canonicalization(type_base_sptr t)
+  {
+    if (t)
+      m_types_to_canonicalize.push_back(t);
+  }
 
   /// Perform the canonicalizing of types that ought to be done after
   /// the current translation unit is read.  This function is called
   /// when the current corpus is fully built.
   void
-  perform_late_type_canonicalizing()
+  perform_type_canonicalization()
   {
-    for (vector<type_base_sptr>::iterator i = m_types_to_canonicalize.begin();
-	 i != m_types_to_canonicalize.end();
-	 ++i)
+    tools_utils::timer cn_timer;
+    if (do_log())
       {
-	canonicalize(*i);
-#ifdef WITH_DEBUG_SELF_COMPARISON
-	maybe_check_abixml_canonical_type_stability(*i);
-#endif
+	std::cerr << "ABIXML Reader is going to canonicalize "
+		  << m_types_to_canonicalize.size()
+		  << " types";
+	corpus_sptr c = corpus();
+	if (c)
+	  std::cerr << " of corpus " << corpus()->get_path() << "\n";
+	cn_timer.start();
+      }
+
+
+    ir::hash_and_canonicalize_types(m_types_to_canonicalize.begin(),
+				    m_types_to_canonicalize.end(),
+				    [](const vector<type_base_sptr>::const_iterator& i)
+				    {return *i;},
+				    do_log());
+
+    if (do_log())
+      {
+	cn_timer.stop();
+	std::cerr << "ABIXML Reader: canonicalized all types in: " << cn_timer << "\n";
       }
   }
 
@@ -1141,6 +1125,9 @@ public:
   virtual ir::corpus_sptr
   read_corpus(fe_iface::status& status)
   {
+    tools_utils::timer global_timer;
+    global_timer.start();
+
     corpus_sptr nil;
 
     xml::reader_sptr xml_reader = get_libxml_reader();
@@ -1169,14 +1156,13 @@ public:
 	  get_environment().set_self_comparison_debug_input(corpus());
 #endif
 
-	if (!corpus_group())
-	  clear_per_corpus_data();
-
 	ir::corpus& corp = *corpus();
 
 	corp.set_origin(corpus::NATIVE_XML_ORIGIN);
 
 	handle_version_attribute(xml_reader, corp);
+
+	maybe_drop_hash_values();
 
 	xml::xml_char_sptr path_str = XML_READER_GET_ATTRIBUTE(xml_reader, "path");
 	string path;
@@ -1229,9 +1215,6 @@ public:
 	  get_environment().set_self_comparison_debug_input(corpus());
 #endif
 
-	if (!corpus_group())
-	  clear_per_corpus_data();
-
 	ir::corpus& corp = *corpus();
 	corp.set_origin(corpus::NATIVE_XML_ORIGIN);
 
@@ -1262,7 +1245,27 @@ public:
 
     ir::corpus& corp = *corpus();
 
+    tools_utils::timer t;
+
+    if (do_log())
+      {
+	std::cerr << "ABIXML Reader: mapping XML nodes to type ID "
+		  << "for corpus " << corp.get_path()
+		  << "...\n";
+	t.start();
+      }
+
     walk_xml_node_to_map_type_ids(*this, node);
+
+    if (do_log())
+      {
+	t.stop();
+	std::cerr << "ABIXML Reader: mapped XML nodes to type ID "
+		  << "for corpus " << corp.get_path()
+		  << " in: "
+		  << t
+		  << "\n";
+      }
 
     // Read the needed element
     vector<string> needed;
@@ -1270,20 +1273,61 @@ public:
     if (!needed.empty())
       corp.set_needed(needed);
 
-    string_elf_symbols_map_sptr fn_sym_db, var_sym_db;
+    string_elf_symbols_map_sptr fn_sym_db(new string_elf_symbols_map_type),
+      var_sym_db(new string_elf_symbols_map_type);
+
+    if (do_log())
+      {
+	std::cerr << "ABIXML Reader: reading symbols information "
+		  << "for corpus " << corp.get_path()
+		  << " ...\n";
+	t.start();
+      }
 
     // Read the symbol databases.
-    read_symbol_db_from_input(*this, fn_sym_db, var_sym_db);
+    string_strings_map_type non_resolved_fn_syms_aliases, non_resolved_var_syms_aliases;
+    read_symbol_db_from_input(*this, fn_sym_db, var_sym_db,
+			      non_resolved_fn_syms_aliases,
+			      non_resolved_var_syms_aliases);
+    resolve_symbol_aliases(fn_sym_db, var_sym_db,
+			   non_resolved_fn_syms_aliases,
+			   non_resolved_var_syms_aliases);
 
     // Note that it's possible that both fn_sym_db and var_sym_db are nil,
     // due to potential suppression specifications.  That's fine.
     corp.set_symtab(symtab_reader::symtab::load(fn_sym_db, var_sym_db));
 
+    if (do_log())
+      {
+	t.stop();
+	std::cerr << "ABIXML Reader: read symbols information "
+		  << "for corpus " << corp.get_path()
+		  << " in: "
+		  << t
+		  << "\n";
+      }
+
     get_environment().canonicalization_is_done(false);
+
+    if (do_log())
+      {
+	std::cerr << "ABIXML Reader: building IR "
+		  << "for corpus " << corp.get_path()
+		  << "...\n";
+	t.start();
+      }
 
     // Read the translation units.
     while (read_translation_unit_from_input(*this))
       ;
+
+    if (do_log())
+      {
+	t.stop();
+	std::cerr << "ABIXML Reader: built IR "
+		  << "for corpus " << corp.get_path()
+		  << " in: " << t << "\n";
+      }
 
     if (tracking_non_reachable_types())
       {
@@ -1296,21 +1340,22 @@ public:
       }
 
 
-    tools_utils::timer t;
     if (do_log())
       {
-	std::cerr << "perform late type canonicalization ...\n";
+	std::cerr << "ABIXML Reader: canonicalizing types "
+		  << "for corpus " << corp.get_path()
+		  << " ...\n";
 	t.start();
       }
 
-    perform_late_type_canonicalizing();
+    perform_type_canonicalization();
 
     if (do_log())
       {
 	t.stop();
-	std::cerr << "late type canonicalization DONE@"
+	std::cerr << "ABIXML Reader: canonicalized types for corpus "
 		  << corpus()->get_path()
-		  << ":" << t << "\n";
+		  << " in :" << t << "\n";
       }
 
     get_environment().canonicalization_is_done(true);
@@ -1338,8 +1383,91 @@ public:
 	set_corpus_node(node);
       }
 
+    if (do_log())
+      {
+	std::cerr << "ABIXML Reader: sorting functions and variables for corpus "
+		  << corp.get_path()
+		  << "\n";
+	t.start();
+      }
+
+    corpus()->sort_functions();
+    corpus()->sort_variables();
+
+    if (do_log())
+      {
+	t.stop();
+	std::cerr << "ABIXML Reader: sorted functions and variables for corpus "
+		  << corpus()->get_path()
+		  << " in " << t
+		  << "\n";
+      }
+
+    if (do_log())
+      {
+	global_timer.stop();
+	std::cerr << "ABIXML Reader: Analyzed corpus " << corpus()->get_path()
+		  << " in " << global_timer << "\n";
+	std::cerr << "======================================================\n";
+      }
+
     status = STATUS_OK;
     return corpus();
+  }
+
+  /// Test if the reader should drop the hash values coming from the
+  /// ABIXML on the floor.
+  ///
+  /// If the minor version number of the ABIXML document is older than
+  /// the current minor abixml version of the document being read,
+  /// then the hash values are dropped and new ones are going to be
+  /// computed by ir::hash_and_canonicalize_types.
+  void
+  maybe_drop_hash_values()
+  {
+    string current_major, current_minor;
+    abigail::abigail_get_abixml_version(current_major, current_minor);
+
+    if (current_major.empty() || current_minor.empty())
+      return;
+
+    ir::corpus& corp = *corpus();
+    bool drop_hash_values_from_abixml = false;
+    if (current_major > corp.get_format_major_version_number()
+	|| current_minor > corp.get_format_minor_version_number())
+      drop_hash_values_from_abixml = true;
+
+    if (drop_hash_values_from_abixml)
+      m_drop_hash_value = true;
+  }
+
+  /// Read the hash value from an XML node and set it onto an IR node.
+  ///
+  /// @param node the XML node to read the hash value from.
+  ///
+  /// @param ir_node output parameter.  The IR node to set the hash
+  /// value read from @p node onto.
+  void
+  read_hash_and_stash(const xmlNodePtr node,
+		      const type_or_decl_base_sptr& ir_node)
+  {
+    uint64_t hash = 0, cti = 0;
+    if (!m_drop_hash_value
+	&& read_type_hash_and_cti(node, hash, cti))
+      {
+	ir_node->priv_->force_set_hash_value(hash);
+	type_base_sptr type;
+	if (function_decl_sptr fn = is_function_decl(ir_node))
+	  type = fn->get_type();
+	else
+	  type = is_type(ir_node);
+
+	if (type)
+	  {
+	    type->type_or_decl_base::priv_->force_set_hash_value(hash);
+	    type->priv_->canonical_type_index = cti;
+	  }
+      }
   }
 };// end class reader
 
@@ -1351,7 +1479,9 @@ static translation_unit_sptr get_or_read_and_add_translation_unit(reader&, xmlNo
 static translation_unit_sptr read_translation_unit_from_input(fe_iface&);
 static bool	read_symbol_db_from_input(reader&,
 					  string_elf_symbols_map_sptr&,
-					  string_elf_symbols_map_sptr&);
+					  string_elf_symbols_map_sptr&,
+					  string_strings_map_type&,
+					  string_strings_map_type&);
 static bool	read_location(const reader&, xmlNodePtr, location&);
 static bool	read_artificial_location(const reader&,
 					 xmlNodePtr, location&);
@@ -1372,7 +1502,6 @@ static bool	read_elf_symbol_type(xmlNodePtr, elf_symbol::type&);
 static bool	read_elf_symbol_binding(xmlNodePtr, elf_symbol::binding&);
 static bool	read_elf_symbol_visibility(xmlNodePtr,
 					   elf_symbol::visibility&);
-
 static namespace_decl_sptr
 build_namespace_decl(reader&, const xmlNodePtr, bool);
 
@@ -1389,8 +1518,10 @@ build_elf_symbol(reader&, const xmlNodePtr, bool);
 static elf_symbol_sptr
 build_elf_symbol_from_reference(reader&, const xmlNodePtr);
 
-static string_elf_symbols_map_sptr
-build_elf_symbol_db(reader&, const xmlNodePtr, bool);
+static bool
+build_elf_symbol_db(reader&, const xmlNodePtr, bool,
+		    string_elf_symbols_map_sptr&,
+		    string_strings_map_type&);
 
 static function_decl::parameter_sptr
 build_function_parameter (reader&, const xmlNodePtr);
@@ -1428,6 +1559,9 @@ build_pointer_type_def(reader&, const xmlNodePtr, bool);
 
 static shared_ptr<reference_type_def>
 build_reference_type_def(reader&, const xmlNodePtr, bool);
+
+static ptr_to_mbr_type_sptr
+build_ptr_to_mbr_type(reader&, const xmlNodePtr, bool);
 
 static shared_ptr<function_type>
 build_function_type(reader&, const xmlNodePtr, bool);
@@ -1663,7 +1797,7 @@ reader::build_or_get_type_decl(const string& id, bool add_decl_to_scope)
       if (add_decl_to_scope)
 	pop_scope_or_abort(scope);
 
-      maybe_canonicalize_type(t, !add_decl_to_scope);
+      schedule_type_for_canonicalization(t);
     }
   return t;
 }
@@ -1787,14 +1921,11 @@ get_or_read_and_add_translation_unit(reader& rdr, xmlNodePtr node)
   string tu_path;
   xml::xml_char_sptr path_str = XML_NODE_GET_ATTRIBUTE(node, "path");
 
-  if (path_str)
+  if (corp && !corp->is_empty())
     {
-      tu_path = reinterpret_cast<char*>(path_str.get());
-      ABG_ASSERT(!tu_path.empty());
-
-      if (corp && !corp->is_empty())
-	tu = corp->find_translation_unit(tu_path);
-
+      if (path_str.get())
+	tu_path = reinterpret_cast<char*>(path_str.get());
+      tu = corp->find_translation_unit(tu_path);
       if (tu)
 	return tu;
     }
@@ -1881,9 +2012,10 @@ read_translation_unit_from_input(fe_iface& iface)
 /// variable symbol databases.
 ///
 /// A function symbols database is an XML element named
-/// "elf-function-symbols" and a variable symbols database is an XML
-/// element named "elf-variable-symbols."  They contains "elf-symbol"
-/// XML elements.
+/// "elf-function-symbols" or "undefined-elf-function-symbols" and a
+/// variable symbols database is an XML element named
+/// "elf-variable-symbols." or "undefined-elf-variable-symbols".  They
+/// contains "elf-symbol" XML elements.
 ///
 /// @param rdr the reader to use for the parsing.
 ///
@@ -1893,11 +2025,41 @@ read_translation_unit_from_input(fe_iface& iface)
 /// @param var_symdb any resulting variable symbol database object, if
 /// elf-variable-symbols was present.
 ///
+/// @param non_resolved_fn_syms_aliases this is a map that associates
+/// a function symbol name N to a vector of alias symbol names that
+/// are aliases to N.  Normally, N is a function symbol that has
+/// aliases that are other symbols that are usually function symbols
+/// that should be found (or resolved) in @p fn_symdb.  If all symbol
+/// aliases resolve to symbols in @p fn_symdb then this map is empty.
+/// Otherwise, if these alias symbols are not found in @p fn_symbd,
+/// then they are stored in this map.  The caller of this function
+/// might then subsequently try to resolve these elf alias symbols to
+/// variable symbols found in @p var_symdb.  Note that a function
+/// symbol aliasing variable symbols is a feature found in ELF
+/// binaries emitted from the OCaml language on platforms like s390x
+/// or ppcle.
+///
+/// @param non_resolved_var_syms_aliases this is a map that associates
+/// a variable symbol name N to a vector of alias symbol names that
+/// are aliases to N.  Normally, N is a variable symbol that has
+/// aliases that are other symbols that are usually variable symbols
+/// that should be found (or resolved) in @p var_symdb.  If all symbol
+/// aliases resolve to symbols in @p var_symdb then this map is empty.
+/// Otherwise, if these alias symbols are not found in @p var_symbd,
+/// then they are stored in this map.  The caller of this function
+/// might then subsequently try to resolve these elf alias symbols to
+/// function symbols found in @p fn_symdb.  Note that a variable
+/// symbol aliasing function symbols is a feature found in ELF
+/// binaries emitted from the OCaml language on platforms like s390x
+/// or ppcle.
+///
 /// @return true upon successful parsing, false otherwise.
 static bool
-read_symbol_db_from_input(reader&		 rdr,
-			  string_elf_symbols_map_sptr& fn_symdb,
-			  string_elf_symbols_map_sptr& var_symdb)
+read_symbol_db_from_input(reader&			rdr,
+			  string_elf_symbols_map_sptr&	fn_symdb,
+			  string_elf_symbols_map_sptr&	var_symdb,
+			  string_strings_map_type&	non_resolved_fn_syms_aliases,
+			  string_strings_map_type&	non_resolved_var_syms_aliases)
 {
   xml::reader_sptr reader = rdr.get_libxml_reader();
   if (!reader)
@@ -1914,13 +2076,20 @@ read_symbol_db_from_input(reader&		 rdr,
 	if (status != 1)
 	  return false;
 
-	bool has_fn_syms = false, has_var_syms = false;
+	bool has_fn_syms = false, has_undefined_fn_syms = false,
+	  has_var_syms = false, has_undefined_var_syms = false;
 	if (xmlStrEqual (XML_READER_GET_NODE_NAME(reader).get(),
 			 BAD_CAST("elf-function-symbols")))
 	  has_fn_syms = true;
 	else if (xmlStrEqual (XML_READER_GET_NODE_NAME(reader).get(),
 			      BAD_CAST("elf-variable-symbols")))
 	  has_var_syms = true;
+	else if (xmlStrEqual (XML_READER_GET_NODE_NAME(reader).get(),
+			      BAD_CAST("undefined-elf-function-symbols")))
+	  has_undefined_fn_syms = true;
+	else if (xmlStrEqual (XML_READER_GET_NODE_NAME(reader).get(),
+			      BAD_CAST("undefined-elf-variable-symbols")))
+	  has_undefined_var_syms = true;
 	else
 	  break;
 
@@ -1929,20 +2098,34 @@ read_symbol_db_from_input(reader&		 rdr,
 	  return false;
 
 	if (has_fn_syms)
-	  fn_symdb = build_elf_symbol_db(rdr, node, true);
+	  build_elf_symbol_db(rdr, node, /*function_sym=*/true, fn_symdb,
+			      non_resolved_fn_syms_aliases);
+	else if (has_undefined_fn_syms)
+	  build_elf_symbol_db(rdr, node, /*function_sym=*/true, fn_symdb,
+			      non_resolved_fn_syms_aliases);
 	else if (has_var_syms)
-	  var_symdb = build_elf_symbol_db(rdr, node, false);
+	  build_elf_symbol_db(rdr, node, /*function_sym=*/false, var_symdb,
+			      non_resolved_var_syms_aliases);
+	else if (has_undefined_var_syms)
+	  build_elf_symbol_db(rdr, node, /*function_sym=*/false, var_symdb,
+			      non_resolved_var_syms_aliases);
 
 	xmlTextReaderNext(reader.get());
       }
   else
     for (xmlNodePtr n = rdr.get_corpus_node(); n; n = xmlNextElementSibling(n))
       {
-	bool has_fn_syms = false, has_var_syms = false;
+	bool has_fn_syms = false, has_undefined_fn_syms = false,
+	  has_var_syms = false, has_undefined_var_syms = false;
 	if (xmlStrEqual(n->name, BAD_CAST("elf-function-symbols")))
 	  has_fn_syms = true;
+	else if (xmlStrEqual(n->name, BAD_CAST("undefined-elf-function-symbols")))
+	  has_undefined_fn_syms = true;
 	else if (xmlStrEqual(n->name, BAD_CAST("elf-variable-symbols")))
 	  has_var_syms = true;
+	else if (xmlStrEqual(n->name,
+			     BAD_CAST("undefined-elf-variable-symbols")))
+	  has_undefined_var_syms = true;
 	else
 	  {
 	    rdr.set_corpus_node(n);
@@ -1950,9 +2133,17 @@ read_symbol_db_from_input(reader&		 rdr,
 	  }
 
 	if (has_fn_syms)
-	  fn_symdb = build_elf_symbol_db(rdr, n, true);
+	  build_elf_symbol_db(rdr, n, /*function_sym=*/true, fn_symdb,
+			      non_resolved_fn_syms_aliases);
+	else if (has_undefined_fn_syms)
+	  build_elf_symbol_db(rdr, n, /*function_sym=*/true, fn_symdb,
+			      non_resolved_fn_syms_aliases);
 	else if (has_var_syms)
-	  var_symdb = build_elf_symbol_db(rdr, n, false);
+	  build_elf_symbol_db(rdr, n, /*function_sym=*/false, var_symdb,
+			      non_resolved_var_syms_aliases);
+	else if (has_undefined_var_syms)
+	  build_elf_symbol_db(rdr, n, /*function_sym=*/false, var_symdb,
+			      non_resolved_var_syms_aliases);
 	else
 	  break;
       }
@@ -2199,6 +2390,8 @@ read_corpus_group_from_input(fe_iface& iface)
 				   BAD_CAST("abi-corpus-group")))
     return nil;
 
+  tools_utils::timer t;
+
   if (!rdr.corpus_group())
     {
       corpus_group_sptr g(new corpus_group(rdr.get_environment(),
@@ -2215,6 +2408,14 @@ read_corpus_group_from_input(fe_iface& iface)
   if (path_str)
     group->set_path(reinterpret_cast<char*>(path_str.get()));
 
+  if (rdr.do_log())
+    {
+      std::cerr << "ABIXML Reader: reading corpus group : '"
+		<< group->get_path()
+		<< "' ...\n";
+      t.start();
+    }
+
   xmlNodePtr node = xmlTextReaderExpand(reader.get());
   if (!node)
     return nil;
@@ -2225,9 +2426,24 @@ read_corpus_group_from_input(fe_iface& iface)
   corpus_sptr corp;
   fe_iface::status sts;
   while ((corp = rdr.read_corpus(sts)))
-    rdr.corpus_group()->add_corpus(corp);
+    {
+      rdr.corpus_group()->add_corpus(corp);
+      node = xmlNextElementSibling(node);
+      if (!node || !xmlStrEqual(node->name, BAD_CAST("abi-corpus")))
+	break;
+      rdr.initialize("");
+      rdr.set_corpus_node(node);
+    }
 
   xmlTextReaderNext(reader.get());
+
+  if (rdr.do_log())
+    {
+      t.stop();
+      std::cerr << "ABIXML Reader: Read corpus group : "
+		<< group->get_path()
+		<< " in: " << t << "\n";
+    }
 
   return rdr.corpus_group();
 }
@@ -2291,7 +2507,7 @@ read_translation_unit_from_file(const string&	input_file,
   reader rdr(xml::new_reader_from_file(input_file), env);
   translation_unit_sptr tu = read_translation_unit_from_input(rdr);
   env.canonicalization_is_done(false);
-  rdr.perform_late_type_canonicalizing();
+  rdr.perform_type_canonicalization();
   env.canonicalization_is_done(true);
   return tu;
 }
@@ -2313,7 +2529,7 @@ read_translation_unit_from_buffer(const string&	buffer,
   reader rdr(xml::new_reader_from_buffer(buffer), env);
   translation_unit_sptr tu = read_translation_unit_from_input(rdr);
   env.canonicalization_is_done(false);
-  rdr.perform_late_type_canonicalizing();
+  rdr.perform_type_canonicalization();
   env.canonicalization_is_done(true);
   return tu;
 }
@@ -2331,7 +2547,7 @@ read_translation_unit(fe_iface& iface)
   abixml::reader& rdr = dynamic_cast<abixml::reader&>(iface);
   translation_unit_sptr tu = read_translation_unit_from_input(rdr);
   rdr.options().env.canonicalization_is_done(false);
-  rdr.perform_late_type_canonicalizing();
+  rdr.perform_type_canonicalization();
   rdr.options().env.canonicalization_is_done(true);
   return tu;
 }
@@ -2991,6 +3207,60 @@ read_type_id_string(xmlNodePtr node, string& type_id)
   return false;
 }
 
+/// Read of the value of the "name" attribute from a given XML node.
+///
+/// @param node the XML node to consider.
+///
+/// @param name the value of the "name" attribute read, iff the
+/// function returns true.
+///
+/// @return true iff a the "name" attribute was found an its value
+/// could be read and set to the @p name parameter.
+static bool
+read_name(xmlNodePtr node, string& name)
+{
+    if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "name"))
+    {
+      name = CHAR_STR(s);
+      return true;
+    }
+  return false;
+}
+
+/// Read the hash value and a the CTI from a (type) node.
+///
+/// The value of the 'hash' property has the form:
+/// '<hash-value-in-hexa>#cti-in-decimal'.
+///
+/// @param node the XML node to read the hash value from.
+///
+/// @param hash output parameter.  This is set to the hash value read
+/// from the XML node @p node iff the function returns true.
+///
+/// @param cti output parameter.  This is set to the value of the CTI
+/// read from the CTI part of the value of the 'hash' property.
+///
+/// @return true iff the function read a hash value and set it into
+/// the @p hash output parameter.
+static bool
+read_type_hash_and_cti(xmlNodePtr node, uint64_t& hash, uint64_t& cti)
+{
+  if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "hash"))
+    {
+      string str = CHAR_STR(s);
+      vector<string> parts;
+      tools_utils::split_string(str, "#", parts);
+      if (!parts.empty() && !parts.front().empty())
+	{
+	  ABG_ASSERT(hashing::deserialize_hash(parts[0], hash));
+	  if (parts.size() > 1)
+	    cti = atoll(parts[1].c_str());
+	  return true;
+	}
+    }
+  return false;
+}
+
 #ifdef WITH_DEBUG_SELF_COMPARISON
 /// Associate a type-id string with the type that was constructed from
 /// it.
@@ -3297,24 +3567,40 @@ build_elf_symbol_from_reference(reader& rdr, const xmlNodePtr node)
 /// @param function_syms true if we should look for a function symbols
 /// data base, false if we should look for a variable symbols data
 /// base.
-static string_elf_symbols_map_sptr
-build_elf_symbol_db(reader& rdr,
-		    const xmlNodePtr node,
-		    bool function_syms)
+///
+/// @param map a pointer to the map to fill with the symbol database.
+///
+/// @param non_resolved_aliases this is a map that associates a
+/// function symbol name N to a vector of alias symbol names that are
+/// aliases to N.  Normally, N is a function symbol that has aliases
+/// that are other symbols that are usually function (resp variable)
+/// symbols that should be found (or resolved) in @p map.  If all
+/// symbol aliases resolve to symbols in @p map then this map is
+/// empty.  Otherwise, if these alias symbols are not found in @p map,
+/// then they are stored in this map.
+///
+/// @return true if some elf symbols were found.
+static bool
+build_elf_symbol_db(reader&				rdr,
+		    const xmlNodePtr			node,
+		    bool				function_syms,
+		    string_elf_symbols_map_sptr&	map,
+		    string_strings_map_type&		non_resolved_aliases)
 {
-  string_elf_symbols_map_sptr map, nil;
   string_elf_symbol_sptr_map_type id_sym_map;
 
   if (!node)
-    return nil;
+    return false;
 
   if (function_syms
-      && !xmlStrEqual(node->name, BAD_CAST("elf-function-symbols")))
-    return nil;
+      && !xmlStrEqual(node->name, BAD_CAST("elf-function-symbols"))
+      && !xmlStrEqual(node->name, BAD_CAST("undefined-elf-function-symbols")))
+    return false;
 
   if (!function_syms
-      && !xmlStrEqual(node->name, BAD_CAST("elf-variable-symbols")))
-    return nil;
+      && !xmlStrEqual(node->name, BAD_CAST("elf-variable-symbols"))
+      && !xmlStrEqual(node->name, BAD_CAST("undefined-elf-variable-symbols")))
+    return false;
 
   rdr.set_corpus_node(node);
 
@@ -3333,9 +3619,8 @@ build_elf_symbol_db(reader& rdr,
       }
 
   if (id_sym_map.empty())
-    return nil;
+    return false;
 
-  map.reset(new string_elf_symbols_map_type);
   string_elf_symbols_map_type::iterator it;
   for (string_elf_symbol_sptr_map_type::const_iterator i = id_sym_map.begin();
        i != id_sym_map.end();
@@ -3363,15 +3648,113 @@ build_elf_symbol_db(reader& rdr,
 	    {
 	      string_elf_symbol_sptr_map_type::const_iterator i =
 	      id_sym_map.find(*alias);
-	      ABG_ASSERT(i != id_sym_map.end());
-	      ABG_ASSERT(i->second->is_main_symbol());
-
-	      x->second->get_main_symbol()->add_alias(i->second);
+	      if (i == id_sym_map.end())
+		// This symbol aliases a symbol that is not (yet)
+		// found in the set of symbols built so far.  So let's
+		// record this information in the "symbol ->
+		// non-resolved-symbol-aliases" map so that the
+		// aliases can be resolved later.
+		non_resolved_aliases[x->second->get_name()].push_back(*alias);
+	      else
+		{
+		  ABG_ASSERT(i->second->is_main_symbol());
+		  x->second->get_main_symbol()->add_alias(i->second);
+		}
 	    }
 	}
     }
 
-  return map;
+  return true;
+}
+
+/// Resolve symbol aliases to their target symbols.
+///
+/// The aliases to be resolved are found in the @p
+/// non_resolved_fn_syms_aliases and @p non_resolved_var_syms_aliases
+/// parameters.
+///
+/// @param fn_syms the target function symbols to consider.
+///
+/// @param var_syms the target variable symbols to consider.
+///
+/// @param non_resolved_fn_syms_aliases is a map that associates the
+/// name of a function symbol F to its alias symbols.  The alias
+/// symbols are either function symbols (as is what is generally the
+/// case) to be found in @p fn_syms or can be variable symbols (as is
+/// sometimes the case for the OCaml language on s390x and ppcle, for
+/// instance) to be found in @p var_syms.
+///
+/// @param non_resolved_var_syms_aliases is a map that associates the
+/// name of a variable symbol V to its alias symbols.  The alias
+/// symbols are either variable symbols (as is what is generally the
+/// case) to be found in @p var_syms or can be variable symbols (as is
+/// sometimes the case for the OCaml language on s390x and ppcle, for
+/// instance) to be found in @p fn_syms.
+static void
+resolve_symbol_aliases(string_elf_symbols_map_sptr& fn_syms,
+		       string_elf_symbols_map_sptr& var_syms,
+		       string_strings_map_type& non_resolved_fn_sym_aliases,
+		       string_strings_map_type& non_resolved_var_sym_aliases)
+{
+  for (auto& entry : non_resolved_fn_sym_aliases)
+    {
+      auto i = fn_syms->find(entry.first);
+      ABG_ASSERT(i != fn_syms->end());
+      // Symbol to build the aliases for.
+      elf_symbol_sptr sym = i->second.front();
+      ABG_ASSERT(sym);
+      sym = sym->get_main_symbol();
+      elf_symbol_sptr alias_sym;
+      for (string& alias : entry.second)
+	{
+	  auto fn_a = fn_syms->find(alias);
+	  if (fn_a == fn_syms->end())
+	    {
+	      // no function symbol alias found.  Let's see if a
+	      // variable symbol aliases this function symbol.
+	      auto var_a = var_syms->find(alias);
+	      ABG_ASSERT(var_a != var_syms->end());
+	      alias_sym = var_a->second.front();
+	      ABG_ASSERT(alias_sym);
+	    }
+	  else
+	    {
+	      alias_sym = fn_a->second.front();
+	      ABG_ASSERT(alias_sym);
+	    }
+	  sym->add_alias(alias_sym);
+	}
+    }
+
+    for (auto& entry : non_resolved_var_sym_aliases)
+      {
+	auto i = var_syms->find(entry.first);
+	ABG_ASSERT(i != var_syms->end());
+	// Symbol to build the aliases for.
+	elf_symbol_sptr sym = i->second.front();
+	ABG_ASSERT(sym);
+	sym = sym->get_main_symbol();
+	elf_symbol_sptr alias_sym;
+	for (string& alias : entry.second)
+	  {
+	    auto var_a = var_syms->find(alias);
+	    if (var_a == var_syms->end())
+	      {
+		// no variable symbol alias found.  Let's see if a
+		// function symbol aliases this variable symbol.
+		auto fn_a = fn_syms->find(alias);
+		ABG_ASSERT(fn_a != fn_syms->end());
+		alias_sym = fn_a->second.front();
+		ABG_ASSERT(alias_sym);
+	      }
+	    else
+	      {
+		alias_sym = var_a->second.front();
+		ABG_ASSERT(alias_sym);
+	      }
+	    sym->add_alias(alias_sym);
+	  }
+      }
 }
 
 /// Build a function parameter from a 'parameter' xml element node.
@@ -3405,7 +3788,7 @@ build_function_parameter(reader& rdr, const xmlNodePtr node)
 
   type_base_sptr type;
   if (is_variadic)
-    type = rdr.get_environment().get_variadic_parameter_type();
+    type = is_type(build_ir_node_for_variadic_parameter_type(rdr));
   else
     {
       ABG_ASSERT(!type_id.empty());
@@ -3531,6 +3914,8 @@ build_function_decl(reader&		rdr,
 
   ABG_ASSERT(fn_type);
 
+  rdr.read_hash_and_stash(node, fn_type);
+
   fn_type->set_is_artificial(true);
 
   function_decl_sptr fn_decl(as_method_decl
@@ -3558,10 +3943,10 @@ build_function_decl(reader&		rdr,
 
   rdr.get_translation_unit()->bind_function_type_life_time(fn_type);
 
-  rdr.maybe_canonicalize_type(fn_type, !add_to_current_scope);
+  rdr.schedule_type_for_canonicalization(fn_type);
 
   if (add_to_exported_decls)
-    rdr.maybe_add_fn_to_exported_decls(fn_decl.get());
+    rdr.add_fn_to_exported_or_undefined_decls(fn_decl.get());
 
   return fn_decl;
 }
@@ -3820,9 +4205,13 @@ build_ir_node_for_void_type(reader& rdr)
   const environment& env = rdr.get_environment();
 
   type_base_sptr t = env.get_void_type();
-  add_decl_to_scope(is_decl(t), rdr.get_translation_unit()->get_global_scope());
+  if (!get_type_scope(t))
+    {
+      add_decl_to_scope(is_decl(t),
+			rdr.get_translation_unit()->get_global_scope());
+      rdr.schedule_type_for_canonicalization(t);
+    }
   decl_base_sptr type_declaration = get_type_declaration(t);
-  canonicalize(t);
   return type_declaration;
 }
 
@@ -3840,12 +4229,37 @@ build_ir_node_for_void_type(reader& rdr)
 static decl_base_sptr
 build_ir_node_for_void_pointer_type(reader& rdr)
 {
-    const environment& env = rdr.get_environment();
+  const environment& env = rdr.get_environment();
 
   type_base_sptr t = env.get_void_pointer_type();
-  add_decl_to_scope(is_decl(t), rdr.get_translation_unit()->get_global_scope());
+  if (!get_type_scope(t))
+    {
+      add_decl_to_scope(is_decl(t),
+			rdr.get_translation_unit()->get_global_scope());
+      rdr.schedule_type_for_canonicalization(t);
+    }
   decl_base_sptr type_declaration = get_type_declaration(t);
-  canonicalize(t);
+  return type_declaration;
+}
+
+/// Build the IR node for a variadic parameter type.
+///
+/// @param rdr the ABIXML reader to use.
+///
+/// @return the variadic parameter type.
+static decl_base_sptr
+build_ir_node_for_variadic_parameter_type(reader& rdr)
+{
+  const environment& env = rdr.get_environment();
+
+  type_base_sptr t = env.get_variadic_parameter_type();
+  if (!get_type_scope(t))
+    {
+      add_decl_to_scope(is_decl(t),
+			rdr.get_translation_unit()->get_global_scope());
+      rdr.schedule_type_for_canonicalization(t);
+    }
+  decl_base_sptr type_declaration = get_type_declaration(t);
   return type_declaration;
 }
 
@@ -3919,7 +4333,7 @@ build_type_decl(reader&		rdr,
   const environment& env = rdr.get_environment();
   type_decl_sptr decl;
   if (name == env.get_variadic_parameter_type_name())
-    decl = is_type_decl(env.get_variadic_parameter_type());
+    decl = is_type_decl(build_ir_node_for_variadic_parameter_type(rdr));
   else if (name == "void")
     decl = is_type_decl(build_ir_node_for_void_type(rdr));
   else
@@ -3928,6 +4342,9 @@ build_type_decl(reader&		rdr,
   maybe_set_artificial_location(rdr, node, decl);
   decl->set_is_anonymous(is_anonymous);
   decl->set_is_declaration_only(is_decl_only);
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, decl);
+
   if (rdr.push_and_key_type_decl(decl, node, add_to_current_scope))
     {
       rdr.map_xml_node_to_decl(node, decl);
@@ -4006,6 +4423,13 @@ build_qualified_type_decl(reader&	rdr,
     rdr.build_or_get_type_decl(type_id, true);
   ABG_ASSERT(underlying_type);
 
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      qualified_type_def_sptr result = is_qualified_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   qualified_type_def_sptr decl;
   if (type_base_sptr t = rdr.get_type_decl(id))
     {
@@ -4019,6 +4443,8 @@ build_qualified_type_decl(reader&	rdr,
       rdr.push_and_key_type_decl(decl, node, add_to_current_scope);
       RECORD_ARTIFACT_AS_USED_BY(rdr, underlying_type, decl);
     }
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, decl);
 
   rdr.map_xml_node_to_decl(node, decl);
 
@@ -4081,6 +4507,13 @@ build_pointer_type_def(reader&	rdr,
     rdr.build_or_get_type_decl(type_id, true);
   ABG_ASSERT(pointed_to_type);
 
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      pointer_type_def_sptr result = is_pointer_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   pointer_type_def_sptr t;
   if (rdr.get_environment().is_void_type(pointed_to_type))
     t = is_pointer_type(build_ir_node_for_void_pointer_type(rdr));
@@ -4097,8 +4530,11 @@ build_pointer_type_def(reader&	rdr,
 
   maybe_set_artificial_location(rdr, node, t);
 
-  if (rdr.push_and_key_type_decl(t, node, add_to_current_scope))
-    rdr.map_xml_node_to_decl(node, t);
+  rdr.push_and_key_type_decl(t, node, add_to_current_scope);
+  rdr.map_xml_node_to_decl(node, t);
+
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, t);
 
   RECORD_ARTIFACT_AS_USED_BY(rdr, pointed_to_type, t);
   return t;
@@ -4162,26 +4598,137 @@ build_reference_type_def(reader&		rdr,
     type_id = CHAR_STR(s);
   ABG_ASSERT(!type_id.empty());
 
+
+  type_base_sptr pointed_to_type =
+    rdr.build_or_get_type_decl(type_id, /*add_to_current_scope=*/ true);
+  ABG_ASSERT(pointed_to_type);
+
+  // The call to rdr.build_or_get_type_decl above might have triggered
+  // the building of the current type.  If so, then return it.
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      reference_type_def_sptr result = is_reference_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   // Create the reference type /before/ the pointed-to type.  After
   // the creation, the type is 'keyed' using
   // rdr.push_and_key_type_decl.  This means that the type can be
   // retrieved from its type ID.  This is so that if the pointed-to
   // type indirectly uses this reference type (via recursion) then
   // that is made possible.
-  reference_type_def_sptr t(new reference_type_def(rdr.get_environment(),
+  reference_type_def_sptr t(new reference_type_def(pointed_to_type,
 						   is_lvalue, size_in_bits,
 						   alignment_in_bits, loc));
   maybe_set_artificial_location(rdr, node, t);
-  if (rdr.push_and_key_type_decl(t, node, add_to_current_scope))
-    rdr.map_xml_node_to_decl(node, t);
+  ABG_ASSERT(rdr.push_and_key_type_decl(t, node, add_to_current_scope));
+  rdr.map_xml_node_to_decl(node, t);
 
-  type_base_sptr pointed_to_type =
-    rdr.build_or_get_type_decl(type_id,/*add_to_current_scope=*/ true);
-  ABG_ASSERT(pointed_to_type);
-  t->set_pointed_to_type(pointed_to_type);
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, t);
+
   RECORD_ARTIFACT_AS_USED_BY(rdr, pointed_to_type, t);
 
   return t;
+}
+
+/// Build a @ref ptr_to_mbr_type from a pointer to
+/// 'pointer-to-member-type' xml node.
+///
+/// @param rdr the reader used for parsing.
+///
+/// @param node the xml node to build the reference_type_def from.
+///
+/// @param add_to_current_scope if set to yes, the resulting of
+/// this function is added to its current scope.
+///
+/// @return a pointer to a newly built @ref ptr_to_mbr_type upon
+/// successful completio, a null pointer otherwise.
+static ptr_to_mbr_type_sptr
+build_ptr_to_mbr_type(reader&		rdr,
+		      const xmlNodePtr	node,
+		      bool		add_to_current_scope)
+{
+  ptr_to_mbr_type_sptr result, nil;
+
+  if (!xmlStrEqual(node->name, BAD_CAST("pointer-to-member-type")))
+    return nil;
+
+  if (decl_base_sptr d = rdr.get_decl_for_xml_node(node))
+    {
+      result = is_ptr_to_mbr_type(d);
+      ABG_ASSERT(result);
+      return result;
+    }
+
+  string id;
+  if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "id"))
+    id = CHAR_STR(s);
+
+  if (id.empty())
+    return nil;
+
+  if (type_base_sptr d = rdr.get_type_decl(id))
+    {
+      result = is_ptr_to_mbr_type(d);
+      ABG_ASSERT(result);
+      return result;
+    }
+
+  size_t size_in_bits = rdr.get_translation_unit()->get_address_size();
+  size_t alignment_in_bits = 0;
+  read_size_and_alignment(node, size_in_bits, alignment_in_bits);
+
+  location loc;
+  read_location(rdr, node, loc);
+
+  string member_type_id;
+  if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "member-type-id"))
+    member_type_id = CHAR_STR(s);
+  if (member_type_id.empty())
+    return nil;
+  type_base_sptr member_type =
+    is_type(rdr.build_or_get_type_decl(member_type_id, true));
+  if (!member_type)
+    return nil;
+
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      ptr_to_mbr_type_sptr result = is_ptr_to_mbr_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
+  string containing_type_id;
+  if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "containing-type-id"))
+    containing_type_id = CHAR_STR(s);
+  if (containing_type_id.empty())
+    return nil;
+  type_base_sptr containing_type =
+    rdr.build_or_get_type_decl(containing_type_id, true);
+  if (!is_typedef_of_maybe_qualified_class_or_union_type(containing_type))
+    return nil;
+
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      ptr_to_mbr_type_sptr result = is_ptr_to_mbr_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
+  result.reset(new ptr_to_mbr_type(rdr.get_environment(),
+				   member_type, containing_type,
+				   size_in_bits, alignment_in_bits,
+				   loc));
+
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, result);
+
+  if (rdr.push_and_key_type_decl(result, node, add_to_current_scope))
+    rdr.map_xml_node_to_decl(node, result);
+
+  return result;
 }
 
 /// Build a function_type from a pointer to 'function-type'
@@ -4240,6 +4787,9 @@ build_function_type(reader&	rdr,
 			     : new function_type(return_type,
 						 parms, size, align));
 
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, fn_type);
+
   rdr.get_translation_unit()->bind_function_type_life_time(fn_type);
   rdr.key_type_decl(fn_type, id);
   RECORD_ARTIFACTS_AS_USED_IN_FN_TYPE(rdr, fn_type);
@@ -4260,11 +4810,16 @@ build_function_type(reader&	rdr,
 	  if (xml_char_sptr s =
 	      xml::build_sptr(xmlGetProp(n, BAD_CAST("type-id"))))
 	    type_id = CHAR_STR(s);
+	  type_base_sptr ret_type;
 	  if (!type_id.empty())
-	    fn_type->set_return_type(rdr.build_or_get_type_decl
-				     (type_id, true));
+	    ret_type = rdr.build_or_get_type_decl (type_id, true);
+	  if (!ret_type)
+	    ret_type = return_type;
+	  fn_type->set_return_type(ret_type);
 	}
     }
+  if (!fn_type->get_return_type())
+      fn_type->set_return_type(return_type);
 
   fn_type->set_parameters(parms);
 
@@ -4321,13 +4876,28 @@ build_subrange_type(reader&		rdr,
 
   uint64_t length = 0;
   string length_str;
-  bool is_infinite = false;
+  bool is_non_finite = false;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "length"))
     {
       if (string(CHAR_STR(s)) == "infinite" || string(CHAR_STR(s)) == "unknown")
-	is_infinite = true;
+	is_non_finite = true;
       else
 	length = strtoull(CHAR_STR(s), NULL, 0);
+    }
+
+  uint64_t size_in_bits = 0;
+  if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "size-in-bits"))
+    {
+      char *endptr = nullptr;
+      size_in_bits = strtoull(CHAR_STR(s), &endptr, 0);
+      if (*endptr != '\0')
+	{
+	  if (!strcmp(CHAR_STR(s), "infinite")
+	      ||!strcmp(CHAR_STR(s), "unknown"))
+	    size_in_bits = (size_t) -1;
+	  else
+	    return nil;
+	}
     }
 
   int64_t lower_bound = 0, upper_bound = 0;
@@ -4339,7 +4909,7 @@ build_subrange_type(reader&		rdr,
       if (!string(CHAR_STR(s)).empty())
 	upper_bound = strtoll(CHAR_STR(s), NULL, 0);
       bounds_present = true;
-      ABG_ASSERT(is_infinite
+      ABG_ASSERT(is_non_finite
 		 || (length == (uint64_t) upper_bound - lower_bound + 1));
     }
 
@@ -4354,14 +4924,22 @@ build_subrange_type(reader&		rdr,
       ABG_ASSERT(underlying_type);
     }
 
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      array_type_def::subrange_sptr result = is_subrange_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   location loc;
   read_location(rdr, node, loc);
 
-  // Note that DWARF would actually have a lower_bound of -1 for an
-  // array of length 0.
+  // Note that DWARF would actually have a upper_bound of -1 for an
+  // array of length 0.  In the past (before ABIXML version 2.3), the
+  // IR would reflect that, so let's stay compatible with that.
   array_type_def::subrange_type::bound_value max_bound;
   array_type_def::subrange_type::bound_value min_bound;
-  if (!is_infinite)
+  if (!is_non_finite)
     if (length > 0)
       // By default, if no 'lower-bound/upper-bound' attributes are
       // set, we assume that the lower bound is 0 and the upper bound
@@ -4381,7 +4959,12 @@ build_subrange_type(reader&		rdr,
 				       name, min_bound, max_bound,
 				       underlying_type, loc));
   maybe_set_artificial_location(rdr, node, p);
-  p->is_infinite(is_infinite);
+  p->is_non_finite(is_non_finite);
+  if (size_in_bits)
+  p->set_size_in_bits(size_in_bits);
+
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, p);
 
   if (rdr.push_and_key_type_decl(p, node, add_to_current_scope))
     rdr.map_xml_node_to_decl(node, p);
@@ -4439,16 +5022,6 @@ build_array_type_def(reader&	rdr,
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "type-id"))
     type_id = CHAR_STR(s);
 
-  // maybe building the type of array elements triggered building this
-  // one in the mean time ...
-  if (decl_base_sptr d = rdr.get_decl_for_xml_node(node))
-    {
-      array_type_def_sptr result =
-	dynamic_pointer_cast<array_type_def>(d);
-      ABG_ASSERT(result);
-      return result;
-    }
-
   size_t size_in_bits = 0, alignment_in_bits = 0;
   bool has_size_in_bits = false;
   char *endptr;
@@ -4490,7 +5063,7 @@ build_array_type_def(reader&	rdr,
 	    if (add_to_current_scope)
 	      {
 		add_decl_to_scope(s, rdr.get_cur_scope());
-		rdr.maybe_canonicalize_type(s);
+		rdr.schedule_type_for_canonicalization(s);
 	      }
 	    subranges.push_back(s);
 	  }
@@ -4501,7 +5074,19 @@ build_array_type_def(reader&	rdr,
     rdr.build_or_get_type_decl(type_id, true);
   ABG_ASSERT(type);
 
+  // maybe building the type of array elements triggered building this
+  // one in the mean time ...
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      array_type_def_sptr result = is_array_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   array_type_def_sptr ar_type(new array_type_def(type, subranges, loc));
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, ar_type);
+
   maybe_set_artificial_location(rdr, node, ar_type);
   if (rdr.push_and_key_type_decl(ar_type, node, add_to_current_scope))
     rdr.map_xml_node_to_decl(node, ar_type);
@@ -4630,6 +5215,13 @@ build_enum_type_decl(reader&	rdr,
 
   ABG_ASSERT(!id.empty());
 
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      enum_type_decl_sptr result = is_enum_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   string base_type_id;
   enum_type_decl::enumerators enums;
   for (xmlNodePtr n = xmlFirstElementChild(node);
@@ -4672,6 +5264,13 @@ build_enum_type_decl(reader&	rdr,
     rdr.build_or_get_type_decl(base_type_id, true);
   ABG_ASSERT(underlying_type);
 
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      enum_type_decl_sptr result = is_enum_type(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   enum_type_decl_sptr t(new enum_type_decl(name, loc,
 					   underlying_type,
 					   enums, linkage_name));
@@ -4679,6 +5278,9 @@ build_enum_type_decl(reader&	rdr,
   t->set_is_anonymous(is_anonymous);
   t->set_is_artificial(is_artificial);
   t->set_is_declaration_only(is_decl_only);
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, t);
+
   if (rdr.push_and_key_type_decl(t, node, add_to_current_scope))
     {
       maybe_set_naming_typedef(rdr, node, t);
@@ -4720,6 +5322,13 @@ build_typedef_decl(reader&	rdr,
     id = CHAR_STR(s);
   ABG_ASSERT(!id.empty());
 
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      typedef_decl_sptr result = is_typedef(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   string name;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "name"))
     name = xml::unescape_xml_string(CHAR_STR(s));
@@ -4735,8 +5344,21 @@ build_typedef_decl(reader&	rdr,
   type_base_sptr underlying_type(rdr.build_or_get_type_decl(type_id, true));
   ABG_ASSERT(underlying_type);
 
+  // Maybe the building of the underlying type triggered the building
+  // of the current type.  If so, then return it.
+  if (type_base_sptr t = rdr.get_type_decl(id))
+    {
+      typedef_decl_sptr result = is_typedef(t);
+      ABG_ASSERT(result);
+      return result;
+    }
+
   typedef_decl_sptr t(new typedef_decl(name, underlying_type, loc));
   maybe_set_artificial_location(rdr, node, t);
+
+  // Read the hash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, t);
+
   rdr.push_and_key_type_decl(t, node, add_to_current_scope);
   rdr.map_xml_node_to_decl(node, t);
   RECORD_ARTIFACT_AS_USED_BY(rdr, underlying_type, t);
@@ -4927,6 +5549,9 @@ build_class_decl(reader&		rdr,
   maybe_set_artificial_location(rdr, node, decl);
   decl->set_is_artificial(is_artificial);
 
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, decl);
+
   string def_id;
   bool is_def_of_decl = false;
   if (xml_char_sptr s = XML_NODE_GET_ATTRIBUTE(node, "def-of-decl-id"))
@@ -5044,13 +5669,23 @@ build_class_decl(reader&		rdr,
 	       p;
 	       p = xmlNextElementSibling(p))
 	    {
-	      if (type_base_sptr t =
-		  build_type(rdr, p, /*add_to_current_scope=*/true))
+
+	      string member_type_name;
+	      read_name(p, member_type_name);
+	      type_base_sptr t;
+	      if (!member_type_name.empty())
+		t = decl->find_member_type(member_type_name);
+	      if (t)
+		continue;
+
+	      if ((t = build_type(rdr, p, /*add_to_current_scope=*/true)))
 		{
 		  decl_base_sptr td = get_type_declaration(t);
 		  ABG_ASSERT(td);
+		  if (!td->get_scope())
+		    decl->add_member_type(t);
 		  set_member_access_specifier(td, access);
-		  rdr.maybe_canonicalize_type(t, !add_to_current_scope);
+		  rdr.schedule_type_for_canonicalization(t);
 		  xml_char_sptr i= XML_NODE_GET_ATTRIBUTE(p, "id");
 		  string id = CHAR_STR(i);
 		  ABG_ASSERT(!id.empty());
@@ -5104,7 +5739,7 @@ build_class_decl(reader&		rdr,
 					    is_static,
 					    offset_in_bits);
 		      if (is_static)
-			rdr.maybe_add_var_to_exported_decls(v.get());
+			rdr.add_var_to_exported_or_undefined_decls(v);
 		      // Now let's record the fact that the data
 		      // member uses its type and that the class being
 		      // built uses the data member.
@@ -5160,14 +5795,13 @@ build_class_decl(reader&		rdr,
 		  ABG_ASSERT(m);
 		  set_member_access_specifier(m, access);
 		  set_member_is_static(m, is_static);
-		  if (vtable_offset != -1)
-		    set_member_function_vtable_offset(m, vtable_offset);
-		  set_member_function_is_virtual(m, is_virtual);
+		  if (is_virtual)
+		    set_member_function_virtuality(m, is_virtual, vtable_offset);
 		  set_member_function_is_ctor(m, is_ctor);
 		  set_member_function_is_dtor(m, is_dtor);
 		  set_member_function_is_const(m, is_const);
 		  rdr.map_xml_node_to_decl(p, m);
-		  rdr.maybe_add_fn_to_exported_decls(f.get());
+		  rdr.add_fn_to_exported_or_undefined_decls(f.get());
 		  break;
 		}
 	    }
@@ -5340,6 +5974,9 @@ build_union_decl(reader& rdr,
 				  is_anonymous));
     }
 
+  // Read the stash from the XML node and stash it into the IR node.
+  rdr.read_hash_and_stash(node, decl);
+
   maybe_set_artificial_location(rdr, node, decl);
   decl->set_is_artificial(is_artificial);
 
@@ -5421,13 +6058,22 @@ build_union_decl(reader& rdr,
 	       p;
 	       p = xmlNextElementSibling(p))
 	    {
-	      if (type_base_sptr t =
-		  build_type(rdr, p, /*add_to_current_scope=*/true))
+	      string member_type_name;
+	      read_name(p, member_type_name);
+	      type_base_sptr t;
+	      if (!member_type_name.empty())
+		t = decl->find_member_type(member_type_name);
+	      if (t)
+		continue;
+	      if ((t = build_type(rdr, p, /*add_to_current_scope=*/true)))
 		{
 		  decl_base_sptr td = get_type_declaration(t);
 		  ABG_ASSERT(td);
+		  if (!td->get_scope())
+		    decl->add_member_type(t);
 		  set_member_access_specifier(td, access);
-		  rdr.maybe_canonicalize_type(t, !add_to_current_scope);
+		  rdr.schedule_type_for_canonicalization(t);
+
 		  xml_char_sptr i= XML_NODE_GET_ATTRIBUTE(p, "id");
 		  string id = CHAR_STR(i);
 		  ABG_ASSERT(!id.empty());
@@ -5522,7 +6168,7 @@ build_union_decl(reader& rdr,
 		  set_member_function_is_ctor(m, is_ctor);
 		  set_member_function_is_dtor(m, is_dtor);
 		  set_member_function_is_const(m, is_const);
-		  rdr.maybe_add_fn_to_exported_decls(f.get());
+		  rdr.add_fn_to_exported_or_undefined_decls(f.get());
 		  break;
 		}
 	    }
@@ -5705,7 +6351,7 @@ build_class_tdecl(reader&		rdr,
 						  add_to_current_scope))
 	{
 	  if (c->get_scope())
-	    rdr.maybe_canonicalize_type(c, /*force_delay=*/false);
+	    rdr.schedule_type_for_canonicalization(c);
 	  class_tmpl->set_pattern(c);
 	}
     }
@@ -5770,7 +6416,7 @@ build_type_tparameter(reader&		rdr,
   else
     rdr.push_and_key_type_decl(result, node, /*add_to_current_scope=*/true);
 
-  rdr.maybe_canonicalize_type(result, /*force_delay=*/false);
+  rdr.schedule_type_for_canonicalization(result);
 
   return result;
 }
@@ -5821,8 +6467,7 @@ build_type_composition(reader&		rdr,
 	      build_qualified_type_decl(rdr, n,
 					/*add_to_current_scope=*/true)))
 	{
-	  rdr.maybe_canonicalize_type(composed_type,
-				       /*force_delay=*/true);
+	  rdr.schedule_type_for_canonicalization(composed_type);
 	  result->set_composed_type(composed_type);
 	  break;
 	}
@@ -5946,7 +6591,7 @@ build_template_tparameter(reader&	rdr,
   if (result)
     {
       rdr.key_type_decl(result, id);
-      rdr.maybe_canonicalize_type(result, /*force_delay=*/false);
+      rdr.schedule_type_for_canonicalization(result);
     }
 
   return result;
@@ -6001,6 +6646,7 @@ build_type(reader&	rdr,
    || (t = build_qualified_type_decl(rdr, node, add_to_current_scope))
    || (t = build_pointer_type_def(rdr, node, add_to_current_scope))
    || (t = build_reference_type_def(rdr, node , add_to_current_scope))
+   || (t = build_ptr_to_mbr_type(rdr, node , add_to_current_scope))
    || (t = build_function_type(rdr, node, add_to_current_scope))
    || (t = build_array_type_def(rdr, node, add_to_current_scope))
    || (t = build_subrange_type(rdr, node, add_to_current_scope))
@@ -6025,7 +6671,7 @@ build_type(reader&	rdr,
   MAYBE_MAP_TYPE_WITH_TYPE_ID(t, node);
 
   if (t)
-    rdr.maybe_canonicalize_type(t,/*force_delay=*/false );
+    rdr.schedule_type_for_canonicalization(t);
   return t;
 }
 
@@ -6042,7 +6688,7 @@ handle_type_decl(reader&	rdr,
   type_decl_sptr decl = build_type_decl(rdr, node, add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6076,7 +6722,7 @@ handle_qualified_type_decl(reader&	rdr,
 			      add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6094,7 +6740,7 @@ handle_pointer_type_def(reader&	rdr,
 						      add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6112,7 +6758,7 @@ handle_reference_type_def(reader& rdr,
 							  add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6129,7 +6775,7 @@ handle_function_type(reader&	rdr,
   function_type_sptr type = build_function_type(rdr, node,
 						  add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(type, node);
-  rdr.maybe_canonicalize_type(type, /*force_delay=*/true);
+  rdr.schedule_type_for_canonicalization(type);
   return type;
 }
 
@@ -6146,7 +6792,7 @@ handle_array_type_def(reader&	rdr,
   array_type_def_sptr decl = build_array_type_def(rdr, node,
 						  add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
-  rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+  rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6163,7 +6809,7 @@ handle_enum_type_decl(reader&	rdr,
 					   add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6179,7 +6825,7 @@ handle_typedef_decl(reader&	rdr,
 					      add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(decl, node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6198,7 +6844,7 @@ handle_var_decl(reader&	rdr,
 {
   decl_base_sptr decl = build_var_decl_if_not_suppressed(rdr, node,
 							 add_to_current_scope);
-  rdr.maybe_add_var_to_exported_decls(is_var_decl(decl).get());
+  rdr.add_var_to_exported_or_undefined_decls(is_var_decl(decl));
   return decl;
 }
 
@@ -6233,7 +6879,7 @@ handle_class_decl(reader& rdr,
     build_class_decl_if_not_suppressed(rdr, node, add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(is_type(decl), node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 
@@ -6252,7 +6898,7 @@ handle_union_decl(reader& rdr,
     build_union_decl_if_not_suppressed(rdr, node, add_to_current_scope);
   MAYBE_MAP_TYPE_WITH_TYPE_ID(is_type(decl), node);
   if (decl && decl->get_scope())
-    rdr.maybe_canonicalize_type(decl, /*force_delay=*/false);
+    rdr.schedule_type_for_canonicalization(decl);
   return decl;
 }
 

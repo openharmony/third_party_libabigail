@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -87,8 +87,7 @@ struct options
   string		wrong_option;
   string		in_file_path;
   string		out_file_path;
-  vector<char*>	di_root_paths;
-  vector<char**>	prepared_di_root_paths;
+  vector<string>	di_root_paths;
   vector<string>	headers_dirs;
   vector<string>	header_files;
   vector<string>	added_bins_dirs;
@@ -109,6 +108,7 @@ struct options
   bool			short_locs;
   bool			default_sizes;
   bool			load_all_types;
+  bool			load_undefined_interfaces;
   bool			linux_kernel_mode;
   bool			corpus_group_for_linux;
   bool			show_stats;
@@ -133,6 +133,7 @@ struct options
   bool			annotate;
   bool			do_log;
   bool			drop_private_types;
+  bool			force_early_suppression;
   bool			drop_undefined_syms;
   bool			assume_odr_for_cplusplus;
   bool			leverage_dwarf_factorization;
@@ -155,6 +156,7 @@ struct options
       short_locs(false),
       default_sizes(true),
       load_all_types(),
+      load_undefined_interfaces(true),
       linux_kernel_mode(true),
       corpus_group_for_linux(false),
       show_stats(),
@@ -179,6 +181,7 @@ struct options
       annotate(),
       do_log(),
       drop_private_types(false),
+      force_early_suppression(false),
       drop_undefined_syms(false),
       assume_odr_for_cplusplus(true),
       leverage_dwarf_factorization(true),
@@ -187,12 +190,6 @@ struct options
 
   ~options()
   {
-    for (vector<char*>::iterator i = di_root_paths.begin();
-	 i != di_root_paths.end();
-	 ++i)
-      free(*i);
-
-    prepared_di_root_paths.clear();
   }
 };
 
@@ -202,73 +199,75 @@ display_usage(const string& prog_name, ostream& out)
   emit_prefix(prog_name, out)
     << "usage: " << prog_name << " [options] [<path-to-elf-file>]\n"
     << " where options can be: \n"
-    << "  --help|-h  display this message\n"
-    << "  --version|-v  display program version information and exit\n"
+    << "  --abidiff  compare the loaded ABI against itself\n"
     << "  --abixml-version  display the version of the ABIXML ABI format\n"
-    << "  --debug-info-dir|-d <dir-path>  look for debug info under 'dir-path'\n"
-    << "  --headers-dir|--hd <path> the path to headers of the elf file\n"
-    << "  --header-file|--hf <path> the path one header of the elf file\n"
-    << "  --out-file <file-path>  write the output to 'file-path'\n"
-    << "  --noout  do not emit anything after reading the binary\n"
-    << "  --suppressions|--suppr <path> specify a suppression file\n"
-    << "  --no-architecture  do not emit architecture info in the output\n"
-    << "  --no-corpus-path  do not take the path to the corpora into account\n"
-    << "  --no-show-locs  do not show location information\n"
-    << "  --short-locs  only print filenames rather than paths\n"
-    << "  --drop-private-types  drop private types from representation\n"
-    << "  --drop-undefined-syms  drop undefined symbols from representation\n"
-    << "  --exported-interfaces-only  analyze exported interfaces only\n"
-    << "  --allow-non-exported-interfaces  analyze interfaces that "
+    << "  --add-binaries <bin1,bin2,...>  build a corpus group with "
+    "the added inaries\n"
+    << "  --allow-non-exported-interfaces analyze interfaces that"
     "might not be exported\n"
-    << "  --no-comp-dir-path  do not show compilation path information\n"
-    << "  --no-elf-needed  do not show the DT_NEEDED information\n"
-    << "  --no-write-default-sizes  do not emit pointer size when it equals"
-    " the default address size of the translation unit\n"
-    << "  --no-parameter-names  do not show names of function parameters\n"
-    << "  --type-id-style <sequence|hash>  type id style (sequence(default): "
-       "\"type-id-\" + number; hash: hex-digits)\n"
+    << "  --annotate  annotate the ABI artifacts emitted in the output\n"
+#ifdef WITH_BTF
+    << "  --btf use BTF instead of DWARF in ELF files\n"
+#endif
     << "  --check-alternate-debug-info <elf-path>  check alternate debug info "
     "of <elf-path>\n"
     << "  --check-alternate-debug-info-base-name <elf-path>  check alternate "
     "debug info of <elf-path>, and show its base name\n"
-    << "  --load-all-types  read all types including those not reachable from "
-    "exported declarations\n"
-    << "  --no-linux-kernel-mode  don't consider the input binary as "
-       "a Linux Kernel binary\n"
-    << "  --kmi-whitelist|-w  path to a linux kernel "
-    "abi whitelist\n"
-    << "  --linux-tree|--lt  emit the ABI for the union of a "
-    "vmlinux and its modules\n"
-    << "  --vmlinux <path>  the path to the vmlinux binary to consider to emit "
-       "the ABI of the union of vmlinux and its modules\n"
-    << "  --abidiff  compare the loaded ABI against itself\n"
-    << "  --add-binaries <bin1,bin2,...>  build a corpus group with "
-    "the added inaries\n"
-    << "  --follow-dependencies  build a corpus group with the dependencies\n"
-    << "  --list-dependencies  list the dependencies of a given binary\n"
-    << "  --added-binaries-dir|--abd <dir-of-deps>  where to look for dependencies "
-    "or added binaries\n"
+#ifdef WITH_CTF
+    << "  --ctf use CTF instead of DWARF in ELF files\n"
+#endif
 #ifdef WITH_DEBUG_SELF_COMPARISON
     << "  --debug-abidiff  debug the process of comparing the loaded ABI against itself\n"
 #endif
+    << "  --debug-info-dir|-d <dir-path>  look for debug info under 'dir-path'\n"
 #ifdef WITH_DEBUG_TYPE_CANONICALIZATION
     << "  --debug-tc  debug the type canonicalization process\n"
     << "  --debug-dc  debug the DIE canonicalization process\n"
 #endif
-#ifdef WITH_CTF
-    << "  --ctf use CTF instead of DWARF in ELF files\n"
-#endif
-    << "  --no-leverage-dwarf-factorization  do not use DWZ optimisations to "
-    "speed-up the analysis of the binary\n"
+    << "  --drop-undefined-syms  drop undefined symbols from representation\n"
+    << "  --exported-interfaces-only  analyze exported interfaces only\n"
+    << "  --follow-dependencies  build a corpus group with the dependencies\n"
+    << "  --follow-dependencies  build a corpus group with the dependencies\n"
+    << "  --force-early-suppression  drop IR nodes that match suppression specifications\n"
+    << "  --headers-dir|--hd <path> the path to headers of the elf file\n"
+    << "  --header-file|--hf <path> the path one header of the elf file\n"
+    << "  --help|-h  display this message\n"
+    << "  --kmi-whitelist|--kmi-stablelist|-w  path to a linux kernel "
+    "abi whitelist\n"
+    << "  --list-dependencies  list the dependencies of a given binary\n"
+    << "  --added-binaries-dir|--abd <dir-of-deps>  where to look for dependencies "
+    "or added binaries\n"
+    << "  --linux-tree|--lt  emit the ABI for the union of a "
+    "vmlinux and its modules\n"
+    << "  --load-all-types  read all types including those not reachable from "
+    "exported declarations\n"
+    << "  --no-architecture  do not emit architecture info in the output\n"
     << "  --no-assume-odr-for-cplusplus  do not assume the ODR to speed-up the "
     "analysis of the binary\n"
-#ifdef WITH_BTF
-    << "  --btf use BTF instead of DWARF in ELF files\n"
-#endif
-    << "  --annotate  annotate the ABI artifacts emitted in the output\n"
+    << "  --no-comp-dir-path  do not show compilation path information\n"
+    << "  --no-corpus-path  do not take the path to the corpora into account\n"
+    << "  --no-elf-needed  do not show the DT_NEEDED information\n"
+    << "  --no-leverage-dwarf-factorization  do not use DWZ optimisations to "
+    "speed-up the analysis of the binary\n"
+    << "  --no-linux-kernel-mode  don't consider the input binary as "
+       "a Linux Kernel binary\n"
+    << "  --no-load-undefined-interfaces  do not consider undefined "
+    "interfaces from the binary"
+    << "  --no-parameter-names  do not show names of function parameters\n"
+    << "  --no-show-locs  do not show location information\n"
+    << "  --no-write-default-sizes  do not emit pointer size when it equals"
+    " the default address size of the translation unit\n"
+    << "  --noout  do not emit anything after reading the binary\n"
+    << "  --out-file|-o  <file-path>  write the output to 'file-path'\n"
+    << "  --short-locs  only print filenames rather than paths\n"
+    << "  --suppressions|--suppr <path> specify a suppression file\n"
+    << "  --type-id-style <sequence|hash>  type id style (sequence(default): "
+       "\"type-id-\" + number; hash: hex-digits)\n"
     << "  --stats  show statistics about various internal stuff\n"
-    << "  --verbose show verbose messages about internal stuff\n";
-  ;
+    << "  --verbose show verbose messages about internal stuff\n"
+    << "  --version|-v  display program version information and exit\n"
+    << "  --vmlinux <path>  the path to the vmlinux binary to consider to emit "
+       "the ABI of the union of vmlinux and its modules\n" ;
 }
 
 static bool
@@ -311,6 +310,10 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  if (j >= argc)
 	    return false;
 	  opts.headers_dirs.push_back(argv[j]);
+	  // The user is indirectly defining private types so she
+	  // really wants those types to be removed from the ABIXML.
+	  // So let's drop them from the IR.
+	  opts.drop_private_types = true;
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--added-binaries-dir")
@@ -329,9 +332,14 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  if (j >= argc)
 	    return false;
 	  opts.header_files.push_back(argv[j]);
+	  // The user is indirectly defining private types so she
+	  // really wants those types to be removed from the ABIXML.
+	  // So let's drop them from the IR.
+	  opts.drop_private_types = true;
 	  ++i;
 	}
-      else if (!strcmp(argv[i], "--out-file"))
+      else if (!strcmp(argv[i], "--out-file")
+	       || !strcmp(argv[i], "-o"))
 	{
 	  if (argc <= i + 1
 	      || argv[i + 1][0] == '-'
@@ -351,6 +359,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--kmi-whitelist")
+	       || !strcmp(argv[i], "--kmi-stablelist")
 	       || !strcmp(argv[i], "-w"))
 	{
 	  int j = i + 1;
@@ -445,8 +454,12 @@ parse_command_line(int argc, char* argv[], options& opts)
 	}
       else if (!strcmp(argv[i], "--load-all-types"))
 	opts.load_all_types = true;
+      else if (!strcmp(argv[i], "--no-load-undefined-interfaces"))
+	opts.load_undefined_interfaces = false;
       else if (!strcmp(argv[i], "--drop-private-types"))
 	opts.drop_private_types = true;
+      else if (!strcmp(argv[i], "--force-early-suppression"))
+	opts.force_early_suppression = true;
       else if (!strcmp(argv[i], "--drop-undefined-syms"))
 	opts.drop_undefined_syms = true;
       else if (!strcmp(argv[i], "--exported-interfaces-only"))
@@ -577,6 +590,13 @@ set_suppressions(abigail::elf_based_reader& rdr, options& opts)
        ++i)
     read_suppressions(*i, supprs);
 
+  if (opts.force_early_suppression)
+    // User asked to unconditionally drop suppressed artifacts from
+    // the IR.  Let's drop all nodes matched by suppression
+    // specifications from the IR.
+    for (auto& s : supprs)
+      s->set_drops_artifact_from_ir(true);
+
   suppression_sptr suppr =
     abigail::tools_utils::gen_suppr_spec_from_headers(opts.headers_dirs,
 						      opts.header_files);
@@ -605,7 +625,7 @@ set_suppressions(abigail::elf_based_reader& rdr, options& opts)
 ///
 /// @param opts the command line options.
 static void
-set_generic_options(abigail::elf_based_reader& rdr, options& opts)
+set_generic_options(abigail::fe_iface& rdr, options& opts)
 {
   rdr.options().drop_undefined_syms = opts.drop_undefined_syms;
   rdr.options().show_stats = opts.show_stats;
@@ -614,6 +634,123 @@ set_generic_options(abigail::elf_based_reader& rdr, options& opts)
     opts.leverage_dwarf_factorization;
   rdr.options().assume_odr_for_cplusplus =
     opts.assume_odr_for_cplusplus;
+  rdr.options().load_undefined_interfaces = opts.load_undefined_interfaces;
+}
+
+/// Given a corpus (or a corpus group), write it as ABIXML, read it
+/// back into another corpus and compare the resulting two corpora.
+///
+/// The result of the comparison should be the empty set.
+///
+/// @param write_ctxt the write context to use for writing the corpus
+/// to ABIXML.
+///
+/// @param corp the input corpus (or corpus group) to serialize to
+/// ABIXML.
+///
+/// @param env the environment used for computing.
+///
+/// @param t the timer to be used for the logs.
+///
+/// @param opts the options passed to the main program.
+///
+/// @param argv the vector of arguments of the main program.
+///
+/// @return 0 if the self comparison did yield the empty set, 1
+/// otherwise.  If the comparison does (wronly) yield a result, that
+/// result if emitted on std::cerr.
+static int
+perform_self_comparison(const write_context_sptr& write_ctxt,
+			const corpus_sptr& corp,
+			environment& env,
+			timer& t,
+			options& opts,
+			char* argv[])
+{
+  // Save the abi in abixml format in a temporary file, read
+  // it back, and compare the ABI of what we've read back
+  // against the ABI of the input ELF file.
+  temp_file_sptr tmp_file = temp_file::create();
+  set_ostream(*write_ctxt, tmp_file->get_stream());
+  corpus_group_sptr corp_group = is_corpus_group(corp);
+
+  if (corp_group)
+    write_corpus_group(*write_ctxt, corp_group, 0);
+  else
+    write_corpus(*write_ctxt, corp, 0);
+  tmp_file->get_stream().flush();
+
+#ifdef WITH_DEBUG_SELF_COMPARISON
+  if (opts.debug_abidiff)
+    {
+      opts.type_id_file_path = tmp_file->get_path() + string(".typeid");
+      write_canonical_type_ids(*write_ctxt, opts.type_id_file_path);
+    }
+#endif
+  fe_iface_sptr rdr = abixml::create_reader(tmp_file->get_path(), env);
+  set_generic_options(*rdr, opts);
+
+#ifdef WITH_DEBUG_SELF_COMPARISON
+  if (opts.debug_abidiff
+      && !opts.type_id_file_path.empty())
+    load_canonical_type_ids(*rdr, opts.type_id_file_path);
+#endif
+
+  t.start();
+  fe_iface::status sts;
+  corpus_sptr corp2;
+  corpus_group_sptr corp_group2;
+
+  if (corp_group)
+    corp_group2 = abixml::read_corpus_group_from_input(*rdr);
+  else
+    corp2 = rdr->read_corpus(sts);
+
+  t.stop();
+  if (opts.do_log)
+    emit_prefix(argv[0], cerr)
+      << "Read corpus in: " << t << "\n";
+
+#ifdef WITH_DEBUG_SELF_COMPARISON
+  if (opts.debug_abidiff
+      && !opts.type_id_file_path.empty())
+    remove(opts.type_id_file_path.c_str());
+#endif
+
+  if (!corp2 && !corp_group2)
+    {
+      emit_prefix(argv[0], cerr)
+	<< "Could not read temporary XML representation of "
+	"elf file back\n";
+      return 1;
+    }
+
+  diff_context_sptr ctxt(new diff_context);
+  set_diff_context(ctxt);
+  ctxt->show_locs(opts.show_locs);
+  t.start();
+  corpus_diff_sptr diff =
+    corp_group2
+    ? compute_diff(corp_group, corp_group2, ctxt)
+    : compute_diff(corp, corp2, ctxt);
+
+  t.stop();
+  if (opts.do_log)
+    emit_prefix(argv[0], cerr)
+      << "computed diff in: " << t << "\n";
+
+  bool has_error = diff->has_changes();
+  if (has_error)
+    {
+      t.start();
+      diff->report(cerr);
+      t.stop();
+      if (opts.do_log)
+	emit_prefix(argv[0], cerr)
+	  << "emitted report in: " << t << "\n";
+      return 1;
+    }
+  return 0;
 }
 
 /// Load an ABI @ref corpus (the internal representation of the ABI of
@@ -664,7 +801,7 @@ load_corpus_and_write_abixml(char* argv[],
   // specfied in opts ...
   abigail::elf_based_reader_sptr reader =
     create_best_elf_based_reader(opts.in_file_path,
-				 opts.prepared_di_root_paths,
+				 opts.di_root_paths,
 				 env, requested_fe_kind,
 				 opts.load_all_types,
 				 opts.linux_kernel_mode);
@@ -740,7 +877,7 @@ load_corpus_and_write_abixml(char* argv[],
 	      emit_prefix(argv[0], cerr)
 		<< "Could not read debug info for '" << opts.in_file_path
 		<< "' from debug info root directory '";
-	      for (vector<char*>::const_iterator i =
+	      for (vector<string>::const_iterator i =
 		     opts.di_root_paths.begin();
 		   i != opts.di_root_paths.end();
 		   ++i)
@@ -833,88 +970,9 @@ load_corpus_and_write_abixml(char* argv[],
       << t << "\n";
 
   if (opts.abidiff)
-    {
-      // Save the abi in abixml format in a temporary file, read
-      // it back, and compare the ABI of what we've read back
-      // against the ABI of the input ELF file.
-      temp_file_sptr tmp_file = temp_file::create();
-      set_ostream(*write_ctxt, tmp_file->get_stream());
-      if (corp_group)
-	write_corpus_group(*write_ctxt, corp_group, 0);
-      else
-	write_corpus(*write_ctxt, corp, 0);
-      tmp_file->get_stream().flush();
-
-#ifdef WITH_DEBUG_SELF_COMPARISON
-      if (opts.debug_abidiff)
-        {
-          opts.type_id_file_path = tmp_file->get_path() + string(".typeid");
-          write_canonical_type_ids(*write_ctxt, opts.type_id_file_path);
-        }
-#endif
-      fe_iface_sptr rdr = abixml::create_reader(tmp_file->get_path(), env);
-
-#ifdef WITH_DEBUG_SELF_COMPARISON
-      if (opts.debug_abidiff
-          && !opts.type_id_file_path.empty())
-        load_canonical_type_ids(*rdr, opts.type_id_file_path);
-#endif
-      t.start();
-      fe_iface::status sts;
-      corpus_sptr corp2;
-      corpus_group_sptr corp_group2;
-
-      if (corp_group)
-	corp_group2 = abixml::read_corpus_group_from_input(*rdr);
-      else
-      corp2 = rdr->read_corpus(sts);
-
-      t.stop();
-      if (opts.do_log)
-        emit_prefix(argv[0], cerr)
-          << "Read corpus in: " << t << "\n";
-
-      if (!corp2)
-        {
-          emit_prefix(argv[0], cerr)
-            << "Could not read temporary XML representation of "
-            "elf file back\n";
-          return 1;
-        }
-
-      diff_context_sptr ctxt(new diff_context);
-      set_diff_context(ctxt);
-      ctxt->show_locs(opts.show_locs);
-      t.start();
-      corpus_diff_sptr diff =
-	corp_group2
-	? compute_diff(corp_group, corp_group2, ctxt)
-	: compute_diff(corp, corp2, ctxt);
-
-      t.stop();
-      if (opts.do_log)
-        emit_prefix(argv[0], cerr)
-          << "computed diff in: " << t << "\n";
-
-      bool has_error = diff->has_changes();
-      if (has_error)
-        {
-          t.start();
-          diff->report(cerr);
-          t.stop();
-          if (opts.do_log)
-            emit_prefix(argv[0], cerr)
-              << "emitted report in: " << t << "\n";
-          return 1;
-        }
-      return 0;
-    }
-
-#ifdef WITH_DEBUG_SELF_COMPARISON
-  if (opts.debug_abidiff
-      && !opts.type_id_file_path.empty())
-    remove(opts.type_id_file_path.c_str());
-#endif
+    return perform_self_comparison(write_ctxt,
+				   corp_group ? corp_group : corp,
+				   env, t, opts, argv);
 
   if (opts.noout)
     return 0;
@@ -984,6 +1042,11 @@ load_kernel_corpus_group_and_write_abixml(char* argv[],
     if (!abigail::tools_utils::check_file(opts.vmlinux, cerr, argv[0]))
       return 1;
 
+#ifdef WITH_DEBUG_SELF_COMPARISON
+  if (opts.debug_abidiff)
+    env.self_comparison_debug_is_on(true);
+#endif
+
   timer t, global_timer;
   suppressions_type supprs;
 
@@ -999,6 +1062,9 @@ load_kernel_corpus_group_and_write_abixml(char* argv[],
   corpus::origin requested_fe_kind =
 #ifdef WITH_CTF
     opts.use_ctf ? corpus::CTF_ORIGIN :
+#endif
+#ifdef WITH_BTF
+    opts.use_btf ? corpus::BTF_ORIGIN :
 #endif
     corpus::DWARF_ORIGIN;
   corpus_group_sptr group =
@@ -1026,6 +1092,9 @@ load_kernel_corpus_group_and_write_abixml(char* argv[],
       const xml_writer::write_context_sptr& ctxt
 	  = xml_writer::create_write_context(env, cout);
       set_common_options(*ctxt, opts);
+
+      if (opts.abidiff)
+	return perform_self_comparison(ctxt, group, env, t, opts, argv);
 
       if (!opts.out_file_path.empty())
 	{
@@ -1070,22 +1139,12 @@ load_kernel_corpus_group_and_write_abixml(char* argv[],
   return exit_code;
 }
 
-/// Convert options::di_root_paths into
-/// options::prepared_di_root_paths which is the suitable type format
-/// that the dwarf_reader expects.
-///
-/// @param o the options to consider.
-static void
-prepare_di_root_paths(options& o)
-{
-  tools_utils::convert_char_stars_to_char_star_stars(o.di_root_paths,
-						     o.prepared_di_root_paths);
-}
-
 int
 main(int argc, char* argv[])
 {
   options opts;
+
+  abigail::tools_utils::initialize();
 
   if (!parse_command_line(argc, argv, opts)
       || (opts.in_file_path.empty()
@@ -1126,8 +1185,6 @@ main(int argc, char* argv[])
       if (!abigail::tools_utils::check_file(opts.in_file_path, cerr, argv[0]))
 	return 1;
     }
-
-  prepare_di_root_paths(opts);
 
   if (!maybe_check_suppression_files(opts))
     return 1;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -46,7 +46,6 @@ struct fe_iface::priv
     corpus_path.clear();
     dt_soname.clear();
     suppressions.clear();
-    corpus_group.reset();
     corpus.reset();
   }
 }; //end struct fe_iface::priv
@@ -297,30 +296,57 @@ fe_iface::should_reuse_type_from_corpus_group()
   return corpus_sptr();
 }
 
-/// Try and add the representation of the ABI of a function to the set
-/// of exported declarations of the current corpus.
+/// Add the representation of the ABI of a function to the set of
+/// exported declarations or undefined declarations of the current
+/// corpus.
+///
+/// Note that if the function is defined and exported, then it's going
+/// to be added to the set of functions exported by the current
+/// corpus.  Otherwise, if the function has an undefined symbol then
+/// it's going to be added to the sef of undefined functions used by
+/// the current corpus.
 ///
 /// @param fn the internal representation of the ABI of a function.
 void
-fe_iface::maybe_add_fn_to_exported_decls(const function_decl* fn)
+fe_iface::add_fn_to_exported_or_undefined_decls(const function_decl* fn)
 {
+  bool added = false;
   if (fn)
     if (corpus::exported_decls_builder* b =
 	corpus()->get_exported_decls_builder().get())
-      b->maybe_add_fn_to_exported_fns(const_cast<function_decl*>(fn));
+      added = b->maybe_add_fn_to_exported_fns(const_cast<function_decl*>(fn));
+
+  if (fn && !added)
+    {
+      if (!fn->get_symbol() || !fn->get_symbol()->is_defined())
+	corpus()->get_undefined_functions().insert(fn);
+    }
 }
 
-/// Try and add the representation of the ABI of a variable to the set
-/// of exported declarations of the current corpus.
+/// Add the representation of the ABI of a variable to the set of
+/// exported or undefined declarations of the current corpus.
+///
+/// Note that if the variable is defined and exported, then it's going
+/// to be added to the set of variables exported by the current
+/// corpus.  Otherwise, if the variable has an undefined symbol then
+/// it's going to be added to the sef of undefined variables used by
+/// the current corpus.
 ///
 /// @param var the internal representation of the ABI of a variable.
 void
-fe_iface::maybe_add_var_to_exported_decls(const var_decl* var)
+fe_iface::add_var_to_exported_or_undefined_decls(const var_decl_sptr& var)
 {
+  bool added = false;
   if (var)
     if (corpus::exported_decls_builder* b =
 	corpus()->get_exported_decls_builder().get())
-      b->maybe_add_var_to_exported_vars(var);
+      added = b->maybe_add_var_to_exported_vars(var);
+
+  if (var && !added)
+    {
+      if (!var->get_symbol() || !var->get_symbol()->is_defined())
+	corpus()->get_undefined_variables().insert(var);
+    }
 }
 
 /// The bitwise OR operator for the @ref fe_iface::status type.

@@ -1,9 +1,18 @@
-# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+dnl SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+dnl Process this file with autoconf to produce a configure script.
+dnl Configure input file for Libabigail.                     -*-autoconf-*-
+dnl
+dnl Copyright (C) 2013-2025 Red Hat, Inc.
+dnl Author: Dodji Seketeli
+dnl
+dnl This file is part of Libabigail.
+dnl
 
 dnl Libabigail version number is handled here with the major and minor
 dnl version numbers.
 m4_define([version_major],   [2])
-m4_define([version_minor],   [4])
+m4_define([version_minor],   [8])
 
 dnl Below are the numbers to handle libabigail.so's versionning
 dnl following the libtool's versionning scheme to handle shared
@@ -25,7 +34,7 @@ dnl    then increment LIBABIGAIL_SO_AGE.
 dnl 
 dnl 4. If any interfaces have been removed or changed since the last
 dnl     public release, then set LIBABIGAIL_SO_AGE to 0.
-m4_define([libabigail_so_current],  [3])
+m4_define([libabigail_so_current],  [7])
 m4_define([libabigail_so_revision], [0])
 m4_define([libabigail_so_age],      [0])
 
@@ -84,7 +93,7 @@ dnl The minor version number of the abixml version should be changed
 dnl each time and old version of libabigail can't handle a new version
 dnl of abixml.  Note however that when the major version number is
 dnl changed, the minor version number should be set to zero.
-ABIXML_VERSION_MINOR=2
+ABIXML_VERSION_MINOR=4
 LIBABIGAIL_SO_CURRENT=libabigail_so_current
 LIBABIGAIL_SO_REVISION=libabigail_so_revision
 LIBABIGAIL_SO_AGE=libabigail_so_age
@@ -134,11 +143,6 @@ AC_ARG_ENABLE(debug-type-canonicalization,
 	      ENABLE_DEBUG_TYPE_CANONICALIZATION=$enableval,
 	      ENABLE_DEBUG_TYPE_CANONICALIZATION=no)
 
-AC_ARG_ENABLE(debug-ct-propagation,
-	      AS_HELP_STRING([--enable-debug-ct-propagation=yes|no],
-			     [enable debugging of canonical type propagation (default is no)]),
-	      ENABLE_DEBUG_CT_PROPAGATION=$enableval,
-	      ENABLE_DEBUG_CT_PROPAGATION=no)
 
 AC_ARG_ENABLE(show-type-use-in-abilint,
 	      AS_HELP_STRING([--enable-show-type-use-in-abilint=yes|no],
@@ -181,6 +185,12 @@ AC_ARG_ENABLE([fedabipkgdiff],
 			     [enable the fedabipkgdiff tool]),
 	      ENABLE_FEDABIPKGDIFF=$enableval,
 	      ENABLE_FEDABIPKGDIFF=auto)
+
+AC_ARG_ENABLE(abidb,
+	      AS_HELP_STRING([--enable-abidb=yes|no|auto],
+			     [enable the support of the abidb tool (default is auto)]),
+	      ENABLE_ABIDB=$enableval,
+	      ENABLE_ABIDB=auto)
 
 AC_ARG_ENABLE([python3],
 	      AS_HELP_STRING([--enable-python3=yes|no|auto],
@@ -225,6 +235,43 @@ AC_ARG_ENABLE(btf,
 			     [disable support of btf files)]),
 	      ENABLE_BTF=$enableval,
 	      ENABLE_BTF=auto)
+
+ENABLE_BIG_TESTS=no
+AC_ARG_ENABLE(big-tests,
+	      AS_HELP_STRING([--enable-big-tests=yes|no],
+			     [enable the support of libabigail big tests (in the big-tests subdir)]),
+	      ENABLE_BIG_TESTS=$enableval,
+	      ENABLE_BIG_TESTS=no)
+
+
+ENABLE_INLINED_XXHASH=no
+AC_ARG_ENABLE(inlined-xxhash,
+	      AS_HELP_STRING([--enable-inlined-xxhash=yes|no],
+			     [enable the support the inlined-only version of the xxhash library]),
+	      ENABLE_INLINED_XXHASH=$enableval,
+	      ENABLE_INLINED_XXHASH=no)
+
+WITH_DW_LIBS_PATH=auto
+AC_ARG_WITH(libdw,
+	    AS_HELP_STRING([--with-libdw=/path/to/libdw-library/prefix],
+			   [Set the path to the libdw library prefix]),
+	    WITH_DW_LIBS_PATH=$withval,
+	    WITH_DW_LIBS_PATH=auto)
+
+WITH_ELF_LIBS_PATH=auto
+AC_ARG_WITH(libelf,
+	    AS_HELP_STRING([--with-libelf=/path/to/libelf-library/prefix],
+			   [Set the path to the libelf library prefix]),
+	    WITH_ELF_LIBS_PATH=$withval,
+	    WITH_ELF_LIBS_PATH=auto)
+
+WITH_LIBXML2_PATH=auto
+AC_ARG_WITH(libxml2,
+	    AS_HELP_STRING([--with-libxml2=/path/to/libxml2-library/prefix],
+			   [Set the path to the libxml2 library prefix]),
+	    WITH_LIBXML2_PATH=$withval,
+	    WITH_LIBXML2_PATH=auto)
+
 dnl *************************************************
 dnl check for dependencies
 dnl *************************************************
@@ -241,9 +288,11 @@ AC_LANG([C++])
 AC_LANG_COMPILER_REQUIRE
 
 dnl
-dnl We use C++11
+dnl We use C++14.  It has been the default in G++ since GCC 6.  In el8
+dnl (that we still support), we do have GCC 8.x with c++14 as the
+dnl default, still.
 dnl
-CXX_STANDARD=c++11
+CXX_STANDARD=c++14
 
 dnl
 dnl check if the c++ compiler has support __attribute__((visibility("hidden")))
@@ -275,6 +324,10 @@ fi
 
 AC_SUBST(VISIBILITY_FLAGS)
 
+dnl glibc and BSD include fts into their libc, but musl does not so
+dnl check if we need to explicitly link to the standalone musl-fts.
+AC_SEARCH_LIBS([fts_open], [fts])
+
 dnl Older glibc had a broken fts that didn't work with Large File Systems.
 dnl We want the version that can handler LFS, but include workaround if we
 dnl get a bad one. Add define to CFLAGS (not AC_DEFINE it) since we need to
@@ -289,31 +342,38 @@ AS_IF([test "x$ac_cv_bad_fts" = "xyes"],
       [CFLAGS="$CFLAGS -DBAD_FTS=1",
        CXXFLAGS="$CXXFLAGS -DBAD_FTS=1"])
 
-dnl On musl, we need to find fts-standalone
-AS_CASE(
-  [${host_os}], [*-musl*], [
-    PKG_CHECK_MODULES([FTS], [fts-standalone])
-])
 
-dnl Check for dependency: libelf, libdw, libebl (elfutils)
-dnl Note that we need to use at least elfutils 0.159 but
-dnl at that time elfutils didnt have pkgconfig capabilities
-dnl  to easily query for its version.
-ELF_LIBS=
-AC_CHECK_LIB([elf], [elf_end], [ELF_LIBS="-lelf"])
-AC_CHECK_HEADER([libelf.h],
-		[],
-		[AC_MSG_ERROR([could not find libelf.h])])
+dnl Check for dependency: libelf and libdw (elfutils).  Note that we
+dnl need to use at least elfutils 0.159 but at that time elfutils
+dnl didnt have pkgconfig capabilities to easily query for its version.
+dnl Those were added in version 0.165.
 
-DW_LIBS=
-AC_CHECK_LIB(dw, dwfl_begin, [DW_LIBS=-ldw])
-AC_CHECK_LIB(dw, dwarf_getalt,
-	     [FOUND_DWARF_GETALT_IN_LIBDW=yes],
-	     [FOUND_DWARF_GETALT_IN_LIBDW=no])
+dnl look for libelf
+ELF_LIBS_VERSION=0.165
+SAVED_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
+if test $WITH_ELF_LIBS_PATH != xauto; then
+  export PKG_CONFIG_PATH="$WITH_ELF_LIBS_PATH/lib/pkgconfig:$PKG_CONFIG_PATH"
+fi
 
-AC_CHECK_HEADER(elfutils/libdwfl.h,
-		[],
-		[AC_MSG_ERROR([could not find elfutils/libdwfl.h installed])])
+AC_MSG_NOTICE([used PKG_CONFIG_PATH=$PKG_CONFIG_PATH to check for libelf]);
+PKG_CHECK_MODULES(ELF, libelf >= $ELF_LIBS_VERSION)
+if test $WITH_ELF_LIBS_PATH != xauto; then
+  PKG_CONFIG_PATH=$SAVED_PKG_CONFIG_PATH
+fi
+
+dnl Look for libdw
+DW_LIBS_VERSION=0.165
+SAVED_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
+if test $WITH_DW_LIBS_PATH != xauto; then
+  export PKG_CONFIG_PATH="$WITH_DW_LIBS_PATH/lib/pkgconfig:$PKG_CONFIG_PATH"
+fi
+
+AC_MSG_NOTICE([used PKG_CONFIG_PATH=$PKG_CONFIG_PATH to check for libdw]);
+PKG_CHECK_MODULES(DW, libdw >= $DW_LIBS_VERSION)
+if test $WITH_DW_LIBS_PATH != xauto; then
+  PKG_CONFIG_PATH=$SAVED_PKG_CONFIG_PATH
+fi
+
 
 dnl Allow users to compile with the NDEBUG macro defined,
 dnl meaning they are compiling in a mode where the
@@ -322,21 +382,10 @@ dnl users just need to pass the --disable-assert
 dnl option to configure.
 AC_HEADER_ASSERT
 
-if test x$ELF_LIBS = x; then
-   AC_MSG_ERROR([could not find elfutils elf library installed])
-fi
-
-if test x$DW_LIBS = x; then
-   AC_MSG_ERROR([could not find elfutils dwarf library installed])
-fi
-
-if test x$FOUND_DWARF_GETALT_IN_LIBDW = xyes; then
-   AC_DEFINE([LIBDW_HAS_DWARF_GETALT], 1,
-	     [Defined if libdw has the function dwarf_getalt])
-fi
-
 AC_SUBST(DW_LIBS)
+AC_SUBST(DW_CFLAGS)
 AC_SUBST([ELF_LIBS])
+AC_SUBST([ELF_CFLAGS])
 
 dnl check for libctf presence if CTF code has been enabled by command line
 dnl argument, and then define CTF flag (to build CTF file code) if libctf is
@@ -385,10 +434,10 @@ dnl configure BTF usage
 BPF_LIBS=
 if test x$ENABLE_BTF != xno; then
   AC_CHECK_HEADER([bpf/btf.h],
-		  [ENABLE_BTF=yes],
+		  [HAS_BTF_HEADERS=yes],
 		  [AC_MSG_NOTICE([could not find bpf/btf.h])])
-  if test x$ENABLE_BTF = xyes; then
-    AC_MSG_NOTICE([enable BTF support])
+  if test x$HAS_BTF_HEADERS = xyes; then
+    AC_MSG_NOTICE([found BTF header file so enabling BTF support])
     ENABLE_BTF=yes
     AC_DEFINE([WITH_BTF], 1,
 	     [Defined if user enabled BTF usage])
@@ -452,13 +501,57 @@ dnl Test if various functions and structs are present.
   fi
 fi
 
+if test x$ENABLE_BIG_TESTS = xyes; then
+  AC_MSG_NOTICE([looking for $srcdir/big-tests ...]);
+  if test -d $srcdir/big-tests -o -L $srcdir/big-tests; then
+     AC_CONFIG_COMMANDS([create-big-tests-build-dir-and-configure],
+			[AC_MSG_NOTICE([Found $srcdir/big-tests!])
+			 cd $ac_abs_top_srcdir/big-tests
+			 autoreconf -i
+			 cd $ac_abs_top_builddir
+			 test -d big-tests || mkdir big-tests
+			 cd big-tests
+			 CTF_OPTS=
+			 BTF_OPTS=
+			 if test x$CTF_ENABLED = xyes; then CTF_OPTS="--enable-ctf"; fi;
+			 if test x$BTF_ENABLED = xyes; then BTF_OPTS="--enable-btf"; fi;
+			 AC_MSG_NOTICE([configuring $srcdir/big-tests --with-libabigail-tools-dir=$ac_abs_top_builddir/tools --with-libabigail-headers-dir=$ac_abs_top_srcdir/include $CTF_OPTS $BTF_OPTS])
+			 $ac_abs_top_srcdir/big-tests/configure --with-libabigail-tools-dir=$ac_abs_top_builddir/tools --with-libabigail-headers-dir=$ac_abs_top_srcdir/include $CTF_OPTS $BTF_OPTS],
+			 [CTF_ENABLED=$ENABLE_CTF
+			 BTF_ENABLED=$ENABLE_BTF])
+  else
+     AC_MSG_ERROR([No sub-directory big-tests found. Please checkout libabigail-big-tests under a sub-directory named 'big-tests'])
+  fi
+fi
+
 dnl Check for dependency: libxml
 LIBXML2_VERSION=2.6.22
+SAVED_PKG_CONFIG_PATH=$PKG_CONFIG_PATH
+if test $WITH_LIBXML2_PATH != xauto; then
+  export PKG_CONFIG_PATH="$WITH_LIBXML2_PATH/lib/pkgconfig:$PKG_CONFIG_PATH"
+fi
+
+AC_MSG_NOTICE([used PKG_CONFIG_PATH=$PKG_CONFIG_PATH to check for libxml2]);
 PKG_CHECK_MODULES(XML, libxml-2.0 >= $LIBXML2_VERSION)
+if test $WITH_LIBXML2_PATH != xauto; then
+  PKG_CONFIG_PATH=$SAVED_PKG_CONFIG_PATH
+fi
 
 AC_SUBST(LIBXML2_VERSION)
 AC_SUBST(XML_LIBS)
 AC_SUBST(XML_CFLAGS)
+
+dnl Check for dependency: xxhash
+XXHASH_VERSION=0.8.0
+PKG_CHECK_MODULES(XXHASH, libxxhash >= $XXHASH_VERSION)
+AC_SUBST(XXHASH_CFLAGS)
+AC_SUBST(XXHASH_LIBS)
+
+dnl Check for dependency: liblzma
+LIBLZMA_VERSION=5.2.0
+PKG_CHECK_MODULES(LZMA, liblzma >= $LIBLZMA_VERSION)
+AC_SUBST(LZMA_CFLAGS)
+AC_SUBST(LZMA_LIBS)
 
 dnl Check for some programs like rm, mkdir, etc ...
 AC_CHECK_PROG(HAS_RM, rm, yes, no)
@@ -566,15 +659,6 @@ else
 fi
 
 AM_CONDITIONAL(ENABLE_DEBUG_TYPE_CANONICALIZATION, test x$ENABLE_DEBUG_TYPE_CANONICALIZATION = xyes)
-
-if test x$ENABLE_DEBUG_CT_PROPAGATION = xyes; then
-   AC_DEFINE([WITH_DEBUG_CT_PROPAGATION],
-   	     1,
-	     [compile support of debugging canonical type propagation])
-   AC_MSG_NOTICE([support of debugging canonical type propagation is enabled])
-else
-   AC_MSG_NOTICE([support of debugging canonical type propagation is disabled])
-fi
 
 dnl Check for the dpkg program
 if test x$ENABLE_DEB = xauto -o x$ENABLE_DEB = xyes; then
@@ -764,7 +848,7 @@ if test x$CHECK_DEPS_FOR_FEDABIPKGDIFF = xyes; then
 
   REQUIRED_PYTHON_MODULES_FOR_FEDABIPKGDIFF="\
    argparse logging os re subprocess sys $URLPARSE_MODULE \
-   xdg koji mock rpm $IMPORT_MODULE tempfile mimetypes shutil six"
+   xdg koji rpm $IMPORT_MODULE tempfile mimetypes shutil six"
 
   AX_CHECK_PYTHON_MODULES([$REQUIRED_PYTHON_MODULES_FOR_FEDABIPKGDIFF],
 			  [$PYTHON],
@@ -816,12 +900,52 @@ except koji.ConfigurationError:
   fi
 fi
 
+dnl abidb checks
+if test x$PYTHON3_INTERPRETER != xno -a x$ENABLE_ABIDB != xno; then
+  AX_CHECK_PYTHON_MODULES([git],
+			  [$PYTHON],
+			  [FOUND_ALL_PYTHON_MODULES=yes],
+			  [FOUND_ALL_PYTHON_MODULES=no])
+
+  $PYTHON3_INTERPRETER -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"
+  if test $? -ne 0; then
+    AC_MSG_NOTICE([Python 3 version 3.9 or higher is required for abidb])
+    AC_MSG_WARN([disabling abidb as a result])
+    ENABLE_ABIDB=no
+  else
+    AC_MSG_NOTICE([Found Python 3 version at 3.9 or higher.  Great for abidb!])
+  fi
+
+  if test x$ENABLE_ABIDB = xno; then
+    pass
+  elif test x$ENABLE_ABIDB != xno -a x$FOUND_ALL_PYTHON_MODULES = xno; then
+    AC_MSG_NOTICE([missing python modules: $MISSING_PYTHON_MODULES])
+    AC_MSG_WARN([disabling abidb as a result])
+    ENABLE_ABIDB=no
+  else
+    ENABLE_ABIDB=yes
+    dnl search for optional modules, just for autoconf reporting purposes
+    AX_CHECK_PYTHON_MODULES([libarchive],
+			    [$PYTHON],
+			    [FOUND_ALL_OPTIONAL_PYTHON_MODULES=yes],
+			    [FOUND_ALL_OPTIONAL_PYTHON_MODULES=no])
+      if test x$FOUND_ALL_OPTIONAL_PYTHON_MODULES = xno; then
+        AC_MSG_WARN([missing optional python modules for abidb: $MISSING_PYTHON_MODULES])
+    else
+	AC_MSG_NOTICE([found all optional python modules for abidb])
+    fi
+  fi
+else
+    AC_MSG_NOTICE([disabling abidb])
+fi
+AM_CONDITIONAL(ENABLE_ABIDB, test x$ENABLE_ABIDB = xyes)
+
 AM_CONDITIONAL(ENABLE_FEDABIPKGDIFF, test x$ENABLE_FEDABIPKGDIFF = xyes)
 AM_CONDITIONAL(ENABLE_RUNNING_TESTS_WITH_PY3, test x$RUN_TESTS_WITH_PY3 = xyes)
 AM_CONDITIONAL(ENABLE_PYTHON3_INTERPRETER, test x$PYTHON3_INTERPRETER != xno)
 AC_SUBST(PYTHON)
 
-DEPS_CPPFLAGS="$XML_CFLAGS"
+DEPS_CPPFLAGS="$XML_CFLAGS $XXHASH_CFLAGS $ELF_CFLAGS $DW_CFLAGS $LZMA_CFLAGS"
 AC_SUBST(DEPS_CPPFLAGS)
 
 dnl Check for the presence of doxygen program
@@ -862,8 +986,10 @@ AX_VALGRIND_DFLT(sgcheck, off)
 AX_VALGRIND_CHECK
 
 dnl Set the list of libraries libabigail depends on
-
-DEPS_LIBS="$XML_LIBS $ELF_LIBS $DW_LIBS $CTF_LIBS $BPF_LIBS"
+DEPS_LIBS="$XML_LIBS $ELF_LIBS $DW_LIBS $CTF_LIBS $BPF_LIBS $LZMA_LIBS"
+if test x$ENABLE_INLINED_XXHASH = xno; then
+  DEPS_LIBS="$DEPS_LIBS $XXHASH_LIBS"
+fi
 AC_SUBST(DEPS_LIBS)
 
 if test x$ABIGAIL_DEVEL != x; then
@@ -899,6 +1025,12 @@ fi
 if test x$ENABLE_UBSAN = xyes; then
     CFLAGS="$CFLAGS -fsanitize=undefined"
     CXXFLAGS="$CXXFLAGS -fsanitize=undefined"
+fi
+
+dnl If the user asked then let's use inlined xxhash functions.
+if test x$ENABLE_INLINED_XXHASH = xyes; then
+   CFLAGS="$CFLAGS -DXXH_INLINE_ALL=1"
+   CXXFLAGS="$CXXFLAGS -DXXH_INLINE_ALL=1"
 fi
 
 dnl Set a few Automake conditionals
@@ -945,6 +1077,18 @@ if test x$HAS_EM_TILEGX = xyes; then
   AC_DEFINE([HAVE_EM_TILEGX_MACRO],
                  1,
             [Defined to 1 if elf.h has EM_TILEGX macro defined])
+fi
+
+HAS_EM_RISCV=no
+AC_CHECK_DECL([EM_RISCV],
+              [HAS_EM_RISCV=yes],
+              [HAS_EM_RISCV=no],
+              [[#include <elf.h>]])
+
+if test x$HAS_EM_RISCV = xyes; then
+  AC_DEFINE([HAVE_EM_RISCV_MACRO],
+                 1,
+            [Defined to 1 if elf.h has EM_RISCV macro defined])
 fi
 
 HAS_R_AARCH64_ABS64=no
@@ -1082,6 +1226,327 @@ if test x$HAS_DW_LANG_Rust = xyes; then
 	    [Define to 1 if dwarf.h has the DW_LANG_Rust enumerator])
 fi
 
+HAS_DW_LANG_OCaml=no
+AC_CHECK_DECL([DW_LANG_OCaml],
+	      [HAS_DW_LANG_OCaml=yes],
+	      [HAS_DW_LANG_OCaml=no],
+	      [[#include <dwarf.h>]])
+
+if test x$HAS_DW_LANG_OCaml = xyes; then
+  AC_DEFINE([HAVE_DW_LANG_OCaml_enumerator], 
+  	    1,
+	    [Define to 1 if dwarf.h has the DW_LANG_OCaml enumerator])
+fi
+
+HAS_DW_LANG_Kotlin=no
+AC_CHECK_DECL([DW_LANG_Kotlin],
+	      [HAS_DW_LANG_Kotlin=yes],
+	      [HAS_DW_LANG_Kotlin=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Kotlin = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Kotlin_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Kotlin enumerator])
+fi
+
+HAS_DW_LANG_Zig=no
+AC_CHECK_DECL([DW_LANG_Zig],
+	      [HAS_DW_LANG_Zig=yes],
+	      [HAS_DW_LANG_Zig=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Zig = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Zig_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Zig enumerator])
+fi
+
+HAS_DW_LANG_Crystal=no
+AC_CHECK_DECL([DW_LANG_Crystal],
+	      [HAS_DW_LANG_Crystal=yes],
+	      [HAS_DW_LANG_Crystal=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Crystal = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Crystal_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Crystal enumerator])
+fi
+
+HAS_DW_LANG_C_plus_plus_17=no
+AC_CHECK_DECL([DW_LANG_C_plus_plus_17],
+	      [HAS_DW_LANG_C_plus_plus_17=yes],
+	      [HAS_DW_LANG_C_plus_plus_17=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_C_plus_plus_17 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_C_plus_plus_17_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_17 enumerator])
+fi
+
+HAS_DW_LANG_C_plus_plus_20=no
+AC_CHECK_DECL([DW_LANG_C_plus_plus_20],
+	      [HAS_DW_LANG_C_plus_plus_20=yes],
+	      [HAS_DW_LANG_C_plus_plus_20=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_C_plus_plus_20 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_C_plus_plus_20_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_20 enumerator])
+fi
+
+HAS_DW_LANG_C17=no
+AC_CHECK_DECL([DW_LANG_C17],
+	      [HAS_DW_LANG_C17=yes],
+	      [HAS_DW_LANG_C17=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_C17 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_C17_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_C17 enumerator])
+fi
+
+HAS_DW_LANG_Fortran18=no
+AC_CHECK_DECL([DW_LANG_Fortran18],
+	      [HAS_DW_LANG_Fortran18=yes],
+	      [HAS_DW_LANG_Fortran18=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Fortran18 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Fortran18_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Fortran18 enumerator])
+fi
+
+HAS_DW_LANG_Ada2005=no
+AC_CHECK_DECL([DW_LANG_Ada2005],
+	      [HAS_DW_LANG_Ada2005=yes],
+	      [HAS_DW_LANG_Ada2005=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Ada2005 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Ada2005_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Ada2005 enumerator])
+fi
+
+HAS_DW_LANG_Ada2012=no
+AC_CHECK_DECL([DW_LANG_Ada2012],
+	      [HAS_DW_LANG_Ada2012=yes],
+	      [HAS_DW_LANG_Ada2012=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Ada2012 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Ada2012_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Ada2012 enumerator])
+fi
+
+HAS_DW_LANG_HIP=no
+AC_CHECK_DECL([DW_LANG_HIP],
+	      [HAS_DW_LANG_HIP=yes],
+	      [HAS_DW_LANG_HIP=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_HIP = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_HIP_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_HIP enumerator])
+fi
+
+HAS_DW_LANG_Assembly=no
+AC_CHECK_DECL([DW_LANG_Assembly],
+	      [HAS_DW_LANG_Assembly=yes],
+	      [HAS_DW_LANG_Assembly=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Assembly = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Assembly_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Assembly enumerator])
+fi
+
+HAS_DW_LANG_C_sharp=no
+AC_CHECK_DECL([DW_LANG_C_sharp],
+	      [HAS_DW_LANG_C_sharp=yes],
+	      [HAS_DW_LANG_C_sharp=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_C_sharp = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_C_sharp_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_C_sharp enumerator])
+fi
+
+HAS_DW_LANG_Mojo=no
+AC_CHECK_DECL([DW_LANG_Mojo],
+	      [HAS_DW_LANG_Mojo=yes],
+	      [HAS_DW_LANG_Mojo=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Mojo = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Mojo_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Mojo enumerator])
+fi
+
+HAS_DW_LANG_GLSL=no
+AC_CHECK_DECL([DW_LANG_GLSL],
+	      [HAS_DW_LANG_GLSL=yes],
+	      [HAS_DW_LANG_GLSL=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_GLSL = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_GLSL_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_GLSL enumerator])
+fi
+
+HAS_DW_LANG_GLSL_ES=no
+AC_CHECK_DECL([DW_LANG_GLSL_ES],
+	      [HAS_DW_LANG_GLSL_ES=yes],
+	      [HAS_DW_LANG_GLSL_ES=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_GLSL_ES = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_GLSL_ES_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_GLSL_ES enumerator])
+fi
+
+HAS_DW_LANG_HLSL=no
+AC_CHECK_DECL([DW_LANG_HLSL],
+	      [HAS_DW_LANG_HLSL=yes],
+	      [HAS_DW_LANG_HLSL=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_HLSL = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_HLSL_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_HLSL enumerator])
+fi
+
+HAS_DW_LANG_OpenCL_CPP=no
+AC_CHECK_DECL([DW_LANG_OpenCL_CPP],
+	      [HAS_DW_LANG_OpenCL_CPP=yes],
+	      [HAS_DW_LANG_OpenCL_CPP=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_OpenCL_CPP = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_OpenCL_CPP_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_OpenCL_CPP enumerator])
+fi
+
+HAS_DW_LANG_CPP_for_OpenCL=no
+AC_CHECK_DECL([DW_LANG_CPP_for_OpenCL],
+	      [HAS_DW_LANG_CPP_for_OpenCL=yes],
+	      [HAS_DW_LANG_CPP_for_OpenCL=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_CPP_for_OpenCL = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_CPP_for_OpenCL_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_CPP_for_OpenCL enumerator])
+fi
+
+HAS_DW_LANG_SYCL=no
+AC_CHECK_DECL([DW_LANG_SYCL],
+	      [HAS_DW_LANG_SYCL=yes],
+	      [HAS_DW_LANG_SYCL=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_SYCL = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_SYCL_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_SYCL enumerator])
+fi
+
+HAS_DW_LANG_C_plus_plus_23=no
+AC_CHECK_DECL([DW_LANG_C_plus_plus_23],
+	      [HAS_DW_LANG_C_plus_plus_23=yes],
+	      [HAS_DW_LANG_C_plus_plus_23=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_C_plus_plus_23 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_C_plus_plus_23_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_23 enumerator])
+fi
+
+HAS_DW_LANG_Odin=no
+AC_CHECK_DECL([DW_LANG_Odin],
+	      [HAS_DW_LANG_Odin=yes],
+	      [HAS_DW_LANG_Odin=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Odin = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Odin_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Odin enumerator])
+fi
+
+HAS_DW_LANG_P4=no
+AC_CHECK_DECL([DW_LANG_P4],
+	      [HAS_DW_LANG_P4=yes],
+	      [HAS_DW_LANG_P4=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_P4 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_P4_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_P4 enumerator])
+fi
+
+HAS_DW_LANG_Metal=no
+AC_CHECK_DECL([DW_LANG_Metal],
+	      [HAS_DW_LANG_Metal=yes],
+	      [HAS_DW_LANG_Metal=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Metal = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Metal_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Metal enumerator])
+fi
+
+HAS_DW_LANG_C23=no
+AC_CHECK_DECL([DW_LANG_C23],
+	      [HAS_DW_LANG_C23=yes],
+	      [HAS_DW_LANG_C23=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_C23 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_C23_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_C23 enumerator])
+fi
+
+HAS_DW_LANG_Fortran23=no
+AC_CHECK_DECL([DW_LANG_Fortran23],
+	      [HAS_DW_LANG_Fortran23=yes],
+	      [HAS_DW_LANG_Fortran23=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Fortran23 = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Fortran23_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Fortran23 enumerator])
+fi
+
+HAS_DW_LANG_Ruby=no
+AC_CHECK_DECL([DW_LANG_Ruby],
+	      [HAS_DW_LANG_Ruby=yes],
+	      [HAS_DW_LANG_Ruby=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Ruby = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Ruby_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Ruby enumerator])
+fi
+
+HAS_DW_LANG_Move=no
+AC_CHECK_DECL([DW_LANG_Move],
+	      [HAS_DW_LANG_Move=yes],
+	      [HAS_DW_LANG_Move=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Move = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Move_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Move enumerator])
+fi
+
+HAS_DW_LANG_Hylo=no
+AC_CHECK_DECL([DW_LANG_Hylo],
+	      [HAS_DW_LANG_Hylo=yes],
+	      [HAS_DW_LANG_Hylo=no],
+	      [[#include <dwarf.h>]])
+if test x$HAS_DW_LANG_Hylo = xyes; then
+   AC_DEFINE([HAVE_DW_LANG_Hylo_enumerator],
+	     1,
+	     [Define to 1 if dwarf.h has the DW_LANG_Hylo enumerator])
+
+fi
+
 HAS_DW_FORM_strx1=no
 HAS_DW_FORM_strx2=no
 HAS_DW_FORM_strx3=no
@@ -1182,6 +1647,10 @@ AC_CONFIG_FILES([tests/runtestdefaultsupprs.py],
 		[chmod +x tests/runtestdefaultsupprs.py])
 AC_CONFIG_FILES([tests/runtestdefaultsupprspy3.sh],
 		[chmod +x tests/runtestdefaultsupprspy3.sh])
+AC_CONFIG_FILES([tests/runtestabidb1.sh],
+		[chmod +x tests/runtestabidb1.sh])
+AC_CONFIG_FILES([tests/runtestabidb2.sh],
+		[chmod +x tests/runtestabidb2.sh])
 
 AC_OUTPUT
 
@@ -1198,24 +1667,32 @@ AC_MSG_NOTICE([
     C++ Compiler		                   : ${CXX}
     GCC visibility attribute supported             : ${SUPPORTS_GCC_VISIBILITY_ATTRIBUTE}
     CXXFLAGS	   	     			   : ${CXXFLAGS}
+    ELF_LIBS					   : ${ELF_LIBS}
+    ELF_CFLAGS					   : ${ELF_CFLAGS}
+    DW_LIBS					   : ${DW_LIBS}
+    DW_CFLAGS					   : ${DW_CFLAGS}
+    XML_LIBS					   $ ${XML_LIBS}
+    XML_CFLAGS					   $ ${XML_CFLAGS}
+    DEPS_LIBS					   $ ${DEPS_LIBS}
     Python					   : ${PYTHON}
 
  OPTIONAL FEATURES:
     C++ standard level                             : ${CXX_STANDARD}
-    libdw has the dwarf_getalt function            : ${FOUND_DWARF_GETALT_IN_LIBDW}
+    Enable inlined-only xxhash library		   : ${ENABLE_INLINED_XXHASH}
     Enable rpm support in abipkgdiff               : ${ENABLE_RPM}
     Enable rpm/zstd in abipkgdiff testing          : ${ENABLE_RPM_ZSTD}
     Enable abilint --show-type-use <type-id>       : ${ENABLE_SHOW_TYPE_USE_IN_ABILINT}
     Enable self comparison debugging               : ${ENABLE_DEBUG_SELF_COMPARISON}
     Enable type canonicalization debugging         : ${ENABLE_DEBUG_TYPE_CANONICALIZATION}
-    Enable propagated canonical type debugging	   : ${ENABLE_DEBUG_CT_PROPAGATION}
     Enable deb support in abipkgdiff               : ${ENABLE_DEB}
     Enable GNU tar archive support in abipkgdiff   : ${ENABLE_TAR}
     Enable bash completion	                   : ${ENABLE_BASH_COMPLETION}
     Enable fedabipkgdiff                           : ${ENABLE_FEDABIPKGDIFF}
+    Enable abidb                                   : ${ENABLE_ABIDB}    
     Enable python 3				   : ${ENABLE_PYTHON3}
     Enable CTF front-end                           : ${ENABLE_CTF}
     Enable BTF front-end                           : ${ENABLE_BTF}
+    Enable Big Libabigail tests                    : ${ENABLE_BIG_TESTS}
     Enable running tests under Valgrind            : ${enable_valgrind}
     Enable build with -fsanitize=address    	   : ${ENABLE_ASAN}
     Enable build with -fsanitize=memory    	   : ${ENABLE_MSAN}

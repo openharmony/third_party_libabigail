@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 # -*- Mode: Python
 #
-# Copyright (C) 2013-2023 Red Hat, Inc.
+# Copyright (C) 2013-2024 Red Hat, Inc.
 #
 # Author: Chenxiong Qi
 
@@ -180,20 +180,52 @@ def is_distro_valid(distro):
     """
     return re.match(r'^(fc|el)\d{1,2}$', distro) is not None
 
+def log_call(func):
+    """A decorator that logs a method invocation
+
+    Method's name and all arguments, either positional or keyword arguments,
+    will be logged by logger.debug. Also, return value from the decorated
+    method will be logged just after the invocation is done.
+
+    This decorator does not catch any exception thrown from the decorated
+    method. If there is any exception thrown from decorated method, you can
+    catch them in the caller and obviously, no return value is logged.
+
+    :param callable func: a callable object to decorate
+    """
+    def proxy(*args, **kwargs):
+        logger.debug('Call %s, args: %s, kwargs: %s',
+                     func.__name__,
+                     args if args else '',
+                     kwargs if kwargs else '')
+        start = timer()
+        result = func(*args, **kwargs)
+        end = timer();
+        elapsed_type = timedelta(seconds=end-start)
+        logger.debug('Result from %s: %s, in: %s',
+                     func.__name__, result, elapsed_type)
+        return result
+    return proxy
 
 def get_distro_from_string(str):
-    """Get the part of a string that designates the Fedora distro version number
+    """Get the part of a string that designates the Fedora or
+       Enterprise Linux distro version number from a release string.
 
     For instance, when passed the string '2.3.fc12', this function
-    returns the string 'fc12'.
+    returns the string 'fc12'.  It also works for e.g, '1.eln123',
+    returning eln123.
+
+    Please note that if the release string is not for a package that
+    ought to be in Fedora or EL proper, this function returns None.
 
     :param str the string to consider
     :return: The sub-string of the parameter that represents the
     Fedora distro version number, or None if the parameter does not
     contain such a sub-string.
+
     """
 
-    m = re.match(r'(.*)((fc|el)\d{1,2})(.*)', str)
+    m = re.match(r'(.*)((fc|el|eln)\d{1,3})$', str)
     if not m:
         return None
 
@@ -244,35 +276,6 @@ def cmp_nvr(left, right):
     return rpm.labelCompare(
         (left_nvr['epoch'], left_nvr['version'], left_nvr['release']),
         (right_nvr['epoch'], right_nvr['version'], right_nvr['release']))
-
-
-def log_call(func):
-    """A decorator that logs a method invocation
-
-    Method's name and all arguments, either positional or keyword arguments,
-    will be logged by logger.debug. Also, return value from the decorated
-    method will be logged just after the invocation is done.
-
-    This decorator does not catch any exception thrown from the decorated
-    method. If there is any exception thrown from decorated method, you can
-    catch them in the caller and obviously, no return value is logged.
-
-    :param callable func: a callable object to decorate
-    """
-    def proxy(*args, **kwargs):
-        logger.debug('Call %s, args: %s, kwargs: %s',
-                     func.__name__,
-                     args if args else '',
-                     kwargs if kwargs else '')
-        start = timer()
-        result = func(*args, **kwargs)
-        end = timer();
-        elapsed_type = timedelta(seconds=end-start)
-        logger.debug('Result from %s: %s, in: %s',
-                     func.__name__, result, elapsed_type)
-        return result
-    return proxy
-
 
 def delete_download_cache():
     """Delete download cache directory"""
@@ -887,7 +890,7 @@ class Brew(object):
         :raises NoCompleteBuilds: if there is no latest build of a package.
         """
         package = self.getPackage(package_name)
-        selector = lambda item: item['release'].find(distro) > -1
+        selector = lambda item: get_distro_from_string(item['release']) == distro
 
         builds = self.listBuilds(packageID=package['id'],
                                  selector=selector,
@@ -1154,8 +1157,11 @@ def abipkgdiff(cmp_half1, cmp_half2):
         cmd = [
             abipkgdiff_tool,
             '--dso-only' if global_config.dso_only else '',
+            '--private-dso' if global_config.private_dso else '',
             '--self-check',
+            suppressions,
             debuginfo_pkg1,
+            devel_pkg1,
             cmp_half1.subject.downloaded_file,
         ]
     else:
@@ -1165,6 +1171,7 @@ def abipkgdiff(cmp_half1, cmp_half2):
             '--show-identical-binaries' if global_config.show_identical_binaries else '',
             '--no-default-suppression' if global_config.no_default_suppr else '',
             '--dso-only' if global_config.dso_only else '',
+            '--private-dso' if global_config.private_dso else '',
             debuginfo_pkg1,
             debuginfo_pkg2,
             devel_pkg1,
@@ -1182,13 +1189,14 @@ def abipkgdiff(cmp_half1, cmp_half2):
 
     print('Comparing the ABI of binaries between {0} and {1}:'.format(
         cmp_half1.subject.filename, cmp_half2.subject.filename))
-    print()
 
     proc = subprocess.Popen(' '.join(cmd), shell=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True)
 
     stdout, stderr = proc.communicate()
+    stdout=stdout.strip()
+    stderr=stderr.strip()
 
     is_ok = proc.returncode == ABIDIFF_OK
     is_internal_error = proc.returncode & ABIDIFF_ERROR or proc.returncode & ABIDIFF_USAGE_ERROR
@@ -1196,9 +1204,16 @@ def abipkgdiff(cmp_half1, cmp_half2):
 
     if is_internal_error:
         six.print_(stderr, file=sys.stderr)
-    elif is_ok or has_abi_change:
+    elif has_abi_change:
+        print()
         print(stdout)
+    elif is_ok:
+        if stdout != '':
+            print(stdout)
+        print('No ABI change between {0} and {1}'.format(cmp_half1.subject.filename,
+                                                         cmp_half2.subject.filename))
 
+    print()
     return proc.returncode
 
 
@@ -1447,6 +1462,12 @@ def build_commandline_args_parser():
         dest='dso_only',
         help='Compare the ABI of shared libraries only. If this option is not '
              'provided, the tool compares the ABI of all ELF binaries.')
+    parser.add_argument(
+        '--private-dso',
+        required=False,
+        action='store_true',
+        dest='private_dso',
+        help='Compare the ABI of shared libraries that are private to the package')
     parser.add_argument(
         '--debug',
         required=False,

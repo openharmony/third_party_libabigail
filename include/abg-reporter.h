@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2017-2023 Red Hat, Inc.
+// Copyright (C) 2017-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -32,6 +32,7 @@ class qualified_type_diff;
 class distinct_diff;
 class pointer_diff;
 class reference_diff;
+class ptr_to_mbr_diff;
 class subrange_diff;
 class array_diff;
 class base_diff;
@@ -87,6 +88,10 @@ public:
 
   virtual void
   report(const reference_diff& d, std::ostream& out,
+	 const std::string& indent = "") const = 0;
+
+  virtual void
+  report(const ptr_to_mbr_diff& d, std::ostream& out,
 	 const std::string& indent = "") const = 0;
 
   virtual void
@@ -200,6 +205,15 @@ public:
   report(const reference_diff& d, std::ostream& out,
 	 const std::string& indent = "") const;
 
+  bool
+  report_local_ptr_to_mbr_type_changes(const ptr_to_mbr_diff& d,
+				       std::ostream& out,
+				       const std::string& indent = "") const;
+
+  virtual void
+  report(const ptr_to_mbr_diff& d, std::ostream& out,
+	 const std::string& indent = "") const;
+
   virtual void
   report(const fn_parm_diff& d, std::ostream& out,
 	 const std::string& indent = "") const;
@@ -289,6 +303,10 @@ public:
 
   virtual void
   report(const reference_diff& d, std::ostream& out,
+	 const std::string& indent = "") const;
+
+  virtual void
+  report(const ptr_to_mbr_diff& d, std::ostream& out,
 	 const std::string& indent = "") const;
 
   virtual void

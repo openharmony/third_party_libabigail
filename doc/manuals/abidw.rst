@@ -1,3 +1,4 @@
+.. _abidw_label:
 
 ======
 abidw
@@ -40,17 +41,22 @@ Invocation
 Options
 =======
 
-  * ``--help | -h``
+  *  ``--abidiff``
 
-    Display a short help about the command and exit.
+    Load the ABI of the ELF binary given in argument, save it in
+    libabigail's XML format in a temporary file; read the ABI from the
+    temporary XML file and compare the ABI that has been read back
+    against the ABI of the ELF binary given in argument.  The ABIs
+    should compare equal.  If they don't, the program emits a
+    diagnostic and exits with a non-zero code.
 
-  * ``--version | -v``
+    This is a debugging and sanity check option.
 
-    Display the version of the program and exit.
 
   * ``--abixml-version``
 
     Display the version of the ABIXML format emitted by this program and exit.
+
 
   * ``--add-binaries`` <*bin1,bin2,...*>
 
@@ -61,20 +67,6 @@ Options
     Group) made of the binary denoted by the Argument of
     ``abidw``.  That corpus group is then serialized out.
 
-  * ``--follow-dependencies``
-
-    For each dependency of the input binary of ``abidw``, if it is
-    found in the directory specified by the ``--added-binaries-dir``
-    option, then construct an ABI corpus out of the dependency and add
-    it to a set of ABI corpora (called an ABI Corpus Group) along with
-    the ABI corpus of the input binary of the program.  The ABI Corpus
-    Group is then serialized out.
-
-  * ``--list-dependencies``
-
-    For each dependency of the input binary of``abidw``, if it's found
-    in the directory specified by the ``--added-binaries-dir`` option,
-    then the name of the dependency is printed out.
 
   * ``--added-binaries-dir | --abd`` <*dir-path*>
 
@@ -87,159 +79,6 @@ Options
     corpus and added to the set of ABI corpora (called an ABI corpus
     group) built and serialized.
 
-  * ``--debug-info-dir | -d`` <*dir-path*>
-
-    In cases where the debug info for *path-to-elf-file* is in a
-    separate file that is located in a non-standard place, this tells
-    ``abidw`` where to look for that debug info file.
-
-    Note that *dir-path* must point to the root directory under which
-    the debug information is arranged in a tree-like manner.  Under
-    Red Hat based systems, that directory is usually
-    ``<root>/usr/lib/debug``.
-
-    This option can be provided several times with different root
-    directories.  In that case, ``abidw`` will potentially look into
-    all those root directories to find the split debug info for the
-    elf file.
-
-    Note that this option is not mandatory for split debug information
-    installed by your system's package manager because then
-    ``abidw`` knows where to find it.
-
-  * ``--out-file`` <*file-path*>
-
-    This option instructs ``abidw`` to emit the XML representation of
-    *path-to-elf-file* into the file *file-path*, rather than emitting
-    it to its standard output.
-
-  * ``--noout``
-
-    This option instructs ``abidw`` to not emit the XML representation
-    of the ABI.  So it only reads the ELF and debug information,
-    builds the internal representation of the ABI and exits.  This
-    option is usually useful for debugging purposes.
-
-  * ``--no-corpus-path``
-
-    Do not emit the path attribute for the ABI corpus.
-
-  * ``--suppressions | suppr`` <*path-to-suppression-specifications-file*>
-
-    Use a :ref:`suppression specification <suppr_spec_label>` file
-    located at *path-to-suppression-specifications-file*.  Note that
-    this option can appear multiple times on the command line.  In
-    that case, all of the provided suppression specification files are
-    taken into account.  ABI artifacts matched by the suppression
-    specifications are suppressed from the output of this tool.
-
-
-  * ``--kmi-whitelist | -kaw`` <*path-to-whitelist*>
-
-    When analyzing a `Linux Kernel`_ binary, this option points to the
-    white list of names of ELF symbols of functions and variables
-    which ABI must be written out.  That white list is called a "
-    Kernel Module Interface white list".  This is because for the
-    Kernel, we don't talk about the ABI; we rather talk about the
-    interface between the Kernel and its module. Hence the term
-    ``KMI`` rather than ``ABI``
-
-    Any other function or variable which ELF symbol are not present in
-    that white list will not be considered by the KMI writing process.
-
-    If this option is not provided -- thus if no white list is
-    provided -- then the entire KMI, that is, all publicly defined and
-    exported functions and global variables by the `Linux Kernel`_
-    binaries is emitted.
-    
-  * ``--linux-tree | --lt``
-
-    Make ``abidw`` to consider the input path as a path to a directory
-    containing the vmlinux binary as several kernel modules binaries.
-    In that case, this program emits the representation of the Kernel
-    Module Interface (KMI) on the standard output.
-
-    Below is an example of usage of ``abidw`` on a `Linux Kernel`_
-    tree.
-
-    First, checkout a `Linux Kernel`_ source tree and build it.  Then
-    install the kernel modules in a directory somewhere.  Copy the
-    vmlinux binary into that directory too.  And then serialize the
-    KMI of that kernel to disk, using ``abidw``: ::
-
-       $ git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
-       $ cd linux && git checkout v4.5
-       $ make allyesconfig all
-       $ mkdir build-output
-       $ make INSTALL_MOD_PATH=./build-output modules_install 
-       $ cp vmlinux build-output/modules/4.5.0
-       $ abidw --linux-tree build-output/modules/4.5.0 > build-output/linux-4.5.0.kmi
-
-  * ``--headers-dir | --hd`` <headers-directory-path-1>
-
-    Specifies where to find the public headers of the binary that the
-    tool has to consider.  The tool will thus filter out types that
-    are not defined in public headers.
-
-    Note that several public header directories can be specified for
-    the binary to consider.  In that case the ``--header-dir`` option
-    should be present several times on the command line, like in the
-    following example: ::
-
-      $ abidw --header-dir /some/path       \
-              --header-dir /some/other/path \
-              binary > binary.abi
-
-  * ``--header-file | --hf`` <header-file-path>
-
-    Specifies where to find one of the public headers of the abi file
-    that the tool has to consider.  The tool will thus filter out
-    types that are not defined in public headers.
-
-  * ``--drop-private-types``
-
-    This option is to be used with the ``--headers-dir`` and/or
-    ``header-file`` options.  With this option, types that are *NOT*
-    defined in the headers are entirely dropped from the internal
-    representation build by Libabigail to represent the ABI and will
-    not end up in the abi XML file.
-
-  * ``--no-elf-needed``
-
-    Do not include the list of DT_NEEDED dependency names in the
-    corpus.
-
-  * ``--drop-undefined-syms``
-
-    With this option functions or variables for which the (exported)
-    ELF symbol is undefined are dropped from the internal
-    representation build by Libabigail to represent the ABI and will
-    not end up in the abi XML file.
-
-  * ``--exported-interfaces-only``
-
-    By default, when looking at the debug information accompanying a
-    binary, this tool analyzes the descriptions of the types reachable
-    by the interfaces (functions and variables) that are visible
-    outside of their translation unit.  Once that analysis is done, an
-    ABI corpus is constructed by only considering the subset of types
-    reachable from interfaces associated to `ELF`_ symbols that are
-    defined and exported by the binary.  It's that final ABI corpus
-    which textual representation is saved as ``ABIXML``.
-
-    The problem with that approach however is that analyzing all the
-    interfaces that are visible from outside their translation unit
-    can amount to a lot of data, especially when those binaries are
-    applications, as opposed to shared libraries.  One example of such
-    applications is the `Linux Kernel`_.  Analyzing massive ABI
-    corpora like these can be extremely slow.
-
-    To mitigate that performance issue, this option allows libabigail
-    to only analyze types that are reachable from interfaces
-    associated with defined and exported `ELF`_ symbols.
-
-    Note that this option is turned on by default when analyzing the
-    `Linux Kernel`_.  Otherwise, it's turned off by default.
 
   * ``--allow-non-exported-interfaces``
 
@@ -266,16 +105,20 @@ Options
     Note that this option is turned on by default, unless we are in
     the presence of the `Linux Kernel`_.
 
-  * ``--no-linux-kernel-mode``
 
-    Without this option, if abipkgiff detects that the binaries it is
-    looking at are Linux Kernel binaries (either vmlinux or modules)
-    then it only considers functions and variables which ELF symbols
-    are listed in the __ksymtab and __ksymtab_gpl sections.
+  *  ``--annotate``
 
-    With this option, abipkgdiff considers the binary as a non-special
-    ELF binary.  It thus considers functions and variables which are
-    defined and exported in the ELF sense.
+    Annotate the ABIXML output with comments above most elements.  The
+    comments are made of the pretty-printed form types, declaration or
+    even ELF symbols.  The purpose is to make the ABIXML output more
+    human-readable for debugging or documenting purposes.
+
+
+  * ``--btf``
+
+    Extract ABI information from `BTF`_ debug information, if present in
+    the given object.
+
 
   * ``--check-alternate-debug-info`` <*elf-path*>
 
@@ -286,33 +129,6 @@ Options
     alternate debug info file found.  Otherwise, it emits an error
     code.
 
-  * ``--no-show-locs``
-
-   In the emitted ABI representation, do not show file, line or column
-   where ABI artifacts are defined.
-
-  * ``--no-parameter-names``
-
-    In the emitted ABI representation, do not show names of function
-    parameters, just the types.
-
-  * ``--no-write-default-sizes``
-
-    In the XML ABI representation, do not write the size-in-bits for
-    pointer type definitions, reference type definitions, function
-    declarations and function types when they are equal to the default
-    address size of the translation unit.  Note that libabigail before
-    1.8 will not set the default size and will interpret types without
-    a size-in-bits attribute as zero sized.
-
-  * ``--type-id-style`` <``sequence``|``hash``>
-
-    This option controls how types are idenfied in the generated XML
-    files.  The default ``sequence`` style just numbers (with
-    ``type-id-`` as prefix) the types in the order they are
-    encountered.  The ``hash`` style uses a (stable, portable) hash of
-    libabigail's internal type names and is intended to make the XML
-    files easier to diff.
 
   * ``--check-alternate-debug-info-base-name`` <*elf-path*>
 
@@ -320,27 +136,8 @@ Options
     Like ``--check-alternate-debug-info``, but in the success message,
     only mention the base name of the debug info file; not its full path.
 
-  * ``--load-all-types``
 
-    By default, ``libabigail`` (and thus ``abidw``) only loads types
-    that are reachable from functions and variables declarations that
-    are publicly defined and exported by the binary.  So only those
-    types are present in the output of ``abidw``.  This option however
-    makes ``abidw`` load *all* the types defined in the binaries, even
-    those that are not reachable from public declarations.
-
-  *  ``--abidiff``
-
-    Load the ABI of the ELF binary given in argument, save it in
-    libabigail's XML format in a temporary file; read the ABI from the
-    temporary XML file and compare the ABI that has been read back
-    against the ABI of the ELF binary given in argument.  The ABIs
-    should compare equal.  If they don't, the program emits a
-    diagnostic and exits with a non-zero code.
-
-    This is a debugging and sanity check option.
-
-    *  ``--debug-abidiff``
+  *  ``--debug-abidiff``
 
     Same as ``--abidiff`` but in debug mode.  In this mode, error
     messages are emitted for types which fail type canonicalization.
@@ -349,7 +146,35 @@ Options
     it the libabigail package needs to be configured with
     the --enable-debug-self-comparison option.
 
-    *  ``--debug-type-canonicalization | --debug-tc``
+
+  * ``--ctf``
+
+    Extract ABI information from `CTF`_ debug information, if present in
+    the given object.
+
+
+  * ``--debug-info-dir | -d`` <*dir-path*>
+
+    In cases where the debug info for *path-to-elf-file* is in a
+    separate file that is located in a non-standard place, this tells
+    ``abidw`` where to look for that debug info file.
+
+    Note that *dir-path* must point to the root directory under which
+    the debug information is arranged in a tree-like manner.  Under
+    Red Hat based systems, that directory is usually
+    ``<root>/usr/lib/debug``.
+
+    This option can be provided several times with different root
+    directories.  In that case, ``abidw`` will potentially look into
+    all those root directories to find the split debug info for the
+    elf file.
+
+    Note that this option is not mandatory for split debug information
+    installed by your system's package manager because then
+    ``abidw`` knows where to find it.
+
+
+  *  ``--debug-type-canonicalization | --debug-tc``
 
     Debug the type canonicalization process.  This is done by using
     structural and canonical equality when canonicalizing every single
@@ -362,6 +187,183 @@ Options
     This option is available only if the package was configured with
     the --enable-debug-type-canonicalization option.
 
+
+    .. _abidw_drop_private_types_option_label:
+  * ``--drop-private-types``
+
+    This option is implicitly set by option :ref:`--headers-dir
+    <abidw_header_dir_option_label>` and :ref:`--header-file
+    <abidw_header_file_option_label>` options.
+
+    With this option, types that are *NOT* defined in the headers are
+    entirely dropped from the internal representation build by
+    Libabigail to represent the ABI and will not end up in the abi XML
+    file.
+
+    This option is provided or compatibility reasons only and should
+    not be explicitly used anymore.
+
+
+  * ``--drop-undefined-syms``
+
+    With this option functions or variables for which the (exported)
+    ELF symbol is undefined are dropped from the internal
+    representation build by Libabigail to represent the ABI and will
+    not end up in the abi XML file.
+
+
+  * ``--exported-interfaces-only``
+
+    By default, when looking at the debug information accompanying a
+    binary, this tool analyzes the descriptions of the types reachable
+    by the interfaces (functions and variables) that are visible
+    outside of their translation unit.  Once that analysis is done, an
+    ABI corpus is constructed by only considering the subset of types
+    reachable from interfaces associated to `ELF`_ symbols that are
+    defined and exported by the binary.  It's that final ABI corpus
+    which textual representation is saved as ``ABIXML``.
+
+    The problem with that approach however is that analyzing all the
+    interfaces that are visible from outside their translation unit
+    can amount to a lot of data, especially when those binaries are
+    applications, as opposed to shared libraries.  One example of such
+    applications is the `Linux Kernel`_.  Analyzing massive ABI
+    corpora like these can be extremely slow.
+
+    To mitigate that performance issue, this option allows libabigail
+    to only analyze types that are reachable from interfaces
+    associated with defined and exported `ELF`_ symbols.
+
+    Note that this option is turned on by default when analyzing the
+    `Linux Kernel`_.  Otherwise, it's turned off by default.
+
+
+  * ``--follow-dependencies``
+
+    For each dependency of the input binary of ``abidw``, if it is
+    found in the directory specified by the ``--added-binaries-dir``
+    option, then construct an ABI corpus out of the dependency and add
+    it to a set of ABI corpora (called an ABI Corpus Group) along with
+    the ABI corpus of the input binary of the program.  The ABI Corpus
+    Group is then serialized out.
+
+
+    .. _abidw_force_early_suppression_option_label:
+  * ``--force-early-suppression``
+
+    This option must be used alongside option :ref:`--suppression
+    <abidw_suppressions_option_label>`.
+
+    It forces :ref:`suppression specifications <suppr_spec_label>` to
+    be applied in :ref:`early suppression mode
+    <early_suppression_mode_label>`.  Artifacts of the internal
+    representation that are matched by suppression specifications are
+    thus suppressed from memory.
+
+    If this option is not used then only suppression specifications
+    with the :ref:`drop property set to 'yes' <drop_property_label>`
+    are effective.  All other suppression specification directives
+    will appear to be ignored.
+
+
+    .. _abidw_header_dir_option_label:
+  * ``--headers-dir | --hd`` <headers-directory-path-1>
+
+    Specifies where to find the public headers of the binary that the
+    tool has to consider.  The tool will thus filter out types that
+    are not defined in public headers.  This option implicitly sets
+    option :ref:`--drop-private-types
+    <abidw_drop_private_types_option_label>`.
+
+    Note that several public header directories can be specified for
+    the binary to consider.  In that case the ``--header-dir`` option
+    should be present several times on the command line, like in the
+    following example: ::
+
+      $ abidw --header-dir /some/path       \
+              --header-dir /some/other/path \
+              binary > binary.abi
+
+
+
+    .. _abidw_header_file_option_label:
+  * ``--header-file | --hf`` <header-file-path>
+
+    Specifies where to find one of the public headers of the abi file
+    that the tool has to consider.  The tool will thus filter out
+    types that are not defined in public headers.
+
+    This option implicitly sets option :ref:`--drop-private-types
+    <abidw_drop_private_types_option_label>`.
+
+
+  * ``--help | -h``
+
+    Display a short help about the command and exit.
+
+  * ``--kmi-whitelist | --kmi-stablelist |-w`` <*path-to-stablelist*>
+
+    When analyzing a `Linux Kernel`_ binary, this option points to the
+    list of names of ELF symbols of functions and variables which ABI
+    must be written out.  Any function or variable with a name that is
+    not included in that list will not ignored.  That list is called a
+    " Kernel Module Interface stable list".  This is because for the
+    Kernel, we don't talk about the ABI; we rather talk about the
+    interface between the Kernel and its module. Hence the term
+    ``KMI`` rather than ``KABI``.
+
+    Any other function or variable which ELF symbol are not present in
+    that stable list will not be considered by the KMI writing
+    process.
+
+    If this option is not provided -- thus if no stable list is
+    provided -- then the entire KMI, that is, all publicly defined and
+    exported functions and global variables by the `Linux Kernel`_
+    binaries is emitted.
+
+
+  * ``--list-dependencies``
+
+    For each dependency of the input binary of``abidw``, if it's found
+    in the directory specified by the ``--added-binaries-dir`` option,
+    then the name of the dependency is printed out.
+
+
+  * ``--load-all-types``
+
+    By default, ``libabigail`` (and thus ``abidw``) only loads types
+    that are reachable from functions and variables declarations that
+    are publicly defined and exported by the binary.  So only those
+    types are present in the output of ``abidw``.  This option however
+    makes ``abidw`` load *all* the types defined in the binaries, even
+    those that are not reachable from public declarations.
+
+
+  * ``--linux-tree | --lt``
+
+    Make ``abidw`` to consider the input path as a path to a directory
+    containing the vmlinux binary as several kernel modules binaries.
+    In that case, this program emits the representation of the Kernel
+    Module Interface (KMI) on the standard output.
+
+    Below is an example of usage of ``abidw`` on a `Linux Kernel`_
+    tree.
+
+    First, checkout a `Linux Kernel`_ source tree and build it.  Then
+    install the kernel modules in a directory somewhere.  Copy the
+    vmlinux binary into that directory too.  And then serialize the
+    KMI of that kernel to disk, using ``abidw``: ::
+
+       $ git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+       $ cd linux && git checkout v4.5
+       $ make allyesconfig all
+       $ mkdir build-output
+       $ make INSTALL_MOD_PATH=./build-output modules_install 
+       $ cp vmlinux build-output/modules/4.5.0
+       $ abidw --linux-tree build-output/modules/4.5.0 > build-output/linux-4.5.0.kmi
+
+
+
   * ``--no-assume-odr-for-cplusplus``
 
     When analysing a binary originating from C++ code using `DWARF`_
@@ -373,6 +375,18 @@ Options
     actually actually compare the types to determine if they are
     equal.
 
+
+  * ``--no-corpus-path``
+
+    Do not emit the path attribute for the ABI corpus.
+
+
+  * ``--no-elf-needed``
+
+    Do not include the list of DT_NEEDED dependency names in the
+    corpus.
+
+
   * ``--no-leverage-dwarf-factorization``
 
     When analysing a binary which `DWARF`_ debug information was
@@ -382,26 +396,112 @@ Options
 
     This option disables those optimizations.
 
-  * ``--ctf``
 
-    Extract ABI information from `CTF`_ debug information, if present in
-    the given object.
+  * ``--no-load-undefined-interfaces``
 
-  *  ``--annotate``
+    By default, ``libabigail`` (and thus ``abidw``) loads information
+    about undefined function and variable symbols as well as functions
+    and variables that are associated with those undefined symbols.
+    Those are called undefined interfaces.  This option however makes
+    makes ``abidw`` avoid loading information about undefined
+    interfaces.  The resulting XML file thus doesn't contain
+    information about those undefined interfaces.
 
-    Annotate the ABIXML output with comments above most elements.  The
-    comments are made of the pretty-printed form types, declaration or
-    even ELF symbols.  The purpose is to make the ABIXML output more
-    human-readable for debugging or documenting purposes.
+
+  * ``--no-linux-kernel-mode``
+
+    Without this option, if abipkgiff detects that the binaries it is
+    looking at are Linux Kernel binaries (either vmlinux or modules)
+    then it only considers functions and variables which ELF symbols
+    are listed in the __ksymtab and __ksymtab_gpl sections.
+
+    With this option, abipkgdiff considers the binary as a non-special
+    ELF binary.  It thus considers functions and variables which are
+    defined and exported in the ELF sense.
+
+
+  * ``--noout``
+
+    This option instructs ``abidw`` to not emit the XML representation
+    of the ABI.  So it only reads the ELF and debug information,
+    builds the internal representation of the ABI and exits.  This
+    option is usually useful for debugging purposes.
+
+
+  * ``--no-parameter-names``
+
+    In the emitted ABI representation, do not show names of function
+    parameters, just the types.
+
+
+  * ``--no-show-locs``
+
+   In the emitted ABI representation, do not show file, line or column
+   where ABI artifacts are defined.
+
+
+  * ``--no-write-default-sizes``
+
+    In the XML ABI representation, do not write the size-in-bits for
+    pointer type definitions, reference type definitions, function
+    declarations and function types when they are equal to the default
+    address size of the translation unit.  Note that libabigail before
+    1.8 will not set the default size and will interpret types without
+    a size-in-bits attribute as zero sized.
+
+
+  * ``--out-file | -o`` <*file-path*>
+
+    This option instructs ``abidw`` to emit the XML representation of
+    *path-to-elf-file* into the file *file-path*, rather than emitting
+    it to its standard output.
+
 
   * ``--stats``
 
     Emit statistics about various internal things.
 
+
+    .. _abidw_suppressions_option_label:
+
+  * ``--suppressions | suppr`` <*path-to-suppression-specifications-file*>
+
+    Use a :ref:`suppression specification <suppr_spec_label>` file
+    located at *path-to-suppression-specifications-file*.  Note that
+    this option can appear multiple times on the command line.  In
+    that case, all of the provided suppression specification files are
+    taken into account.  ABI artifacts matched by the suppression
+    specifications are suppressed from the output of this tool.
+
+    Only suppression specifications that have the :ref:`drop property
+    set to 'yes' <drop_property_label>` are going to be effective.
+    All other suppression specification directives will appear as
+    being ignored, unless the command line option
+    :ref:`--force-early-suppression
+    <abidw_force_early_suppression_option_label>` is provided.
+
+
+  * ``--type-id-style`` <``sequence``|``hash``>
+
+    This option controls how types are idenfied in the generated XML
+    files.  The default ``sequence`` style just numbers (with
+    ``type-id-`` as prefix) the types in the order they are
+    encountered.  The ``hash`` style uses a (stable, portable) hash of
+    libabigail's internal type names and is intended to make the XML
+    files easier to diff.
+
+
   * ``--verbose``
 
     Emit verbose logs about the progress of miscellaneous internal
     things.
+
+
+  * ``--version | -v``
+
+    Display the version of the program and exit.
+
+
 
 Usage examples
 ==============

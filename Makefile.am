@@ -21,7 +21,7 @@ autoconf-archive/ax_check_python_modules.m4 \
 autoconf-archive/ax_prog_python_version.m4 \
 autoconf-archive/ax_compare_version.m4 \
 NEWS README LICENSE.txt license-change-2020.txt \
-COMPILING COMMIT-LOG-GUIDELINES VISIBILITY \
+COMPILING COMMIT-LOG-GUIDELINES VISIBILITY SECURITY \
 ChangeLog gen-changelog.py	\
 $(headers) $(m4data_DATA) 	\
 libabigail.pc.in
@@ -30,7 +30,7 @@ libabigail.pc.in
 # Don't make make repeat.
 AM_MAKEFLAGS = --no-print-directory
 
-.PHONY: doc
+.PHONY: doc big-tests
 
 doc: html-doc man info
 
@@ -80,7 +80,7 @@ tarball-and-tag-and-upload: tarball-and-all
 tarball-and-all: tag-and-all
 	$(MAKE) tarball
 
-tag-and-all: distcheck check-self-compare
+tag-and-all: distcheck full-check
 	$(MAKE) tag-release-only
 
 # the default for GZIP_ENV is --best, which is pretty slow for check runs
@@ -94,3 +94,10 @@ distcheck-fast:
 check-self-compare:
 	$(MAKE) -C tests check-self-compare
 
+big-tests:
+	test -d big-tests && $(MAKE) -C big-tests check
+
+clean-big-tests:
+	test -d big-tests && $(MAKE) -C big-tests clean
+
+full-check: check check-self-compare big-tests

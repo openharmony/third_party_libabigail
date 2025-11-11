@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 /// @file
 
@@ -22,7 +22,6 @@
 #include <utility> // for std::rel_ops, at least.
 #include <vector>
 #include "abg-interned-str.h"
-#include "abg-hash.h"
 
 /// Toplevel namespace for libabigail.
 namespace abigail
@@ -153,6 +152,10 @@ class decl_base;
 // Convenience typedef for a smart pointer on @ref decl_base.
 typedef shared_ptr<decl_base> decl_base_sptr;
 
+/// Convenience typedef for a map which key is a string and which
+/// value is a @ref decl_base_sptr.
+typedef unordered_map<string, decl_base_sptr> string_decl_base_sptr_map;
+
 class type_decl;
 /// Convenience typedef for a shared pointer on a @ref type_decl.
 typedef shared_ptr<type_decl> type_decl_sptr;
@@ -231,6 +234,10 @@ class reference_type_def;
 /// Convenience typedef for a shared pointer on a @ref reference_type_def
 typedef shared_ptr<reference_type_def> reference_type_def_sptr;
 
+class ptr_to_mbr_type;
+/// Convenience typedef for a shared pointer to a @ref ptr_to_mbr_type
+typedef shared_ptr<ptr_to_mbr_type> ptr_to_mbr_type_sptr;
+
 class array_type_def;
 
 /// Convenience typedef for a shared pointer on a @ref array_type_def
@@ -251,10 +258,6 @@ typedef shared_ptr<var_decl> var_decl_sptr;
 /// Convenience typedef for a weak pointer on a @ref var_decl
 typedef weak_ptr<var_decl> var_decl_wptr;
 
-typedef unordered_map<interned_string,
-		      var_decl*,
-		      hash_interned_string> istring_var_decl_ptr_map_type;
-
 class scope_decl;
 
 /// Convenience typedef for a shared pointer on a @ref scope_decl.
@@ -264,10 +267,6 @@ class function_decl;
 
 /// Convenience typedef for a shared pointer on a @ref function_decl
 typedef shared_ptr<function_decl> function_decl_sptr;
-
-typedef unordered_map<interned_string,
-		      function_decl*,
-		      hash_interned_string> istring_function_decl_ptr_map_type;
 
 class method_decl;
 
@@ -359,13 +358,13 @@ const global_scope*
 get_global_scope(const decl_base_sptr);
 
 translation_unit*
-get_translation_unit(const decl_base&);
+get_translation_unit(const type_or_decl_base&);
 
 translation_unit*
-get_translation_unit(const decl_base*);
+get_translation_unit(const type_or_decl_base*);
 
 translation_unit*
-get_translation_unit(const decl_base_sptr);
+get_translation_unit(const type_or_decl_base_sptr&);
 
 bool
 is_global_scope(const scope_decl&);
@@ -436,6 +435,9 @@ is_anonymous_type(const type_base*);
 bool
 is_anonymous_type(const type_base_sptr&);
 
+bool
+is_npaf_type(const type_base_sptr&);
+
 const type_decl*
 is_type_decl(const type_or_decl_base*);
 
@@ -448,6 +450,12 @@ is_integral_type(const type_or_decl_base*);
 type_decl_sptr
 is_integral_type(const type_or_decl_base_sptr&);
 
+type_decl*
+is_real_type(const type_or_decl_base*);
+
+type_decl_sptr
+is_real_type(const type_or_decl_base_sptr&);
+
 typedef_decl_sptr
 is_typedef(const type_or_decl_base_sptr);
 
@@ -459,6 +467,9 @@ is_typedef(const type_base*);
 
 typedef_decl*
 is_typedef(type_base*);
+
+const enum_type_decl*
+is_compatible_with_enum_type(const type_base*);
 
 enum_type_decl_sptr
 is_compatible_with_enum_type(const type_base_sptr&);
@@ -489,6 +500,15 @@ has_flexible_array_data_member(const class_decl*);
 
 var_decl_sptr
 has_flexible_array_data_member(const class_decl_sptr&);
+
+var_decl_sptr
+has_fake_flexible_array_data_member(const class_decl&);
+
+var_decl_sptr
+has_fake_flexible_array_data_member(const class_decl*);
+
+var_decl_sptr
+has_fake_flexible_array_data_member(const class_decl_sptr&);
 
 bool
 is_declaration_only_class_or_union_type(const type_base *t,
@@ -521,32 +541,61 @@ is_union_type(const type_or_decl_base*);
 union_decl_sptr
 is_union_type(const type_or_decl_base_sptr&);
 
+const class_decl*
+is_compatible_with_class_type(const type_base*);
+
 class_decl_sptr
 is_compatible_with_class_type(const type_base_sptr&);
 
 class_decl_sptr
 is_compatible_with_class_type(const decl_base_sptr&);
 
-pointer_type_def*
-is_pointer_type(type_or_decl_base*);
-
 const pointer_type_def*
-is_pointer_type(const type_or_decl_base*);
+is_pointer_type(const type_or_decl_base*,
+		bool look_through_qualifiers=false);
 
 pointer_type_def_sptr
-is_pointer_type(const type_or_decl_base_sptr&);
+is_pointer_type(const type_or_decl_base_sptr&,
+		bool look_through_qualifiers=false);
+
+pointer_type_def_sptr
+is_pointer_to_function_type(const type_base_sptr&);
+
+pointer_type_def_sptr
+is_pointer_to_array_type(const type_base_sptr&);
+
+pointer_type_def_sptr
+is_pointer_to_ptr_to_mbr_type(const type_base_sptr&);
+
+pointer_type_def_sptr
+is_pointer_to_npaf_type(const type_base_sptr&);
 
 bool
 is_typedef_ptr_or_ref_to_decl_only_class_or_union_type(const type_base* t);
 
+bool
+is_typedef_of_maybe_qualified_class_or_union_type(const type_base* t);
+
+bool
+is_typedef_of_maybe_qualified_class_or_union_type(const type_base_sptr& t);
+
 reference_type_def*
-is_reference_type(type_or_decl_base*);
+is_reference_type(type_or_decl_base*, bool look_through_qualifiers=false);
 
 const reference_type_def*
-is_reference_type(const type_or_decl_base*);
+is_reference_type(const type_or_decl_base*, bool look_through_qualifiers=false);
 
 reference_type_def_sptr
-is_reference_type(const type_or_decl_base_sptr&);
+is_reference_type(const type_or_decl_base_sptr&,
+		  bool look_through_qualifiers=false);
+
+const ptr_to_mbr_type*
+is_ptr_to_mbr_type(const type_or_decl_base*,
+		   bool look_through_qualifiers=false);
+
+ptr_to_mbr_type_sptr
+is_ptr_to_mbr_type(const type_or_decl_base_sptr&,
+		   bool look_through_qualifiers=false);
 
 const type_base*
 is_void_pointer_type(const type_base*);
@@ -565,6 +614,15 @@ is_qualified_type(const type_or_decl_base*);
 
 qualified_type_def_sptr
 is_qualified_type(const type_or_decl_base_sptr&);
+
+bool
+is_const_qualified_type(const type_base_sptr& t);
+
+bool
+is_const_qualified_type(const qualified_type_def_sptr&);
+
+type_base_sptr
+peel_const_qualified_type(const qualified_type_def_sptr&);
 
 function_type_sptr
 is_function_type(const type_or_decl_base_sptr&);
@@ -607,6 +665,12 @@ look_through_decl_only(decl_base*);
 
 decl_base_sptr
 look_through_decl_only(const decl_base_sptr&);
+
+type_base*
+look_through_decl_only_type(type_base*);
+
+type_base_sptr
+look_through_decl_only_type(const type_base_sptr&);
 
 var_decl*
 is_var_decl(const type_or_decl_base*);
@@ -655,8 +719,8 @@ is_member_decl(const decl_base*);
 bool
 is_member_decl(const decl_base&);
 
-scope_decl*
-is_scope_decl(decl_base*);
+const scope_decl*
+is_scope_decl(const decl_base*);
 
 scope_decl_sptr
 is_scope_decl(const decl_base_sptr&);
@@ -725,6 +789,12 @@ var_decl_sptr
 get_last_data_member(const class_or_union_sptr&);
 
 bool
+collect_non_anonymous_data_members(const class_or_union* cou, string_decl_base_sptr_map& dms);
+
+bool
+collect_non_anonymous_data_members(const class_or_union_sptr &cou, string_decl_base_sptr_map& dms);
+
+bool
 is_anonymous_data_member(const decl_base&);
 
 const var_decl*
@@ -790,10 +860,12 @@ const class_or_union_sptr
 data_member_has_anonymous_type(const var_decl_sptr& d);
 
 array_type_def*
-is_array_type(const type_or_decl_base* decl);
+is_array_type(const type_or_decl_base* decl,
+	      bool look_through_qualifiers = false);
 
 array_type_def_sptr
-is_array_type(const type_or_decl_base_sptr& decl);
+is_array_type(const type_or_decl_base_sptr& decl,
+	      bool look_through_qualifiers = false);
 
 array_type_def_sptr
 is_array_of_qualified_element(const type_base_sptr&);
@@ -895,14 +967,6 @@ get_member_function_vtable_offset(const function_decl&);
 ssize_t
 get_member_function_vtable_offset(const function_decl_sptr&);
 
-void
-set_member_function_vtable_offset(const function_decl& f,
-				  ssize_t s);
-
-void
-set_member_function_vtable_offset(const function_decl_sptr &f,
-				  ssize_t s);
-
 bool
 get_member_function_is_virtual(const function_decl&);
 
@@ -913,10 +977,11 @@ bool
 get_member_function_is_virtual(const function_decl*);
 
 void
-set_member_function_is_virtual(function_decl&, bool);
-
+set_member_function_virtuality(function_decl&, bool, ssize_t);
 void
-set_member_function_is_virtual(const function_decl_sptr&, bool);
+set_member_function_virtuality(function_decl*, bool, ssize_t);
+void
+set_member_function_virtuality(const function_decl_sptr&, bool, ssize_t);
 
 type_base_sptr
 strip_typedef(const type_base_sptr);
@@ -1052,7 +1117,7 @@ interned_string
 get_function_type_name(const function_type&, bool internal = false);
 
 interned_string
-get_function_id_or_pretty_representation(function_decl *fn);
+get_function_id_or_pretty_representation(const function_decl *fn);
 
 interned_string
 get_method_type_name(const method_type_sptr&, bool internal = false);
@@ -1191,6 +1256,10 @@ get_type_declaration(type_base*);
 
 decl_base_sptr
 get_type_declaration(const type_base_sptr);
+
+bool
+classes_have_same_layout(const type_base_sptr& f,
+			 const type_base_sptr& s);
 
 bool
 types_are_compatible(const type_base_sptr,
@@ -1517,7 +1586,7 @@ type_base_sptr
 type_or_void(const type_base_sptr, const environment&);
 
 type_base_sptr
-canonicalize(type_base_sptr);
+canonicalize(type_base_sptr type, bool do_log= false, bool show_stats= false);
 
 type_base*
 type_has_non_canonicalized_subtype(type_base_sptr t);
@@ -1588,6 +1657,21 @@ find_first_data_member_matching_regexp(const class_or_union& t,
 var_decl_sptr
 find_last_data_member_matching_regexp(const class_or_union& t,
 				      const regex::regex_t_sptr& regex);
+
+bool
+decl_name_changed(const type_or_decl_base* a1, const type_or_decl_base *a2);
+
+bool
+decl_name_changed(const type_or_decl_base_sptr& d1,
+		  const type_or_decl_base_sptr& d2);
+
+bool
+integral_type_has_harmless_name_change(const decl_base_sptr& f,
+				       const decl_base_sptr& s);
+
+bool
+integral_type_has_harmless_name_change(const type_base_sptr& f,
+				       const type_base_sptr& s);
 } // end namespace ir
 
 using namespace abigail::ir;

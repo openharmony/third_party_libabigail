@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 /// @file
 
 #include <functional>
+#include <cstring>
+#include <xxhash.h>
 #include "abg-internal.h"
+#include "abg-ir-priv.h"
+
 // <headers defining libabigail's API go under here>
 ABG_BEGIN_EXPORT_DECLARATIONS
 
@@ -22,27 +26,200 @@ namespace abigail
 namespace hashing
 {
 
-// Mix 3 32 bits values reversibly.  Borrowed from hashtab.c in gcc tree.
-#define abigail_hash_mix(a, b, c) \
-{ \
-  a -= b; a -= c; a ^= (c>>13); \
-  b -= c; b -= a; b ^= (a<< 8); \
-  c -= a; c -= b; c ^= ((b&0xffffffff)>>13); \
-  a -= b; a -= c; a ^= ((c&0xffffffff)>>12); \
-  b -= c; b -= a; b = (b ^ (a<<16)) & 0xffffffff; \
-  c -= a; c -= b; c = (c ^ (b>> 5)) & 0xffffffff; \
-  a -= b; a -= c; a = (a ^ (c>> 3)) & 0xffffffff; \
-  b -= c; b -= a; b = (b ^ (a<<10)) & 0xffffffff; \
-  c -= a; c -= b; c = (c ^ (b>>15)) & 0xffffffff; \
+/// Read a character representing an hexadecimal digit (from '0' to
+/// 'f' or to 'F'), and return an integer representing the value of
+/// that digit.  For instance, for the character '0', the function
+/// returns the integer 0.  For the character 'A' (or 'a'), the
+/// function returns the integer 10; for the character 'b' (or 'B')
+/// the function returns the integer 11.
+///
+/// @param c the input character to transform into an integer.
+///
+/// @param integer output value.  This is set by the function to the
+/// integer representing the character @p c.
+///
+/// @return true iff @p c is a character representing an hexadecimal
+/// number which value could be set to @p integer.
+static bool
+char_to_int(char c, unsigned char& integer)
+{
+  if (c >= '0' && c <= '9')
+    integer = c - '0';
+  else if (c >= 'a' && c <= 'z')
+    integer = 10 + c - 'a';
+  else if (c >= 'A' && c <= 'Z')
+    integer = 10 + c  - 'A';
+  else
+    return false;
+
+  return true;
 }
 
-size_t
-combine_hashes(size_t val1, size_t val2)
+/// Given an integer value representing an hexadecimal digit (from 0
+/// to F), emit the character value which prints that digit.  For the
+/// integer 11, the function returns the character 'b'.  For the
+/// integer 10, it returns the character 'a'.
+///
+/// @param integer the input hexadecimal integer digit to take into
+/// account.
+///
+/// @param c the output character representing the digit @p integer.
+///
+/// @return true iff @p integer is a valid hexadecimal digit that
+/// could could be represented by a character @p c.
+static bool
+int_to_char(unsigned char integer, unsigned char& c)
 {
-  /* the golden ratio; an arbitrary value.  */
-  size_t a = 0x9e3779b9;
-  abigail_hash_mix(a, val1, val2);
-  return val2;
+  if (integer <= 9)
+    c = integer + '0';
+  else if (integer >= 0xA && integer <= 0xF)
+    c = 'a' + (integer - 0xA);
+  else
+    return false;
+
+  return true;
+}
+
+/// Read a string of characters representing a string of hexadecimal
+/// digits which itself represents a hash value that was computed
+/// using the XH64 algorithm from the xxhash project.
+///
+/// That string of digit (characters) is laid out in the "canonical
+/// form" requested by the xxhash project.  That form is basically the
+/// hash number, represented in big endian.
+///
+/// @param input the input string of characters to consider.
+///
+/// @param hash the resulting hash value de-serialized from @p input.
+/// This is set by the function iff it returns true.
+///
+/// @return true iff the function could de-serialize the characters
+/// string @p input into the hash value @p hash.
+bool
+deserialize_hash(const string& input, uint64_t& hash)
+{
+  unsigned char byte = 0;
+  string xxh64_canonical_form;
+  for (size_t i = 0; i + 1 < input.size(); i += 2)
+    {
+      unsigned char first_nibble = 0, second_nibble = 0;
+      ABG_ASSERT(char_to_int(input[i], first_nibble));
+      ABG_ASSERT(char_to_int(input[i+1], second_nibble));
+      byte = (first_nibble << 4) | second_nibble;
+      xxh64_canonical_form.push_back(byte);
+    }
+
+  XXH64_canonical_t canonical_hash = {};
+  size_t size = sizeof(canonical_hash.digest);
+  memcpy(canonical_hash.digest,
+	 xxh64_canonical_form.c_str(),
+	 size);
+  hash = XXH64_hashFromCanonical(&canonical_hash);
+
+  return true;
+}
+
+/// Serialiaze a hash value computed using the XH64 algorithm (from the
+/// xxhash project) into a string of characters representing the
+/// digits of the hash in the canonical form requested by the xxhash
+/// project.  That canonical form is basically a big endian
+/// representation of the hexadecimal hash number.
+///
+/// @param hash the hash number to serialize.
+///
+/// @param output the resulting string of characters representing the
+/// hash value @p hash in its serialized form.  This is set iff the
+/// function return true.
+///
+/// @return true iff the function could serialize the hash value @p
+/// hash into a serialized form that is set into the output parameter
+/// @p output.
+bool
+serialize_hash(uint64_t hash, string& output)
+{
+  XXH64_canonical_t canonical_output = {};
+  XXH64_canonicalFromHash(&canonical_output, hash);
+  for (unsigned i = 0; i < sizeof(canonical_output.digest); ++i)
+    {
+      unsigned char first_nibble = 0, second_nibble = 0;
+      unsigned char byte = canonical_output.digest[i];
+      first_nibble = (0xf0 & byte) >> 4;
+      second_nibble = 0xf & byte;
+      unsigned char c = 0;
+      int_to_char(first_nibble, c);
+      output.push_back(c);
+      int_to_char(second_nibble, c);
+      output.push_back(c);
+    }
+
+  return true;
+}
+
+// </serialized_hash_type definitions>
+
+/// Combine two hash values to produce a third hash value.
+///
+/// If one of the hash values is empty then the other one is returned,
+/// intact.  If the two hash values are empty then an empty hash value
+/// is returned as a result.
+///
+/// @param val1 the first hash value.
+///
+/// @param val2 the second hash value.
+///
+/// @return a combination of the hash values @p val1 and @p val2.
+hash_t
+combine_hashes(hash_t val1, hash_t val2)
+{
+  hash_t result;
+  if (val1.has_value() && val2.has_value())
+    result = hash(*val2, *val1);
+  else if (val1.has_value())
+    result = *val1;
+  else if (val2.has_value())
+    result = *val2;
+
+  return result;
+}
+
+/// Hash an integer value and combine it with a hash previously
+/// computed.
+///
+/// @param v the value to hash.
+///
+/// @param seed a previous hash value that is to be combined with the
+/// result of hashing @p v.  This is can be zero if no previous hash
+/// value is available.
+///
+/// @return the resulting hash value.
+hash_t
+hash(uint64_t v, uint64_t seed)
+{
+  // THe XXH hashing functions take an array of bytes representing the
+  // value to hash.  So let's represent 'v' as a big endian input and
+  // pass it to XXH3_64bits_withSeed.
+  unsigned char data[sizeof(uint64_t)] = {};
+  uint64_t t = v;
+  size_t data_size = sizeof(data);
+  for (unsigned i = 0; i < data_size; ++i)
+    {
+      data[data_size - i - 1] = t & 0xff;
+      t = t >> 8;
+    }
+  hash_t h = XXH3_64bits_withSeed(data, data_size, seed);
+  return h;
+}
+
+/// Hash a string.
+///
+/// @param str the string to hash.
+///
+/// @return the resulting hash value.
+hash_t
+hash(const std::string& str)
+{
+  hash_t h = XXH3_64bits(str.c_str(), str.size());
+  return h;
 }
 
 /// Compute a stable string hash.
@@ -75,6 +252,89 @@ fnv_hash(const std::string& str)
   return hash;
 }
 
+/// Get the hashing state of an IR node.
+///
+/// @param tod the type or decl IR node to get the hashing state for.
+///
+/// @return the hashing state of @p tod.
+hashing::hashing_state
+get_hashing_state(const type_or_decl_base& tod)
+{
+  const type_or_decl_base* todp = &tod;
+  if (decl_base *d = is_decl(todp))
+    {
+      d = look_through_decl_only(d);
+      return d->type_or_decl_base::priv_->get_hashing_state();
+    }
+  else
+    return tod.priv_->get_hashing_state();
+}
+
+/// Set the hashing state of an IR node.
+///
+/// @param tod the type or decl IR node to set the hashing state for.
+///
+///
+/// @param s the new hashing state to set.
+void
+set_hashing_state(const type_or_decl_base& tod,
+		  hashing::hashing_state s)
+{
+  const type_or_decl_base* todp = &tod;
+  if (decl_base* d = is_decl(todp))
+    {
+      d = look_through_decl_only(d);
+      d->type_or_decl_base::priv_->set_hashing_state(s);
+    }
+  else
+    tod.priv_->set_hashing_state(s);
+}
+
+/// Test if an artifact is recursive.
+///
+/// For now, a recursive artifact is a type that contains a sub-type
+/// that refers to itself.
+///
+/// @param t the artifact to consider.
+///
+/// @return truf iff @p t is recursive.
+bool
+is_recursive_artefact(const type_or_decl_base& t)
+{
+  bool result = false;
+  const type_or_decl_base* tp = &t;
+  if (decl_base* d = is_decl(tp))
+    {
+      d = look_through_decl_only(d);
+      result = d->type_or_decl_base::priv_->is_recursive_artefact();
+    }
+  else
+    result = t.type_or_decl_base::priv_->is_recursive_artefact();
+
+  return result;
+}
+
+/// Set the property that flags an artifact as recursive.
+///
+/// For now, a recursive artifact is a type that contains a sub-type
+/// that refers to itself.
+///
+/// @param t the artifact to consider.
+///
+/// @param f the new value of the flag.  If true, then the artefact @p
+/// t is considered recursive.
+void
+is_recursive_artefact(const type_or_decl_base& t, bool f)
+{
+  const type_or_decl_base* tp = &t;
+  if (decl_base* d = is_decl(tp))
+    {
+      d = look_through_decl_only(d);
+      d->type_or_decl_base::priv_->is_recursive_artefact(f);
+    }
+  else
+    t.priv_->is_recursive_artefact(f);
+}
 }//end namespace hashing
 
 using std::list;
@@ -86,21 +346,52 @@ using namespace abigail::ir;
 
 // Definitions.
 
+#define MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(type)		\
+  do									\
+    {									\
+      if (hashing::get_hashing_state(type) == hashing::HASHING_STARTED_STATE \
+	  || hashing::get_hashing_state(type) == hashing::HASHING_SUBTYPE_STATE) \
+	{								\
+	  hashing::set_hashing_state(t, hashing::HASHING_CYCLED_TYPE_STATE); \
+	  hashing::is_recursive_artefact(type, true);			\
+	  return hash_t();						\
+	}								\
+      else if (hashing::get_hashing_state(type) == hashing::HASHING_CYCLED_TYPE_STATE) \
+	return hash_t();						\
+      else if (hashing::get_hashing_state(type) == hashing::HASHING_FINISHED_STATE) \
+	return peek_hash_value(type);					\
+    }									\
+  while(false)
+
+#define MAYBE_FLAG_TYPE_AS_RECURSIVE(type, underlying, h)		\
+  do									\
+    {									\
+      if (!h || hashing::is_recursive_artefact(*underlying))		\
+	hashing::is_recursive_artefact(type, true);			\
+    }									\
+  while(false)
+
+#define MAYBE_RETURN_EARLY_IF_HASH_EXISTS(type)			\
+  do									\
+    {									\
+      if (hashing::get_hashing_state(type) == hashing::HASHING_FINISHED_STATE) \
+	return peek_hash_value(type);					\
+    }									\
+  while(false)
+
+/// The hashing functor for using instances of @ref type_or_decl_base
+/// as values in a hash map or set.
+
 /// Hash function for an instance of @ref type_base.
 ///
 /// @param t the type to hash.
 ///
 /// @return the type value.
-size_t
+hash_t
 type_base::hash::operator()(const type_base& t) const
 {
-  std::hash<size_t> size_t_hash;
-  std::hash<string> str_hash;
-
-  size_t v = str_hash(typeid(t).name());
-  v = hashing::combine_hashes(v, size_t_hash(t.get_size_in_bits()));
-  v = hashing::combine_hashes(v, size_t_hash(t.get_alignment_in_bits()));
-
+  hash_t v = hashing::hash(t.get_size_in_bits());
+  v = hashing::combine_hashes(v, hashing::hash(t.get_alignment_in_bits()));
   return v;
 }
 
@@ -109,7 +400,7 @@ type_base::hash::operator()(const type_base& t) const
 /// @param t the type to hash.
 ///
 /// @return the type value.
-size_t
+hash_t
 type_base::hash::operator()(const type_base* t) const
 {return operator()(*t);}
 
@@ -117,400 +408,505 @@ type_base::hash::operator()(const type_base* t) const
 ///
 /// @param t the type to hash.
 ///
-/// @return the type value.
-size_t
+/// @return the hash value.
+hash_t
 type_base::hash::operator()(const type_base_sptr t) const
 {return operator()(*t);}
 
-struct decl_base::hash
-{
-  size_t
-  operator()(const decl_base& d) const
-  {
-    std::hash<string> str_hash;
-
-    size_t v = str_hash(typeid(d).name());
-    if (!d.get_linkage_name().empty())
-      v = hashing::combine_hashes(v, str_hash(d.get_linkage_name()));
-    if (!d.get_name().empty())
-      v = hashing::combine_hashes(v, str_hash(d.get_qualified_name()));
-    if (is_member_decl(d))
-      {
-	v = hashing::combine_hashes(v, get_member_access_specifier(d));
-	v = hashing::combine_hashes(v, get_member_is_static(d));
-      }
-    return v;
-  }
-}; // end struct decl_base::hash
-
-struct type_decl::hash
-{
-  size_t
-  operator()(const type_decl& t) const
-  {
-    decl_base::hash decl_hash;
-    type_base::hash type_hash;
-    std::hash<string> str_hash;
-
-    size_t v = str_hash(typeid(t).name());
-    v = hashing::combine_hashes(v, decl_hash(t));
-    v = hashing::combine_hashes(v, type_hash(t));
-
-    return v;
-  }
-};
-
-/// Hashing operator for the @ref scope_decl type.
+/// Hash function for an instance of @ref decl_base.
 ///
-/// @param d the scope_decl to hash.
+/// @param d the decl to hash.
 ///
 /// @return the hash value.
-size_t
-scope_decl::hash::operator()(const scope_decl& d) const
+hash_t
+decl_base::hash::operator()(const decl_base& d) const
 {
-  std::hash<string> hash_string;
-  size_t v = hash_string(typeid(d).name());
-  for (scope_decl::declarations::const_iterator i =
-	 d.get_member_decls().begin();
-       i != d.get_member_decls().end();
-       ++i)
-    v = hashing::combine_hashes(v, (*i)->get_hash());
+  hash_t v = 0;
+
+  if (!d.get_is_anonymous())
+    {
+      interned_string ln = d.get_name();
+      v = hashing::hash((string) ln);
+    }
+
+  if (is_member_decl(d))
+    {
+      v = hashing::combine_hashes(v,hashing::hash(get_member_access_specifier(d)));
+      v = hashing::combine_hashes(v, hashing::hash(get_member_is_static(d)));
+    }
 
   return v;
 }
 
-/// Hashing operator for the @ref scope_decl type.
+/// Hash function for an instance of @ref decl_base.
 ///
-/// @param d the scope_decl to hash.
+/// @param d the decl to hash.
 ///
 /// @return the hash value.
-size_t
-scope_decl::hash::operator()(const scope_decl* d) const
-{return d? operator()(*d) : 0;}
-
-struct scope_type_decl::hash
+hash_t
+decl_base::hash::operator()(const decl_base* d) const
 {
-  size_t
-  operator()(const scope_type_decl& t) const
-  {
-    decl_base::hash decl_hash;
-    type_base::hash type_hash;
-    std::hash<string> str_hash;
+  if (!d)
+    return 0;
+  return operator()(*d);
+}
 
-    size_t v = str_hash(typeid(t).name());
-    v = hashing::combine_hashes(v, decl_hash(t));
-    v = hashing::combine_hashes(v, type_hash(t));
-
-    return v;
-  }
-};
-
-struct qualified_type_def::hash
-{
-  size_t
-  operator()(const qualified_type_def& t) const
-  {
-    type_base::hash type_hash;
-    decl_base::hash decl_hash;
-    std::hash<string> str_hash;
-
-    size_t v = str_hash(typeid(t).name());
-    v = hashing::combine_hashes(v, type_hash(t));
-    v = hashing::combine_hashes(v, decl_hash(t));
-    v = hashing::combine_hashes(v, t.get_cv_quals());
-    return v;
-  }
-};
-
-struct pointer_type_def::hash
-{
-  size_t
-  operator()(const pointer_type_def& t) const
-  {
-    std::hash<string> str_hash;
-    type_base::hash type_base_hash;
-    decl_base::hash decl_hash;
-    type_base::shared_ptr_hash hash_type_ptr;
-
-    size_t v = str_hash(typeid(t).name());
-    v = hashing::combine_hashes(v, decl_hash(t));
-    v = hashing::combine_hashes(v, type_base_hash(t));
-    v = hashing::combine_hashes(v, hash_type_ptr(t.get_pointed_to_type()));
-    return v ;
-  }
-};
-
-struct reference_type_def::hash
-{
-  size_t
-  operator()(const reference_type_def& t)
-  {
-    std::hash<string> hash_str;
-    type_base::hash hash_type_base;
-    decl_base::hash hash_decl;
-    type_base::shared_ptr_hash hash_type_ptr;
-
-    size_t v = hash_str(typeid(t).name());
-    v = hashing::combine_hashes(v, hash_str(t.is_lvalue()
-					    ? "lvalue"
-					    : "rvalue"));
-    v = hashing::combine_hashes(v, hash_type_base(t));
-    v = hashing::combine_hashes(v, hash_decl(t));
-    v = hashing::combine_hashes(v, hash_type_ptr(t.get_pointed_to_type()));
-    return v;
-  }
-};
-
-struct array_type_def::subrange_type::hash
-{
-  size_t
-  operator()(const array_type_def::subrange_type& s) const
-  {
-    std::hash<int> hash_size_t;
-    size_t v = hash_size_t(hash_size_t(s.get_lower_bound()));
-    v = hashing::combine_hashes(v, hash_size_t(s.get_upper_bound()));
-    return v;
-  }
-};
-
-struct array_type_def::hash
-{
-  size_t
-  operator()(const array_type_def& t)
-  {
-    std::hash<string> hash_str;
-    type_base::hash hash_type_base;
-    decl_base::hash hash_decl;
-    type_base::shared_ptr_hash hash_type_ptr;
-    array_type_def::subrange_type::hash hash_subrange;
-
-    size_t v = hash_str(typeid(t).name());
-
-    v = hashing::combine_hashes(v, hash_type_base(t));
-    v = hashing::combine_hashes(v, hash_decl(t));
-    v = hashing::combine_hashes(v, hash_type_ptr(t.get_element_type()));
-
-    for (vector<array_type_def::subrange_sptr >::const_iterator i =
-	   t.get_subranges().begin();
-	 i != t.get_subranges().end();
-	 ++i)
-      v = hashing::combine_hashes(v, hash_subrange(**i));
-
-    return v;
-  }
-};
-
-struct enum_type_decl::hash
-{
-  size_t
-  operator()(const enum_type_decl& t) const
-  {
-    std::hash<string> str_hash;
-    decl_base::hash decl_hash;
-    type_base::shared_ptr_hash type_ptr_hash;
-    std::hash<size_t> size_t_hash;
-
-    size_t v = str_hash(typeid(t).name());
-    v = hashing::combine_hashes(v, decl_hash(t));
-    v = hashing::combine_hashes(v, type_ptr_hash(t.get_underlying_type()));
-    for (enum_type_decl::enumerators::const_iterator i =
-	   t.get_enumerators().begin();
-	 i != t.get_enumerators().end();
-	 ++i)
-      {
-	v = hashing::combine_hashes(v, str_hash(i->get_name()));
-	v = hashing::combine_hashes(v, size_t_hash(i->get_value()));
-      }
-    return v;
-  }
-};
-
-struct typedef_decl::hash
-{
-  size_t
-  operator()(const typedef_decl& t) const
-  {
-    std::hash<string> str_hash;
-    type_base::hash hash_type;
-    decl_base::hash decl_hash;
-    type_base::shared_ptr_hash type_ptr_hash;
-
-    size_t v = str_hash(typeid(t).name());
-    v = hashing::combine_hashes(v, hash_type(t));
-    v = hashing::combine_hashes(v, decl_hash(t));
-    v = hashing::combine_hashes(v, type_ptr_hash(t.get_underlying_type()));
-    return v;
-  }
- };
-
-/// Compute a hash for an instance @ref var_decl.
+/// Hashing function for a @ref type_decl IR node.
 ///
-/// Note that this function caches the hashing value the
-/// decl_base::hash_ data member of the input instance and re-uses it
-/// when it is already calculated.
+/// @param t the @ref type_decl IR node t hash.
 ///
-/// @param t the instance of @ref var_decl to compute the hash for.
-///
-/// @return the calculated hash value, or the one that was previously
-/// calculated.
-size_t
-var_decl::hash::operator()(const var_decl& t) const
+/// @return the resulting hash value.
+hash_t
+type_decl::hash::operator()(const type_decl& t) const
 {
-  std::hash<string> hash_string;
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+  decl_base::hash decl_hash;
+  type_base::hash type_hash;
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = decl_hash(t);
+  v = hashing::combine_hashes(v, type_hash(t));
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  t.set_hash_value(v);
+
+  return v;
+}
+
+/// Hashing function for a @ref type_decl IR node.
+///
+/// @param t the @ref type_decl IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+type_decl::hash::operator()(const type_decl* t) const
+{
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
+
+/// Hashing function for a @ref typedef_decl IR node.
+///
+/// @param t the @ref typedef_decl IR node to hash
+///
+/// @return the resulting hash value.
+hash_t
+typedef_decl::hash::operator()(const typedef_decl& t) const
+{
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  // The hash value of a typedef is the same as the hash value of its
+  // underlying type.
+  type_base_sptr u = look_through_decl_only_type(t.get_underlying_type());
+  hashing::hashing_state s = hashing::get_hashing_state(*u);
+  hashing::set_hashing_state(*u, hashing::HASHING_SUBTYPE_STATE);
+  hash_t v = u->hash_value();
+  hashing::set_hashing_state(*u, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, u, v);
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref typedef_decl IR node.
+///
+/// @param t the @ref typedef_decl IR node to hash
+///
+/// @return the resulting hash value.
+hash_t
+typedef_decl::hash::operator()(const typedef_decl* t) const
+{
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
+
+/// Hashing function for a @ref qualified_type_def IR node.
+///
+/// @param t the @ref qualified_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+qualified_type_def::hash::operator()(const qualified_type_def& t) const
+{
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+  type_base::hash type_hash;
+  decl_base::hash decl_hash;
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  type_base_sptr u = look_through_decl_only_type(t.get_underlying_type());
+  hashing::hashing_state s = hashing::get_hashing_state(*u);
+  hashing::set_hashing_state(*u, hashing::HASHING_SUBTYPE_STATE);
+  hash_t v = u->hash_value();
+  hashing::set_hashing_state(*u, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, u, v);
+  v = hashing::combine_hashes(v, type_hash(t));
+  v = hashing::combine_hashes(v, decl_hash(t));
+  v = hashing::combine_hashes(v, t.get_cv_quals());
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref qualified_type_def IR node.
+///
+/// @param t the @ref qualified_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+qualified_type_def::hash::operator()(const qualified_type_def* t) const
+{
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
+
+/// Hashing function for a @ref pointer_type_def IR node.
+///
+/// @param t the @ref pointer_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+pointer_type_def::hash::operator()(const pointer_type_def& t) const
+{
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+  type_base::hash type_base_hash;
+  decl_base::hash decl_hash;
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  type_base_sptr u = look_through_decl_only_type(t.get_pointed_to_type());
+  hashing::hashing_state s = hashing::get_hashing_state(*u);
+  hashing::set_hashing_state(*u, hashing::HASHING_SUBTYPE_STATE);
+  hash_t v = u->hash_value();
+  hashing::set_hashing_state(*u, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, u, v);
+  v = hashing::combine_hashes(v, type_base_hash(t));
+  v = hashing::combine_hashes(v, decl_hash(t));
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref pointer_type_def IR node.
+///
+/// @param t the @ref pointer_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+pointer_type_def::hash::operator()(const pointer_type_def* t) const
+{
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
+
+/// Hashing function for a @ref reference_type_def IR node.
+///
+/// @param t the @ref reference_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+reference_type_def::hash::operator()(const reference_type_def& t) const
+{
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+  type_base::hash hash_type_base;
   decl_base::hash hash_decl;
-  type_base::shared_ptr_hash hash_type_ptr;
-  std::hash<size_t> hash_size_t;
 
-  size_t v = hash_string(typeid(t).name());
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  type_base_sptr u = look_through_decl_only_type(t.get_pointed_to_type());
+  hashing::hashing_state s = hashing::get_hashing_state(*u);
+  hashing::set_hashing_state(*u, hashing::HASHING_SUBTYPE_STATE);
+  hash_t v = u->hash_value();
+  hashing::set_hashing_state(*u, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, u, v);
+  v = hashing::combine_hashes(v, hash_type_base(t));
   v = hashing::combine_hashes(v, hash_decl(t));
-  v = hashing::combine_hashes(v, hash_type_ptr(t.get_type()));
+  v = hashing::combine_hashes(v, hashing::hash(t.is_lvalue()));
 
-  if (is_data_member(t) && get_data_member_is_laid_out(t))
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref reference_type_def IR node.
+///
+/// @param t the @ref reference_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+reference_type_def::hash::operator()(const reference_type_def* t) const
+{
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
+
+/// Hashing function for a @ref array_type_def::subrange_type IR node.
+///
+/// @param t the @ref array_type_def::subrange_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+array_type_def::subrange_type::hash::operator()(const array_type_def::subrange_type& t) const
+{
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = hashing::hash(t.get_lower_bound());
+  v = hashing::combine_hashes(v, hashing::hash(t.get_upper_bound()));
+  v = hashing::combine_hashes(v, hashing::hash(t.get_name()));
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref array_type_def::subrange_type IR node.
+///
+/// @param t the @ref array_type_def::subrange_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+array_type_def::subrange_type::hash::operator()(const array_type_def::subrange_type* s) const
+{
+  if (!s)
+    return 0;
+  return operator()(*s);
+}
+
+/// Hashing function for a @ref array_type_def IR node.
+///
+/// @param t the @ref array_type_def IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+array_type_def::hash::operator()(const array_type_def& t) const
+{
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+  type_base::hash hash_as_type_base;
+  decl_base::hash hash_as_decl_base;
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = hash_as_type_base(t), h = 0;
+  v = hashing::combine_hashes(v, hash_as_decl_base(t));
+
+  for (vector<array_type_def::subrange_sptr >::const_iterator i =
+	 t.get_subranges().begin();
+       i != t.get_subranges().end();
+       ++i)
     {
-      v = hashing::combine_hashes(v, hash_decl(*t.get_scope()));
-      v = hashing::combine_hashes(v, hash_size_t(get_data_member_offset(t)));
+      hashing::hashing_state s = hashing::get_hashing_state(**i);
+      hashing::set_hashing_state(**i, hashing::HASHING_SUBTYPE_STATE);
+      h = (*i)->hash_value();
+      hashing::set_hashing_state(**i, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, *i, h);
+      v = hashing::combine_hashes(v, h);
     }
 
+  type_base_sptr e = t.get_element_type();
+  hashing::hashing_state s = hashing::get_hashing_state(*e);
+  hashing::set_hashing_state(*e, hashing::HASHING_SUBTYPE_STATE);
+  h = e->hash_value();
+  hashing::set_hashing_state(*e, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, e, h);
+  v = hashing::combine_hashes(v, h);
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
   return v;
 }
 
-/// Compute a hash for a pointer to @ref var_decl.
+/// Hashing function for a @ref array_type_def IR node.
 ///
-/// @param t the pointer to @ref var_decl to compute the hash for.
+/// @param t the @ref array_type_def IR node to hash.
 ///
-/// @return the calculated hash value
-size_t
-var_decl::hash::operator()(const var_decl* t) const
-{return operator()(*t);}
-
-/// Compute a hash value for an instance of @ref function_decl.
-///
-/// Note that this function caches the resulting hash in the
-/// decl_base::hash_ data member of the instance of @ref
-/// function_decl, and just returns if it is already calculated.
-///
-/// @param t the function to calculate the hash for.
-///
-/// @return the hash value.
-size_t
-function_decl::hash::operator()(const function_decl& t) const
+/// @return the resulting hash value.
+hash_t
+array_type_def::hash::operator()(const array_type_def* t) const
 {
-  std::hash<int> hash_int;
-  std::hash<size_t> hash_size_t;
-  std::hash<bool> hash_bool;
-  std::hash<string> hash_string;
-  decl_base::hash hash_decl_base;
-  type_base::shared_ptr_hash hash_type_ptr;
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
 
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_decl_base(t));
-  v = hashing::combine_hashes(v, hash_type_ptr(t.get_type()));
-  v = hashing::combine_hashes(v, hash_bool(t.is_declared_inline()));
-  v = hashing::combine_hashes(v, hash_int(t.get_binding()));
-  if (is_member_function(t))
+/// Hashing function for a @ref ptr_to_mbr_type IR node.
+///
+/// @param t the @ref ptr_to_mbr_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+ptr_to_mbr_type::hash::operator() (const ptr_to_mbr_type& t) const
+{
+  MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(t);
+
+  type_base::hash hash_as_type_base;
+  decl_base::hash hash_as_decl_base;
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = hash_as_type_base(t);
+  v = hashing::combine_hashes(v, hash_as_decl_base(t));
+  type_base_sptr e = t.get_member_type();
+  hashing::hashing_state s = hashing::get_hashing_state(*e);
+  hashing::set_hashing_state(*e, hashing::HASHING_SUBTYPE_STATE);
+  hash_t h = e->hash_value();
+  hashing::set_hashing_state(*e, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, e, h);
+  v = hashing::combine_hashes(v, h);
+
+  e = t.get_containing_type();
+  s = hashing::get_hashing_state(*e);
+  hashing::set_hashing_state(*e, hashing::HASHING_SUBTYPE_STATE);
+  h = e->hash_value();
+  hashing::set_hashing_state(*e, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, t.get_containing_type(), h);
+  v = hashing::combine_hashes(v, h);
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref ptr_to_mbr_type IR node.
+///
+/// @param t the @ref ptr_to_mbr_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+ptr_to_mbr_type::hash::operator() (const ptr_to_mbr_type* t) const
+{
+  if (!t)
+    return 0;
+  return operator()(*t);
+}
+
+/// Hashing function for a @ref ptr_to_mbr_type IR node.
+///
+/// @param t the @ref ptr_to_mbr_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+ptr_to_mbr_type::hash::operator() (const ptr_to_mbr_type_sptr& t) const
+{return operator()(t.get());}
+
+/// Hashing function for a @ref enum_type_decl IR node.
+///
+/// @param t the @ref enum_type_decl IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+enum_type_decl::hash::operator()(const enum_type_decl& t) const
+{
+  MAYBE_RETURN_EARLY_IF_HASH_EXISTS(t);
+
+    if (t.get_is_declaration_only() && t.get_definition_of_declaration())
     {
-      bool is_ctor = get_member_function_is_ctor(t),
-	is_dtor = get_member_function_is_dtor(t),
-	is_static = get_member_is_static(t),
-	is_const = get_member_function_is_const(t);
-      size_t voffset = get_member_function_vtable_offset(t);
-
-      v = hashing::combine_hashes(v, hash_bool(is_ctor));
-      v = hashing::combine_hashes(v, hash_bool(is_dtor));
-      v = hashing::combine_hashes(v, hash_bool(is_static));
-      v = hashing::combine_hashes(v, hash_bool(is_const));
-      if (!is_static && !is_ctor)
-	v = hashing::combine_hashes(v, hash_size_t(voffset));
+      enum_type_decl_sptr e = is_enum_type(t.get_definition_of_declaration());
+      hashing::hashing_state s = hashing::get_hashing_state(*e);
+      hashing::set_hashing_state(*e, hashing::HASHING_SUBTYPE_STATE);
+      hash_t v = e->hash_value();
+      hashing::set_hashing_state(*e, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, e, v);
+      return v;
     }
 
+  decl_base::hash hash_as_decl;
+  type_base::hash hash_as_type;
+
+  hashing::set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = hash_as_type(t);
+  v = hashing::combine_hashes(v, hash_as_decl(t));
+
+  type_base_sptr u = t.get_underlying_type();
+  hashing::hashing_state s = hashing::get_hashing_state(*u);
+  hashing::set_hashing_state(*u, hashing::HASHING_SUBTYPE_STATE);
+  hash_t h = u->hash_value();
+  hashing::set_hashing_state(*u, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, u, h);
+  v = hashing::combine_hashes(v, h);
+
+  for (enum_type_decl::enumerators::const_iterator i =
+	 t.get_enumerators().begin();
+       i != t.get_enumerators().end();
+       ++i)
+    {
+      v = hashing::combine_hashes(v, hashing::hash(i->get_name()));
+      v = hashing::combine_hashes(v, hashing::hash(i->get_value()));
+    }
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
   return v;
 }
 
-/// Compute a hash for a pointer to @ref function_decl.
+/// Hashing function for a @ref enum_type_decl IR node.
 ///
-/// @param t the pointer to @ref function_decl to compute the hash for.
+/// @param t the @ref enum_type_decl IR node to hash.
 ///
-/// @return the calculated hash value
-size_t
-function_decl::hash::operator()(const function_decl* t) const
-{return operator()(*t);}
-
-size_t
-function_decl::parameter::hash::operator()
-  (const function_decl::parameter& p) const
+/// @return the resulting hash value.
+hash_t
+enum_type_decl::hash::operator()(const enum_type_decl* t) const
 {
-  type_base::shared_ptr_hash hash_type_ptr;
-  std::hash<bool> hash_bool;
-  std::hash<unsigned> hash_unsigned;
-  size_t v = hash_type_ptr(p.get_type());
-  v = hashing::combine_hashes(v, hash_unsigned(p.get_index()));
-  v = hashing::combine_hashes(v, hash_bool(p.get_variadic_marker()));
-  return v;
+  if (!t)
+    return 0;
+  return operator()(*t);
 }
-
-size_t
-function_decl::parameter::hash::operator()
-  (const function_decl::parameter* p) const
-{return operator()(*p);}
-
-size_t
-function_decl::parameter::hash::operator()
-  (const function_decl::parameter_sptr p) const
-{return operator()(p.get());}
-
-/// Hashing functor for the @ref method_type type.
-struct method_type::hash
-{
-  size_t
-  operator()(const method_type& t) const
-  {
-    std::hash<string> hash_string;
-    type_base::shared_ptr_hash hash_type_ptr;
-    function_decl::parameter::hash hash_parameter;
-
-    size_t v = hash_string(typeid(t).name());
-    string class_name = t.get_class_type()->get_qualified_name();
-    v = hashing::combine_hashes(v, hash_string(class_name));
-    v = hashing::combine_hashes(v, hash_type_ptr(t.get_return_type()));
-    vector<shared_ptr<function_decl::parameter> >::const_iterator i =
-      t.get_first_non_implicit_parm();
-
-    for (; i != t.get_parameters().end(); ++i)
-      v = hashing::combine_hashes(v, hash_parameter(**i));
-
-    return v;
-  }
-
-  size_t
-  operator()(const method_type* t)
-  {return operator()(*t);}
-
-  size_t
-  operator()(const method_type_sptr t)
-  {return operator()(t.get());}
-}; // end struct method_type::hash
-
-// <struct function_type::hash stuff>
 
 /// Hashing function for @ref function_type.
 ///
 /// @param t the function type to hash.
 ///
 /// @return the resulting hash value.
-size_t
+hash_t
 function_type::hash::operator()(const function_type& t) const
 {
-  std::hash<string> hash_string;
-  type_base::shared_ptr_hash hash_type_ptr;
-  function_decl::parameter::hash hash_parameter;
+  MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(t);
 
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_type_ptr(t.get_return_type()));
-  for (vector<shared_ptr<function_decl::parameter> >::const_iterator i =
-	 t.get_first_non_implicit_parm();
-       i != t.get_parameters().end();
-       ++i)
-    v = hashing::combine_hashes(v, hash_parameter(**i));
+  type_base::hash hash_as_type_base;
+
+  set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = hash_as_type_base(t), h = 0;
+  type_base_sptr r = t.get_return_type();
+  hashing::hashing_state s = hashing::get_hashing_state(*r);
+  hashing::set_hashing_state(*r, hashing::HASHING_SUBTYPE_STATE);
+  h = r->hash_value();
+  hashing::set_hashing_state(*r, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, r, h);
+  v = hashing::combine_hashes(v, h);
+
+  for (auto parm = t.get_first_parm();
+       parm != t.get_parameters().end();
+       ++parm)
+    {
+      type_base_sptr parm_type = (*parm)->get_type();
+      hashing::hashing_state s = hashing::get_hashing_state(*parm_type);
+      hashing::set_hashing_state(*parm_type, hashing::HASHING_SUBTYPE_STATE);
+      h = parm_type->hash_value();
+      hashing::set_hashing_state(*parm_type, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, parm_type, h);
+      v = hashing::combine_hashes(v, h);
+    }
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
   return v;
 }
 
@@ -519,14 +915,11 @@ function_type::hash::operator()(const function_type& t) const
 /// @param t the pointer to @ref function_type to hash.
 ///
 /// @return the resulting hash value.
-size_t
+hash_t
 function_type::hash::operator()(const function_type* t) const
 {
-  if (const method_type* m = dynamic_cast<const method_type*>(t))
-    {
-      method_type::hash h;
-      return h(m);
-    }
+  if (!t)
+    return 0;
   return operator()(*t);
 }
 
@@ -535,67 +928,122 @@ function_type::hash::operator()(const function_type* t) const
 /// @param t the pointer to @ref function_type to hash.
 ///
 /// @return the resulting hash value.
-size_t
+hash_t
 function_type::hash::operator()(const function_type_sptr t) const
 {return operator()(t.get());}
 
-// </struct function_type::hash stuff>
+/// Hashing function for a @ref method_type IR node.
+///
+/// @param t the @ref method_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+method_type::hash::operator()(const method_type& t) const
+{
+  MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(t);
 
-size_t
+  type_base::hash hash_as_type_base;
+
+  set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  hash_t v = hash_as_type_base(t), h = 0;
+  type_base_sptr r = t.get_return_type();
+  hashing::hashing_state s = hashing::get_hashing_state(*r);
+  hashing::set_hashing_state(*r, hashing::HASHING_SUBTYPE_STATE);
+  h = r->hash_value();
+  hashing::set_hashing_state(*r, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, t.get_return_type(), h);
+  v = hashing::combine_hashes(v, h);
+
+  for (auto i = t.get_first_non_implicit_parm();
+       i != t.get_parameters().end();
+       ++i)
+    {
+      function_decl::parameter_sptr parm = *i;
+      type_base_sptr ty = parm->get_type();
+      hashing::hashing_state s = hashing::get_hashing_state(*ty);
+      hashing::set_hashing_state(*ty, hashing::HASHING_SUBTYPE_STATE);
+      h = ty->hash_value();
+      hashing::set_hashing_state(*ty, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, ty, h);
+      v = hashing::combine_hashes(v, h);
+    }
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
+  return v;
+}
+
+/// Hashing function for a @ref method_type IR node.
+///
+/// @param t the @ref method_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+method_type::hash::operator()(const method_type* t) const
+{return operator()(*t);}
+
+/// Hashing function for a @ref method_type IR node.
+///
+/// @param t the @ref method_type IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+method_type::hash::operator()(const method_type_sptr t) const
+{return operator()(t.get());}
+
+/// Hashing function for a @ref member_base IR node.
+///
+/// @param t the @ref member_base IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
 member_base::hash::operator()(const member_base& m) const
 {
-  std::hash<int> hash_int;
-  return hash_int(m.get_access_specifier());
+  return hashing::hash(m.get_access_specifier());
 }
 
-size_t
+/// Hashing function for a @ref class_decl::base_spec IR node.
+///
+/// @param t the @ref class_decl::base_spec IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
 class_decl::base_spec::hash::operator()(const base_spec& t) const
 {
-  member_base::hash hash_member;
-  type_base::shared_ptr_hash hash_type_ptr;
-  std::hash<size_t> hash_size;
-  std::hash<bool> hash_bool;
-  std::hash<string> hash_string;
+  MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(t);
 
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_member(t));
-  v = hashing::combine_hashes(v, hash_size(t.get_offset_in_bits()));
-  v = hashing::combine_hashes(v, hash_bool(t.get_is_virtual()));
-  v = hashing::combine_hashes(v, hash_type_ptr(t.get_base_class()));
+  set_hashing_state(t, hashing::HASHING_STARTED_STATE);
+
+  member_base::hash hash_member;
+
+  hash_t v = hash_member(t), h = 0;;
+  v = hashing::combine_hashes(v, hashing::hash(t.get_offset_in_bits()));
+  v = hashing::combine_hashes(v, hashing::hash(t.get_is_virtual()));
+  type_base_sptr b = t.get_base_class();
+  hashing::hashing_state s = hashing::get_hashing_state(*b);
+  hashing::set_hashing_state(*b, hashing::HASHING_SUBTYPE_STATE);
+  h = b->hash_value();
+  hashing::set_hashing_state(*b, s);
+  MAYBE_FLAG_TYPE_AS_RECURSIVE(t, t.get_base_class(), h);
+  v = hashing::combine_hashes(v, h);
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
+
   return v;
 }
 
-size_t
-member_function_template::hash::operator()
-  (const member_function_template& t) const
+/// Hashing function for a @ref class_decl::base_spec IR node.
+///
+/// @param t the @ref class_decl::base_spec IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+class_decl::base_spec::hash::operator()(const base_spec* t) const
 {
-  std::hash<bool> hash_bool;
-  function_tdecl::hash hash_function_tdecl;
-  member_base::hash hash_member;
-  std::hash<string> hash_string;
-
-  size_t v = hash_member(t);
-  string n = t.get_qualified_name();
-  v = hashing::combine_hashes(v, hash_string(n));
-  v = hashing::combine_hashes(v, hash_function_tdecl(t));
-  v = hashing::combine_hashes(v, hash_bool(t.is_constructor()));
-  v = hashing::combine_hashes(v, hash_bool(t.is_const()));
-  return v;
-}
-
-size_t
-member_class_template::hash::operator()
-  (const member_class_template& t) const
-{
-  member_base::hash hash_member;
-  class_tdecl::hash hash_class_tdecl;
-  std::hash<string> hash_string;
-
-  size_t v = hash_member(t);
-  string n = t.get_qualified_name();
-  v = hashing::combine_hashes(v, hash_string(n));
-  v = hashing::combine_hashes(v, hash_class_tdecl(t));
-  return v;
+  if (!t)
+    return 0;
+  return operator()(*t);
 }
 
 /// Compute a hash for a @ref class_or_union
@@ -603,67 +1051,44 @@ member_class_template::hash::operator()
 /// @param t the class_or_union for which to compute the hash value.
 ///
 /// @return the computed hash value.
-size_t
+hash_t
 class_or_union::hash::operator()(const class_or_union& t) const
 {
-  if (t.hashing_started()
-      || (t.get_is_declaration_only() && !t.get_definition_of_declaration()))
-    // All non-resolved decl-only types have a hash of zero.  Their hash
-    // will differ from the resolved hash, but then at least, having
-    // it be zero will give a hint that we couldn't actually compute
-    // the hash.
-    return 0;
-
   // If the type is decl-only and now has a definition, then hash its
   // definition instead.
 
-  if (t.get_is_declaration_only())
+  if (t.get_is_declaration_only() && t.get_definition_of_declaration())
     {
-      ABG_ASSERT(t.get_definition_of_declaration());
-      size_t v = operator()
-	(*is_class_or_union_type(t.get_definition_of_declaration()));
+      class_or_union_sptr cou = is_class_or_union_type(t.get_definition_of_declaration());
+      hashing::hashing_state s = hashing::get_hashing_state(*cou);
+      hashing::set_hashing_state(*cou, hashing::HASHING_SUBTYPE_STATE);
+      hash_t v = cou->hash_value();
+      hashing::set_hashing_state(*cou, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, t.get_definition_of_declaration(), v);
       return v;
     }
 
-  ABG_ASSERT(!t.get_is_declaration_only());
+  type_base::hash hash_as_type_base;
+  decl_base::hash hash_as_decl_base;
 
-  std::hash<string> hash_string;
-  scope_type_decl::hash hash_scope_type;
-  var_decl::hash hash_data_member;
-  member_function_template::hash hash_member_fn_tmpl;
-  member_class_template::hash hash_member_class_tmpl;
-
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_scope_type(t));
-
-  t.hashing_started(true);
+  hash_t v = hash_as_type_base(t);
+  v = hashing::combine_hashes(v, hash_as_decl_base(t));
 
   // Hash data members.
-  for (class_decl::data_members::const_iterator d =
-	 t.get_non_static_data_members().begin();
+  type_base_sptr ty;
+  for (auto d = t.get_non_static_data_members().begin();
        d != t.get_non_static_data_members().end();
        ++d)
-    v = hashing::combine_hashes(v, hash_data_member(**d));
-
-  // Do not hash member functions. All of them are not necessarily
-  // emitted per class, in a given TU so do not consider them when
-  // hashing a class.
-
-  // Hash member function templates
-  for (member_function_templates::const_iterator f =
-	 t.get_member_function_templates().begin();
-       f != t.get_member_function_templates().end();
-       ++f)
-    v = hashing::combine_hashes(v, hash_member_fn_tmpl(**f));
-
-  // Hash member class templates
-  for (member_class_templates::const_iterator c =
-	 t.get_member_class_templates().begin();
-       c != t.get_member_class_templates().end();
-       ++c)
-    v = hashing::combine_hashes(v, hash_member_class_tmpl(**c));
-
-  t.hashing_started(false);
+    {
+      ty = (*d)->get_type();
+      hashing::hashing_state s = hashing::get_hashing_state(*ty);
+      hashing::set_hashing_state(*ty, hashing::HASHING_SUBTYPE_STATE);
+      hash_t h = ty->hash_value();
+      hashing::set_hashing_state(*ty, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, ty, h);
+      v = hashing::combine_hashes(v, h);
+      v = hashing::combine_hashes(v, hashing::hash((*d)->get_name()));
+    }
 
   return v;
 };
@@ -673,7 +1098,7 @@ class_or_union::hash::operator()(const class_or_union& t) const
 /// @param t the class_or_union for which to compute the hash value.
 ///
 /// @return the computed hash value.
-size_t
+hash_t
 class_or_union::hash::operator()(const class_or_union *t) const
 {return t ? operator()(*t) : 0;}
 
@@ -682,51 +1107,80 @@ class_or_union::hash::operator()(const class_or_union *t) const
 /// @param t the class_decl for which to compute the hash value.
 ///
 /// @return the computed hash value.
-size_t
+hash_t
 class_decl::hash::operator()(const class_decl& t) const
 {
-  if (t.hashing_started()
-      || (t.get_is_declaration_only() && !t.get_definition_of_declaration()))
-    // All non-resolved decl-only types have a hash of zero.  Their hash
-    // will differ from the resolved hash, but then at least, having
-    // it be zero will give a hint that we couldn't actually compute
-    // the hash.
-    return 0;
-
+  MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(t);
 
   // If the type is decl-only and now has a definition, then hash its
   // definition instead.
 
-  if (t.get_is_declaration_only())
+  if (t.get_is_declaration_only() && t.get_definition_of_declaration())
     {
-      ABG_ASSERT(t.get_definition_of_declaration());
-      size_t v = operator()(*is_class_type(t.get_definition_of_declaration()));
+      class_decl_sptr c = is_class_type(t.get_definition_of_declaration());
+      hashing::hashing_state s = hashing::get_hashing_state(*c);
+      hashing::set_hashing_state(*c, hashing::HASHING_SUBTYPE_STATE);
+      hash_t v = c->hash_value();
+      hashing::set_hashing_state(*c, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, c, v);
       return v;
     }
 
-  ABG_ASSERT(!t.get_is_declaration_only());
+  set_hashing_state(t, hashing::HASHING_STARTED_STATE);
 
-  std::hash<string> hash_string;
-  class_decl::base_spec::hash hash_base;
-  class_or_union::hash hash_class_or_union;
+  class_or_union::hash hash_as_class_or_union;
 
-  size_t v = hash_string(typeid(t).name());
-
-  t.hashing_started(true);
+  hash_t v = hash_as_class_or_union(t);
 
   // Hash bases.
-  for (class_decl::base_specs::const_iterator b =
-	 t.get_base_specifiers().begin();
+  for (auto b = t.get_base_specifiers().begin();
        b != t.get_base_specifiers().end();
        ++b)
     {
-      class_decl_sptr cl = (*b)->get_base_class();
-      v = hashing::combine_hashes(v, hash_base(**b));
+      hashing::hashing_state s = hashing::get_hashing_state(**b);
+      hashing::set_hashing_state(**b, hashing::HASHING_SUBTYPE_STATE);
+      hash_t h = (*b)->hash_value();
+      hashing::set_hashing_state(**b, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, *b, h);
+      v = hashing::combine_hashes(v, h);
     }
 
-  v = hashing::combine_hashes(v, hash_class_or_union(t));
+#if 0
+  // Do not hash (virtual) member functions because in C++ at least,
+  // due to the function cloning used to implement destructors (and
+  // maybe other functions in the future) comparing two sets of
+  // virtual destructors is a bit more involved than what we could
+  // naively do with by just hashing the virtual member functions.
+  // You can look at the overload of the equals function for
+  // class_decl, in abg-ir.cc to see the dance involved in comparing
+  // virtual member functions.  Maybe in the future we can come up
+  // with a clever way to hash these.  For now, let's rely on
+  // structural comparison to tell the virtual member functions part
+  // of classes appart.
 
-  t.hashing_started(false);
+  // If we were to hash virtual member functions naively, please find
+  // below what it would look like.  Note that it doesn't work in
+  // practise as it creates spurious self-comparison errors.  You
+  // might want to test it on this command and see for yourself:
+  //
+  //       fedabipkgdiff --self-compare --from fc37 gcc-gnat
+
+  // Hash virtual member functions.
+
+  // TODO: hash the linkage names of the virtual member functions too.
+  const_cast<class_decl&>(t).sort_virtual_mem_fns();
+  for (const auto& method : t.get_virtual_mem_fns())
+    {
+      ssize_t voffset = get_member_function_vtable_offset(method);
+      v = hashing::combine_hashes(v, hashing::hash(voffset));
+      method_type_sptr method_type = method->get_type();
+      hash_t h = do_hash_value(method_type);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, method_type, h);
+      v = hashing::combine_hashes(v, h);
+    }
+#endif
+
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
 
   return v;
 }
@@ -736,303 +1190,55 @@ class_decl::hash::operator()(const class_decl& t) const
 /// @param t the class_decl for which to compute the hash value.
 ///
 /// @return the computed hash value.
-size_t
+hash_t
 class_decl::hash::operator()(const class_decl* t) const
 {return t ? operator()(*t) : 0;}
 
-struct template_parameter::hash
+/// Hashing function for a @ref union_decl IR node.
+///
+/// @param t the @ref union_decl IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+union_decl::hash::operator()(const union_decl& t) const
 {
-  size_t
-  operator()(const template_parameter& t) const
-  {
-    // Let's avoid infinite recursion triggered from the fact that
-    // hashing a template parameter triggers hashing the enclosed
-    // template decl, which in turn triggers the hashing of its
-    // template parameters; so the initial template parameter that
-    // triggered the hashing could be hashed again ...
-    if (t.get_hashing_has_started())
-      return 0;
+  MAYBE_RETURN_EARLY_FROM_HASHING_TO_AVOID_CYCLES(t);
 
-    t.set_hashing_has_started(true);
+  // If the type is decl-only and now has a definition, then hash its
+  // definition instead.
 
-    std::hash<unsigned> hash_unsigned;
-    std::hash<std::string> hash_string;
-    template_decl::hash hash_template_decl;
+  if (t.get_is_declaration_only() && t.get_definition_of_declaration())
+    {
+      union_decl_sptr u = is_union_type(t.get_definition_of_declaration());
+      hashing::hashing_state s = hashing::get_hashing_state(*u);
+      hashing::set_hashing_state(*u, hashing::HASHING_SUBTYPE_STATE);
+      hash_t v = u->hash_value();
+      hashing::set_hashing_state(*u, s);
+      MAYBE_FLAG_TYPE_AS_RECURSIVE(t, u, v);
+      return v;
+    }
 
-    size_t v = hash_string(typeid(t).name());
-    v = hashing::combine_hashes(v, hash_unsigned(t.get_index()));
-    v = hashing::combine_hashes(v, hash_template_decl
-				(*t.get_enclosing_template_decl()));
+  set_hashing_state(t, hashing::HASHING_STARTED_STATE);
 
-    t.set_hashing_has_started(false);
+  class_or_union::hash hash_as_class_or_union;
 
-    return v;
-  }
-};
+  hash_t v = hash_as_class_or_union(t);
 
-struct template_parameter::dynamic_hash
-{
-  size_t
-  operator()(const template_parameter* t) const;
-};
-
-struct template_parameter::shared_ptr_hash
-{
-  size_t
-  operator()(const shared_ptr<template_parameter> t) const
-  {return template_parameter::dynamic_hash()(t.get());}
-};
-
-size_t
-template_decl::hash::operator()(const template_decl& t) const
-{
-  std::hash<string> hash_string;
-  template_parameter::shared_ptr_hash hash_template_parameter;
-
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_string(t.get_qualified_name()));
-
-  for (list<template_parameter_sptr>::const_iterator p =
-	 t.get_template_parameters().begin();
-       p != t.get_template_parameters().end();
-       ++p)
-    if (!(*p)->get_hashing_has_started())
-      v = hashing::combine_hashes(v, hash_template_parameter(*p));
+  hashing::set_hashing_state(t, hashing::HASHING_NOT_DONE_STATE);
 
   return v;
 }
 
-struct type_tparameter::hash
+/// Hashing function for a @ref union_decl IR node.
+///
+/// @param t the @ref union_decl IR node to hash.
+///
+/// @return the resulting hash value.
+hash_t
+union_decl::hash::operator()(const union_decl*t) const
 {
-  size_t
-  operator()(const type_tparameter& t) const
-  {
-    std::hash<string> hash_string;
-    template_parameter::hash hash_template_parameter;
-    type_decl::hash hash_type;
-
-    size_t v = hash_string(typeid(t).name());
-    v = hashing::combine_hashes(v, hash_template_parameter(t));
-    v = hashing::combine_hashes(v, hash_type(t));
-
-    return v;
-  }
-};
-
-/// Compute a hash value for a @ref non_type_tparameter
-///
-/// @param t the non_type_tparameter for which to compute the value.
-///
-/// @return the computed hash value.
-size_t
-non_type_tparameter::hash::operator()(const non_type_tparameter& t) const
-{
-  template_parameter::hash hash_template_parameter;
-  std::hash<string> hash_string;
-  type_base::shared_ptr_hash hash_type;
-
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_template_parameter(t));
-  v = hashing::combine_hashes(v, hash_string(t.get_name()));
-  v = hashing::combine_hashes(v, hash_type(t.get_type()));
-
-  return v;
-}
-
-/// Compute a hash value for a @ref non_type_tparameter
-///
-/// @param t the non_type_tparameter to compute the hash value for.
-///
-/// @return the computed hash value.
-size_t
-non_type_tparameter::hash::operator()(const non_type_tparameter* t) const
-{return t ? operator()(*t) : 0;}
-
-struct template_tparameter::hash
-{
-  size_t
-  operator()(const template_tparameter& t) const
-  {
-    std::hash<string> hash_string;
-    type_tparameter::hash hash_template_type_parm;
-    template_decl::hash hash_template_decl;
-
-    size_t v = hash_string(typeid(t).name());
-    v = hashing::combine_hashes(v, hash_template_type_parm(t));
-    v = hashing::combine_hashes(v, hash_template_decl(t));
-
-    return v;
-  }
-};
-
-size_t
-template_parameter::dynamic_hash::
-operator()(const template_parameter* t) const
-{
-  if (const template_tparameter* p =
-      dynamic_cast<const template_tparameter*>(t))
-    return template_tparameter::hash()(*p);
-  else if (const type_tparameter* p =
-	   dynamic_cast<const type_tparameter*>(t))
-    return type_tparameter::hash()(*p);
-  if (const non_type_tparameter* p =
-      dynamic_cast<const non_type_tparameter*>(t))
-    return non_type_tparameter::hash()(*p);
-
-  // Poor man's fallback.
-  return template_parameter::hash()(*t);
-}
-
-/// Compute a hash value for a @ref type_composition type.
-///
-/// @param t the type_composition to compute the hash value for.
-///
-/// @return the computed hash value.
-size_t
-type_composition::hash::operator()(const type_composition& t) const
-{
-  std::hash<string> hash_string;
-  type_base::dynamic_hash hash_type;
-
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_type(t.get_composed_type().get()));
-  return v;
-}
-
-/// Compute a hash value for a @ref type_composition type.
-///
-/// @param t the type_composition to compute the hash value for.
-///
-/// @return the computed hash value.
-size_t
-type_composition::hash::operator()(const type_composition* t) const
-{return t ? operator()(*t): 0;}
-
-size_t
-function_tdecl::hash::
-operator()(const function_tdecl& t) const
-{
-  std::hash<string> hash_string;
-  decl_base::hash hash_decl_base;
-  template_decl::hash hash_template_decl;
-  function_decl::hash hash_function_decl;
-
-  size_t v = hash_string(typeid(t).name());
-
-  v = hashing::combine_hashes(v, hash_decl_base(t));
-  v = hashing::combine_hashes(v, hash_template_decl(t));
-  if (t.get_pattern())
-    v = hashing::combine_hashes(v, hash_function_decl(*t.get_pattern()));
-
-  return v;
-}
-
-size_t
-function_tdecl::shared_ptr_hash::
-operator()(const shared_ptr<function_tdecl> f) const
-{
-  function_tdecl::hash hash_fn_tmpl_decl;
-  if (f)
-    return hash_fn_tmpl_decl(*f);
-  return 0;
-}
-
-size_t
-class_tdecl::hash::
-operator()(const class_tdecl& t) const
-{
-  std::hash<string> hash_string;
-  decl_base::hash hash_decl_base;
-  template_decl::hash hash_template_decl;
-  class_decl::hash hash_class_decl;
-
-  size_t v = hash_string(typeid(t).name());
-  v = hashing::combine_hashes(v, hash_decl_base(t));
-  v = hashing::combine_hashes(v, hash_template_decl(t));
-  if (t.get_pattern())
-    v = hashing::combine_hashes(v, hash_class_decl(*t.get_pattern()));
-
-  return v;
-}
-
-size_t
-class_tdecl::shared_ptr_hash::
-operator()(const shared_ptr<class_tdecl> t) const
-{
-  class_tdecl::hash hash_class_tmpl_decl;
-
-  if (t)
-    return hash_class_tmpl_decl(*t);
-  return 0;
-}
-
-/// A hashing function for type declarations.
-///
-/// This function gets the dynamic type of the actual type
-/// declaration and calls the right hashing function for that type.
-///
-/// Note that each time a new type declaration kind is added to the
-/// system, this function needs to be updated.  For a given
-/// inheritance hierarchy, make sure to handle the most derived type
-/// first.
-///
-/// FIXME: This hashing function is not maintained and is surely
-/// broken in subtle ways.  In pratice, the various *::hash functors
-/// should be audited before they are used here.  They should all
-/// match what is done in the 'equals' functions in abg-ir.cc.
-///
-/// @param t a pointer to the type declaration to be hashed
-///
-/// @return the resulting hash
-size_t
-type_base::dynamic_hash::operator()(const type_base* t) const
-{
-  if (t == 0)
+  if (!t)
     return 0;
-
-  if (const member_function_template* d =
-      dynamic_cast<const member_function_template*>(t))
-    return member_function_template::hash()(*d);
-  if (const member_class_template* d =
-      dynamic_cast<const member_class_template*>(t))
-    return member_class_template::hash()(*d);
-  if (const template_tparameter* d =
-      dynamic_cast<const template_tparameter*>(t))
-    return template_tparameter::hash()(*d);
-  if (const type_tparameter* d =
-      dynamic_cast<const type_tparameter*>(t))
-    return type_tparameter::hash()(*d);
-  if (const type_decl* d = dynamic_cast<const type_decl*> (t))
-    return type_decl::hash()(*d);
-  if (const qualified_type_def* d = dynamic_cast<const qualified_type_def*>(t))
-    return qualified_type_def::hash()(*d);
-  if (const pointer_type_def* d = dynamic_cast<const pointer_type_def*>(t))
-    return pointer_type_def::hash()(*d);
-  if (const reference_type_def* d = dynamic_cast<const reference_type_def*>(t))
-    return reference_type_def::hash()(*d);
-  if (const array_type_def* d = dynamic_cast<const array_type_def*>(t))
-    return array_type_def::hash()(*d);
-  if (const enum_type_decl* d = dynamic_cast<const enum_type_decl*>(t))
-    return enum_type_decl::hash()(*d);
-  if (const typedef_decl* d = dynamic_cast<const typedef_decl*>(t))
-    return typedef_decl::hash()(*d);
-  if (const class_decl* d = dynamic_cast<const class_decl*>(t))
-    return class_decl::hash()(*d);
-  if (const union_decl* d = dynamic_cast<const union_decl*>(t))
-    return union_decl::hash()(*d);
-  if (const scope_type_decl* d = dynamic_cast<const scope_type_decl*>(t))
-    return scope_type_decl::hash()(*d);
-  if (const method_type* d = dynamic_cast<const method_type*>(t))
-    return method_type::hash()(*d);
-  if (const function_type* d = dynamic_cast<const function_type*>(t))
-    return function_type::hash()(*d);
-
-  // Poor man's fallback case.
-  return type_base::hash()(*t);
+  return operator()(*t);
 }
-
-size_t
-type_base::shared_ptr_hash::operator()(const shared_ptr<type_base> t) const
-{return type_base::dynamic_hash()(t.get());}
-
 }//end namespace abigail

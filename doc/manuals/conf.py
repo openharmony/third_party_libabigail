@@ -41,7 +41,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Libabigail'
-copyright = u'2014-2022, Red Hat, Inc.'
+copyright = u'2014-2025, Red Hat, Inc.'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -217,6 +217,7 @@ man_pages = [
     ('abidiff', 'abidiff', u'compare ABIs of ELF files ', [u'Dodji Seketeli'], 1),
     ('abipkgdiff', 'abipkgdiff', u'compare ABIs of ELF files in software packages ', [u'Dodji Seketeli'], 1),
     ('abidw', 'abidw', u'serialize the ABI of an ELF file', [u'Dodji Seketeli'], 1),
+    ('abidb', 'abidb', u'check binary against abixml corpus and/or submit new data', [u'Frank Ch. Eigler'], 1),    
     ('abilint', 'abilint', u'validate an abigail ABI representation', [u'Dodji Seketeli'], 1),
     ('abicompat', 'abicompat', u'check ABI compatibility', [u'Dodji Seketeli'], 1),
     ('fedabipkgdiff', 'fedabipkgdiff', u'compare ABIs of Fedora packages', [u'Chenxiong Qi'], 1),

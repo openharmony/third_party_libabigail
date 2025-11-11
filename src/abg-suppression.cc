@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2016-2023 Red Hat, Inc.
+// Copyright (C) 2016-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -808,6 +808,21 @@ void
 type_suppression::set_changed_enumerators_regexp(const vector<regex::regex_t_sptr>& n)
 {priv_->changed_enumerators_regexp_ = n;}
 
+/// Getter of the "has_string_fam_conversion" property.
+///
+/// @return the value of the "has_string_fam_conversion" property.
+bool
+type_suppression::has_strict_fam_conversion () const
+{return priv_->has_strict_fam_conv_;}
+
+/// Setter of the "has_string_fam_conversion" property.
+///
+/// @param f the new value of the "has_string_fam_conversion"
+/// property.
+void
+type_suppression::set_has_strict_fam_conversion(bool f)
+{priv_->has_strict_fam_conv_ = f;}
+
 /// Evaluate this suppression specification on a given diff node and
 /// say if the diff node should be suppressed or not.
 ///
@@ -911,7 +926,7 @@ type_suppression::suppresses_diff(const diff* diff) const
       // public -- depending on, e.g, if the typedef is defined in a
       // public header or not.  So if we are in the context of a
       // private type suppression let's *NOT* peel typedefs away.
-      if (!is_private_type_suppr_spec(*this))
+      if (!is_opaque_type_suppr_spec(*this))
 	{
 	  ft = peel_typedef_type(ft);
 	  st = peel_typedef_type(st);
@@ -967,6 +982,11 @@ type_suppression::suppresses_diff(const diff* diff) const
   const class_diff* klass_diff = dynamic_cast<const class_diff*>(d);
   if (klass_diff)
     {
+      const class_decl_sptr& first_class =
+	klass_diff->first_class_decl();
+      const class_decl_sptr& second_class =
+	klass_diff->second_class_decl();
+
       // We are looking at a class diff ...
       if (!get_data_member_insertion_ranges().empty())
 	{
@@ -980,9 +1000,6 @@ type_suppression::suppresses_diff(const diff* diff) const
 	      // if the class changed size, unless the user specified
 	      // that suppression applies to types that have size
 	      // change.
-
-	      const class_decl_sptr& first_type_decl =
-		klass_diff->first_class_decl();
 
 	      if (klass_diff->inserted_data_members().empty()
 		  && klass_diff->changed_data_members().empty())
@@ -1001,7 +1018,7 @@ type_suppression::suppresses_diff(const diff* diff) const
 		  for (const auto& range : get_data_member_insertion_ranges())
 		    if (is_data_member_offset_in_range(is_var_decl(member),
 						       range,
-						       first_type_decl.get()))
+						       first_class.get()))
 		      matched = true;
 
 		  if (!matched)
@@ -1017,7 +1034,7 @@ type_suppression::suppresses_diff(const diff* diff) const
 
 		  for (const auto& range : get_data_member_insertion_ranges())
 		    if (is_data_member_offset_in_range(member, range,
-						       first_type_decl.get()))
+						       first_class.get()))
 		      matched = true;
 
 		  if (!matched)
@@ -1025,6 +1042,20 @@ type_suppression::suppresses_diff(const diff* diff) const
 		}
 	    }
 	  else
+	    return false;
+	}
+
+      // Support for the
+      // "has_strict_flexible_array_data_member_conversion = true"
+      // clause.
+      if (has_strict_fam_conversion())
+	{
+	  // Let's detect if the first class of the diff has a fake
+	  // flexible array data member that got turned into a real
+	  // flexible array data member.
+	  if (!((get_has_size_change() || ((first_class->get_size_in_bits()
+					    == second_class->get_size_in_bits())))
+		&& filtering::has_strict_fam_conversion(klass_diff)))
 	    return false;
 	}
     }
@@ -1315,7 +1346,7 @@ suppression_matches_type_location(const type_suppression&	s,
 		// the declaration.  If we reach this place, it
 		// means the class has no definition at this point.
 		ABG_ASSERT(!cl->get_definition_of_declaration());
-	      if (s.get_label() == get_private_types_suppr_spec_label())
+	      if (s.get_label() == get_opaque_types_suppr_spec_label())
 		// So this looks like what really amounts to an
 		// opaque type.  So it's not defined in the public
 		// headers.  So we want to filter it out.
@@ -2321,6 +2352,14 @@ read_type_suppression(const ini::config::section& section)
       }
     }
 
+  // Support "has_strict_flexible_array_data_member_conversion"
+  ini::simple_property_sptr has_strict_fam_conv =
+    is_simple_property
+    (section.find_property("has_strict_flexible_array_data_member_conversion"));
+  string has_strict_fam_conv_str = has_strict_fam_conv
+    ? has_strict_fam_conv->get_value()->as_string()
+    : "";
+
   if (section.get_name() == "suppress_type")
     result.reset(new type_suppression(label_str, name_regex_str, name_str));
   else if (section.get_name() == "allow_type")
@@ -2387,6 +2426,9 @@ read_type_suppression(const ini::config::section& section)
   if (result->get_type_kind() == type_suppression::ENUM_TYPE_KIND
       && !changed_enumerators_regexp.empty())
     result->set_changed_enumerators_regexp(changed_enumerators_regexp);
+
+  if (has_strict_fam_conv_str == "yes" || has_strict_fam_conv_str == "true")
+    result->set_has_strict_fam_conversion(true);
 
   return result;
 }
@@ -3244,7 +3286,7 @@ function_suppression::suppresses_function_symbol(const elf_symbol* sym,
     return false;
 
   ABG_ASSERT(k & function_suppression::ADDED_FUNCTION_CHANGE_KIND
-	 || k & function_suppression::DELETED_FUNCTION_CHANGE_KIND);
+	     || k & function_suppression::DELETED_FUNCTION_CHANGE_KIND);
 
   // Check if the name and soname of the binaries match the current
   // suppr spect
@@ -4868,12 +4910,12 @@ suppression_matches_soname_or_filename(const string& soname,
 /// specification that is auto-generated by libabigail to suppress
 /// change reports about types that are not defined in public headers.
 const char*
-get_private_types_suppr_spec_label()
+get_opaque_types_suppr_spec_label()
 {
-  static const char *PRIVATE_TYPES_SUPPR_SPEC_NAME =
-    "Artificial private types suppression specification";
+  static const char *OPAQUE_TYPES_SUPPR_SPEC_NAME =
+    "libabigail::OPAQUE_TYPE_LABEL";
 
-  return PRIVATE_TYPES_SUPPR_SPEC_NAME;
+  return OPAQUE_TYPES_SUPPR_SPEC_NAME;
 }
 
 /// Test if a type suppression specification represents a private type
@@ -4884,8 +4926,8 @@ get_private_types_suppr_spec_label()
 ///
 /// @return true iff @p s is a private type suppr spec.
 bool
-is_private_type_suppr_spec(const type_suppression& s)
-{return s.get_label() == get_private_types_suppr_spec_label();}
+is_opaque_type_suppr_spec(const type_suppression& s)
+{return s.get_label() == get_opaque_types_suppr_spec_label();}
 
 /// Test if a type suppression specification represents a private type
 /// suppression automatically generated by libabigail from the user
@@ -4895,11 +4937,11 @@ is_private_type_suppr_spec(const type_suppression& s)
 ///
 /// @return true iff @p s is a private type suppr spec.
 bool
-is_private_type_suppr_spec(const suppression_sptr& s)
+is_opaque_type_suppr_spec(const suppression_sptr& s)
 {
   type_suppression_sptr type_suppr = is_type_suppression(s);
   return (type_suppr
-	  && type_suppr->get_label() == get_private_types_suppr_spec_label());
+	  && type_suppr->get_label() == get_opaque_types_suppr_spec_label());
 }
 // </file_suppression stuff>
 
@@ -5233,9 +5275,9 @@ is_variable_suppressed(const fe_iface&	fe,
 ///
 /// @param type_location the source location of the type.
 ///
-/// @param type_is_private output parameter.  This is set to true if
+/// @param type_is_opaque output parameter.  This is set to true if
 /// the type was matched by one suppression specification, and if the
-/// suppression was for private types.
+/// suppression was for opaque types.
 ///
 /// @param require_drop_property if true, this type requires the
 /// suppression specification to contain the "drop" property to match
@@ -5247,7 +5289,7 @@ bool
 is_type_suppressed(const fe_iface&	fe,
 		   const string&	type_name,
 		   const location&	type_location,
-		   bool&		type_is_private,
+		   bool&		type_is_opaque,
 		   bool		require_drop_property)
 {
   for (auto i : fe.suppressions())
@@ -5259,14 +5301,14 @@ is_type_suppressed(const fe_iface&	fe,
 						      type_name,
 						      type_location))
 	  {
-	    if (is_private_type_suppr_spec(*suppr))
-	      type_is_private = true;
+	    if (is_opaque_type_suppr_spec(*suppr))
+	      type_is_opaque = true;
 
 	    return true;
 	  }
       }
 
-  type_is_private = false;
+  type_is_opaque = false;
   return false;
 }
 

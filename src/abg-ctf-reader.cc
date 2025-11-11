@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2021-2023 Oracle, Inc.
+// Copyright (C) 2021-2025 Oracle, Inc.
 //
 // Author: Jose E. Marchesi
 
@@ -42,6 +42,10 @@ ABG_END_EXPORT_DECLARATIONS
 
 namespace abigail
 {
+
+using std::cerr;
+
+/// Namespace of the reader for the CTF debug information
 namespace ctf
 {
 using std::dynamic_pointer_cast;
@@ -141,6 +145,15 @@ class reader : public elf_based_reader
   /// A map associating CTF type ids with libabigail IR types.  This
   /// is used to reuse already generated types.
   string_type_base_sptr_map_type types_map;
+  vector<type_base_sptr> types_to_canonicalize;
+
+  /// Vector of additional types created during the analysis.  These
+  /// types don't have assocaited CTF type IDs.
+  vector<type_base_sptr> additional_types_to_canonicalize;
+
+  /// The vector of types present in types_map.  This is used to sort
+  /// the types before canonicalizing them.
+  vector<type_base_sptr> types;
 
   /// A set associating unknown CTF type ids
   std::set<ctf_id_t> unknown_types_set;
@@ -163,6 +176,10 @@ public:
 
   /// Associate a given CTF type ID with a given libabigail IR type.
   ///
+  /// The IR type is a newly created type that needs to be
+  /// canonicalized at the end of the processing of the current
+  /// corpus.
+  ///
   /// @param dic the dictionnary the type belongs to.
   ///
   /// @param ctf_type the type ID.
@@ -172,8 +189,17 @@ public:
   add_type(ctf_dict_t *dic, ctf_id_t ctf_type, type_base_sptr type)
   {
     string key = dic_type_key(dic, ctf_type);
-    types_map.insert(std::make_pair(key, type));
+    if (types_map.insert(std::make_pair(key, type)).second)
+      types_to_canonicalize.push_back(type);
   }
+
+  /// Add a type to the vector of types to be (sorted and)
+  /// canonicalized.
+  ///
+  /// @param t the type to schedule for canonicalization.
+  void
+  add_type(const type_base_sptr& t)
+  {additional_types_to_canonicalize.push_back(t);}
 
   /// Insert a given CTF unknown type ID.
   ///
@@ -212,10 +238,14 @@ public:
   void
   canonicalize_all_types(void)
   {
-    canonicalize_types
-      (types_map.begin(), types_map.end(),
-       [](const string_type_base_sptr_map_type::const_iterator& i)
-       {return i->second;});
+    for (auto& t: additional_types_to_canonicalize)
+      types_to_canonicalize.push_back(t);
+    additional_types_to_canonicalize.clear();
+
+    ir::hash_and_canonicalize_types(types_to_canonicalize.begin(),
+				    types_to_canonicalize.end(),
+				    [](vector<type_base_sptr>::iterator& i)
+				    {return *i;});
   }
 
   /// Constructor.
@@ -231,11 +261,12 @@ public:
   /// that ABI artifacts that are to be compared all need to be
   /// created within the same environment.
   reader(const string&		elf_path,
-	 const vector<char**>&	debug_info_root_paths,
+	 const vector<string>&	debug_info_root_paths,
 	 environment&		env)
-    : elf_based_reader(elf_path, debug_info_root_paths, env)
+    : elf_based_reader(elf_path, debug_info_root_paths, env),
+      ctfa(), ctf_sect(), symtab_sect(), strtab_sect()
   {
-    initialize();
+    reset();
   }
 
   /// Initializer of the reader.
@@ -243,23 +274,31 @@ public:
   /// This is useful to clear out the data used by the reader and get
   /// it ready to be used again.
   ///
-  /// Note that the reader eeps the same environment it has been
-  /// originally created with.
+  /// Note that the reader keeps (doesn't clear) the same environment
+  /// it has been originally created with.
   ///
   /// Please also note that the life time of this environment object
-  /// must be greater than the life time of the resulting @ref
-  /// reader the context uses resources that are allocated in
-  /// the environment.
+  /// must be greater than the life time of the resulting @ref reader
+  /// the context uses resources that are allocated in the
+  /// environment.
   void
-  initialize()
+  reset()
   {
-    ctfa = nullptr;
-    types_map.clear();
+    types_to_canonicalize.clear();
     cur_tu_.reset();
-    corpus_group().reset();
   }
 
   /// Initializer of the reader.
+  ///
+  /// This first makes sure the data used by the reader is cleared.
+  /// And then it initlizes it with the information passed in
+  /// argument.
+  ///
+  /// This is useful to clear out the data used by the reader and get
+  /// it ready to be used again.
+  ///
+  /// Note that the reader keeps the same environment it has been
+  /// originally created with.
   ///
   /// @param elf_path the new path to the new ELF file to use.
   ///
@@ -270,22 +309,13 @@ public:
   ///
   /// @param linux_kernel_mode currently not used.
   ///
-  /// This is useful to clear out the data used by the reader and get
-  /// it ready to be used again.
-  ///
-  /// Note that the reader eeps the same environment it has been
-  /// originally created with.
-  ///
-  /// Please also note that the life time of this environment object
-  /// must be greater than the life time of the resulting @ref
-  /// reader the context uses resources that are allocated in
-  /// the environment.
   void
-  initialize(const string& elf_path,
-             const vector<char**>& debug_info_root_paths,
-             bool load_all_types = false,
-             bool linux_kernel_mode = false)
+  initialize(const string&		elf_path,
+             const vector<string>&	debug_info_root_paths,
+             bool			load_all_types = false,
+             bool			linux_kernel_mode = false)
   {
+    reset();
     load_all_types = load_all_types;
     linux_kernel_mode = linux_kernel_mode;
     elf_based_reader::initialize(elf_path, debug_info_root_paths);
@@ -322,6 +352,16 @@ public:
   env()
   {return options().env;}
 
+  /// Getter of the "do_log" flag.
+  ///
+  /// This flag tells if we should log about various internal
+  /// details.
+  ///
+  /// return the "do_log" flag.
+  bool
+  do_log() const
+  {return options().do_log;}
+
   /// Look for vmlinux.ctfa file in default directory or in
   /// directories provided by debug-info-dir command line option,
   /// it stores location path in @ref ctfa_file.
@@ -345,7 +385,7 @@ public:
     // for vmlinux.ctfa should be provided with --debug-info-dir
     // option.
     for (const auto& path : debug_info_root_paths())
-      if (tools_utils::find_file_under_dir(*path, "vmlinux.ctfa", ctfa_file))
+      if (tools_utils::find_file_under_dir(path, "vmlinux.ctfa", ctfa_file))
         return true;
 
     return false;
@@ -363,15 +403,6 @@ public:
     elf::reader::read_corpus(status);
 
     corpus_sptr corp = corpus();
-    if ((corp->get_origin() & corpus::LINUX_KERNEL_BINARY_ORIGIN)
-	&& corpus_group())
-      {
-	// Not finding any debug info so far is expected if we are
-	// building a kABI.
-        status &= static_cast<abigail::fe_iface::status>
-                    (~STATUS_DEBUG_INFO_NOT_FOUND);
-	return;
-      }
 
     if ((status & STATUS_NO_SYMBOLS_FOUND)
 	|| !(status & STATUS_OK))
@@ -395,17 +426,29 @@ public:
       }
 
     const Elf_Scn* ctf_scn = find_ctf_section();
-    fill_ctf_section(ctf_scn, &ctf_sect);
+    if (ctf_scn)
+      fill_ctf_section(ctf_scn, &ctf_sect);
 
     const Elf_Scn* symtab_scn =
       elf_helpers::find_section_by_name(elf_handle(), symtab_name);
-    fill_ctf_section(symtab_scn, &symtab_sect);
+    if (symtab_scn)
+      fill_ctf_section(symtab_scn, &symtab_sect);
 
     const Elf_Scn* strtab_scn =
       elf_helpers::find_section_by_name(elf_handle(), strtab_name);
-    fill_ctf_section(strtab_scn, &strtab_sect);
+    if (strtab_scn)
+      fill_ctf_section(strtab_scn, &strtab_sect);
 
-    status |= fe_iface::STATUS_OK;
+    if (ctf_scn && symtab_scn && strtab_scn)
+      status |= fe_iface::STATUS_OK;
+    else if (corp->get_origin() & corpus::LINUX_KERNEL_BINARY_ORIGIN)
+      {
+	// Not finding any debug info so far is expected if we are
+	// building a kABI.
+        status &= static_cast<abigail::fe_iface::status>
+                    (~STATUS_DEBUG_INFO_NOT_FOUND);
+	return;
+      }
   }
 
   /// Process a CTF archive and create libabigail IR for the types,
@@ -422,35 +465,26 @@ public:
     corp->add(ir_translation_unit);
     cur_transl_unit(ir_translation_unit);
 
-    int ctf_err;
-    ctf_dict_t *ctf_dict, *dict_tmp;
+    ctf_dict_t *ctf_dict = nullptr, *initial_ctf_dict = nullptr;
     const auto symt = symtab();
     symtab_reader::symtab_filter filter = symt->make_filter();
     filter.set_public_symbols();
-    std::string dict_name;
 
-    if ((corp->get_origin() & corpus::LINUX_KERNEL_BINARY_ORIGIN)
-	&& corpus_group())
+    ctf_next_t *it = nullptr;
+    // Iterate through the dictionnaries of the archive and get the
+    // first one, which should be the parent dictionnary.
+    initial_ctf_dict = ctf_archive_next(ctfa, /*iterator=*/&it,
+					/*dict_name=*/nullptr,
+					/*skip_parent=*/false,
+					/*ctf_error=*/nullptr);
+    if (!initial_ctf_dict)
       {
-	tools_utils::base_name(corpus_path(), dict_name);
-	// remove .* suffix
-	std::size_t pos = dict_name.find(".");
-	if (pos != string::npos)
-	  dict_name.erase(pos);
-
-	std::replace(dict_name.begin(), dict_name.end(), '-', '_');
+	std::cerr << "Could not find any dictionnary in the CTF archive\n";
+	ctf_next_destroy(it);
+	return;
       }
 
-    if ((ctf_dict = ctf_dict_open(ctfa,
-				  dict_name.empty() ? NULL : dict_name.c_str(),
-				  &ctf_err)) == NULL)
-      {
-	fprintf(stderr, "ERROR dictionary not found\n");
-	abort();
-      }
-
-    dict_tmp = ctf_dict;
-
+    ctf_dict = initial_ctf_dict;
     for (const auto& symbol : symtab_reader::filtered_symtab(*symt, filter))
       {
 	std::string sym_name = symbol->get_name();
@@ -479,7 +513,7 @@ public:
 	    add_decl_to_scope(var_declaration,
 			      ir_translation_unit->get_global_scope());
 	    var_declaration->set_is_in_public_symbol_table(true);
-	    maybe_add_var_to_exported_decls(var_declaration.get());
+	    add_var_to_exported_or_undefined_decls(var_declaration);
 	  }
 	else
 	  {
@@ -499,18 +533,16 @@ public:
 	    add_decl_to_scope(func_declaration,
 			      ir_translation_unit->get_global_scope());
 	    func_declaration->set_is_in_public_symbol_table(true);
-	    maybe_add_fn_to_exported_decls(func_declaration.get());
+	    add_fn_to_exported_or_undefined_decls(func_declaration.get());
 	  }
-
-	ctf_dict = dict_tmp;
+	if (ctf_dict != initial_ctf_dict)
+	  {
+	    ctf_dict_close(initial_ctf_dict);
+	    initial_ctf_dict = ctf_dict;
+	  }
       }
-
     ctf_dict_close(ctf_dict);
-    /* Canonicalize all the types generated above.  This must be
-       done "a posteriori" because the processing of types may
-       require other related types to not be already
-       canonicalized.  */
-    canonicalize_all_types();
+    ctf_next_destroy(it);
   }
 
   /// Add a new type declaration to the given libabigail IR corpus CORP.
@@ -661,33 +693,63 @@ public:
     corpus::origin origin = corpus()->get_origin();
     origin |= corpus::CTF_ORIGIN;
     corp->set_origin(origin);
+    if (corpus_group())
+      {
+	origin |= corpus_group()->get_origin();
+	corpus_group()->set_origin(origin);
+      }
 
     slurp_elf_info(status);
     if (status & fe_iface::STATUS_NO_SYMBOLS_FOUND)
        return corpus_sptr();
 
     if (!(origin & corpus::LINUX_KERNEL_BINARY_ORIGIN)
-          && (status & fe_iface::STATUS_DEBUG_INFO_NOT_FOUND))
+	&& (status & fe_iface::STATUS_DEBUG_INFO_NOT_FOUND))
       return corp;
 
-    int errp;
-    if ((corp->get_origin() & corpus::LINUX_KERNEL_BINARY_ORIGIN)
-	&& corpus_group())
+#ifdef WITH_DEBUG_SELF_COMPARISON
+    if (env().self_comparison_debug_is_on())
       {
-	if (ctfa == NULL)
+	corpus_group_sptr g = corpus_group();
+	if (g)
+	  env().set_self_comparison_debug_input(g);
+	else
+	  env().set_self_comparison_debug_input(corpus());
+      }
+#endif
+
+    tools_utils::timer t;
+    if (do_log())
+      t.start();
+
+    int errp;
+    if (corp->get_origin() & corpus::LINUX_KERNEL_BINARY_ORIGIN)
+      {
+	if (ctfa == nullptr)
 	  {
 	    std::string ctfa_filename;
 	    if (find_ctfa_file(ctfa_filename))
 	      ctfa = ctf_arc_open(ctfa_filename.c_str(), &errp);
 	  }
       }
-    else
-      /* Build the ctfa from the contents of the relevant ELF sections,
-	 and process the CTF archive in the read context, if any.
-	 Information about the types, variables, functions, etc contained
-	 in the archive are added to the given corpus.  */
+
+    /* Build the ctfa from the contents of the relevant ELF sections,
+       and process the CTF archive in the read context, if any.
+       Information about the types, variables, functions, etc contained
+       in the archive are added to the given corpus.  */
+    if (ctfa == nullptr
+	&& ctf_sect.cts_data
+	&& symtab_sect.cts_data
+	&& strtab_sect.cts_data)
       ctfa = ctf_arc_bufopen(&ctf_sect, &symtab_sect,
 			     &strtab_sect, &errp);
+
+    if (do_log())
+      {
+	t.stop();
+	cerr << "CTF Reader: Reading CTF info in:" << t << "\n";
+	t.start();
+      }
 
     env().canonicalization_is_done(false);
     if (ctfa == NULL)
@@ -695,11 +757,22 @@ public:
     else
       {
 	process_ctf_archive();
+	/* Canonicalize all the types generated above.  This must be
+	   done "a posteriori" because the processing of types may
+	   require other related types to not be already
+	   canonicalized.  */
+	canonicalize_all_types();
 	corpus()->sort_functions();
 	corpus()->sort_variables();
       }
 
     env().canonicalization_is_done(true);
+
+    if (do_log())
+      {
+	t.stop();
+	cerr << "CTF Reader: Building ABG-IR in:" << t << "\n";
+      }
 
     return corp;
   }
@@ -708,6 +781,7 @@ public:
   ~reader()
   {
     ctf_close(ctfa);
+    ctfa = nullptr;
   }
 }; // end class reader.
 
@@ -812,16 +886,15 @@ process_ctf_base_type(reader *rdr,
 								    tunit);
       type_base_sptr void_type = is_type(type_declaration);
       result = is_type_decl(type_declaration);
-      canonicalize(result);
     }
   else
     {
       if (corpus_sptr corp = rdr->should_reuse_type_from_corpus_group())
         {
           string normalized_type_name = type_name;
-          integral_type int_type;
-          if (parse_integral_type(type_name, int_type))
-            normalized_type_name = int_type.to_string();
+          real_type real_type;
+          if (parse_real_type(type_name, real_type))
+            normalized_type_name = real_type.to_string();
           if ((result = lookup_basic_type(normalized_type_name, *corp)))
             return result;
         }
@@ -862,7 +935,7 @@ build_ir_node_for_variadic_parameter_type(reader &rdr,
   type_base_sptr t = env.get_variadic_parameter_type();
   decl_base_sptr type_declaration = get_type_declaration(t);
   add_decl_to_scope(type_declaration, tunit->get_global_scope());
-  canonicalize(t);
+  rdr.add_type(t);
   return type_declaration;
 }
 
@@ -883,7 +956,7 @@ build_ir_node_for_void_type(reader& rdr, const translation_unit_sptr& tunit)
   const environment& env = rdr.env();
   type_base_sptr t = env.get_void_type();
   add_decl_to_scope(is_decl(t), tunit->get_global_scope());
-  canonicalize(t);
+  rdr.add_type(t);
   return is_decl(t);
 }
 
@@ -905,7 +978,7 @@ build_ir_node_for_void_pointer_type(reader& rdr,
     const environment& env = rdr.env();
   type_base_sptr t = env.get_void_pointer_type();
   add_decl_to_scope(is_decl(t), tunit->get_global_scope());
-  canonicalize(t);
+  rdr.add_type(t);
   return is_decl(t);
 }
 
@@ -1046,7 +1119,7 @@ process_ctf_sou_members(reader *rdr,
                            public_access,
                            true /* is_laid_out */,
                            false /* is_static */,
-                           membinfo.ctm_offset);
+                           is_union_type(sou) ? 0 : membinfo.ctm_offset);
     }
   if (ctf_errno(ctf_dictionary) != ECTF_NEXT_END)
     fprintf(stderr, "ERROR from ctf_member_next\n");
@@ -1231,7 +1304,7 @@ static array_type_def::subrange_sptr
 build_array_ctf_range(reader *rdr, ctf_dict_t *dic,
                       ctf_id_t index, uint64_t nelems)
 {
-  bool is_infinite = false;
+  bool is_non_finite = false;
   corpus_sptr corp = rdr->corpus();
   translation_unit_sptr tunit = rdr->cur_transl_unit();
   array_type_def::subrange_sptr subrange;
@@ -1247,7 +1320,7 @@ build_array_ctf_range(reader *rdr, ctf_dict_t *dic,
 
   /* for VLAs number of array elements is 0 */
   if (upper_bound.get_unsigned_value() == 0 && nelems == 0)
-    is_infinite = true;
+    is_non_finite = true;
 
   subrange.reset(new array_type_def::subrange_type(rdr->env(),
                                                    "",
@@ -1256,13 +1329,15 @@ build_array_ctf_range(reader *rdr, ctf_dict_t *dic,
                                                    index_type,
                                                    location(),
                                                    translation_unit::LANG_C));
+  if (!index_type)
+    subrange->set_size_in_bits(rdr->cur_transl_unit()->get_address_size());
+
   if (!subrange)
     return nullptr;
 
-  subrange->is_infinite(is_infinite);
+  subrange->is_non_finite(is_non_finite);
   add_decl_to_scope(subrange, tunit->get_global_scope());
-  canonicalize(subrange);
-
+  rdr->add_type(subrange);
   return subrange;
 }
 
@@ -1557,7 +1632,7 @@ process_ctf_enum_type(reader *rdr,
     return result;
 
   add_decl_to_scope(utype, tunit->get_global_scope());
-  canonicalize(utype);
+  rdr->add_type(utype);
 
   /* Iterate over the enum entries.  */
   enum_type_decl::enumerators enms;
@@ -1620,10 +1695,12 @@ lookup_symbol_in_ctf_archive(ctf_archive_t *ctfa, ctf_dict_t **ctf_dict,
   if (ctf_type == CTF_ERR)
     {
       ctf_dict_t *fp;
-      ctf_next_t *i = NULL;
-      const char *arcname;
+      ctf_next_t *i = nullptr;
+      const char *arcname = nullptr;
 
-      while ((fp = ctf_archive_next(ctfa, &i, &arcname, 1, &ctf_err)) != NULL)
+      while ((fp = ctf_archive_next(ctfa, &i, &arcname,
+				    /*skip_parent=*/true,
+				    &ctf_err)) != nullptr)
         {
           if ((ctf_type = ctf_lookup_by_symbol_name (fp, sym_name)) == CTF_ERR)
             ctf_type = ctf_lookup_variable(fp, sym_name);
@@ -1669,16 +1746,25 @@ fill_ctf_section(const Elf_Scn *elf_section, ctf_sect_t *ctf_section)
 /// from a given ELF file.
 ///
 /// @param elf_path the patch of some ELF file.
+///
+/// @param debug_info_root_paths the paths to where to find the debug
+/// info.
+///
 /// @param env a libabigail IR environment.
-
 elf_based_reader_sptr
 create_reader(const std::string& elf_path,
-	      const vector<char**>& debug_info_root_paths,
+	      const vector<string>& debug_info_root_paths,
 	      environment& env)
 {
   reader_sptr result(new reader(elf_path,
 				debug_info_root_paths,
 				env));
+
+#ifdef WITH_DEBUG_SELF_COMPARISON
+    if (env.self_comparison_debug_is_on())
+      env.set_self_comparison_debug_input(result->corpus());
+#endif
+
   return result;
 }
 
@@ -1690,20 +1776,12 @@ create_reader(const std::string& elf_path,
 /// @param elf_path the path to the elf file the context is to be used
 /// for.
 ///
-/// @param environment the environment used by the current context.
-/// This environment contains resources needed by the reader and by
-/// the types and declarations that are to be created later.  Note
-/// that ABI artifacts that are to be compared all need to be created
-/// within the same environment.
-///
-/// Please also note that the life time of this environment object
-/// must be greater than the life time of the resulting @ref
-/// reader the context uses resources that are allocated in the
-/// environment.
+/// @param debug_info_root_paths the paths pointing to where to find
+/// the debug info.
 void
 reset_reader(elf_based_reader&		rdr,
 	     const std::string&	elf_path,
-	     const vector<char**>&	debug_info_root_path)
+	     const vector<string>&	debug_info_root_path)
 {
   ctf::reader& r = dynamic_cast<reader&>(rdr);
   r.initialize(elf_path, debug_info_root_path);

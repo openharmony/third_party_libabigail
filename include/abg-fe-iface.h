@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -61,6 +61,10 @@ protected:
     environment&	env;
     bool		load_in_linux_kernel_mode	= false;
     bool		load_all_types			= false;
+    /// If this option is set to true, then the functions and
+    /// variables that have an undefined symbol are going to be
+    /// represented in the IR.
+    bool		load_undefined_interfaces	= false;
     bool		drop_undefined_syms		= false;
     bool		show_stats			= false;
     bool		do_log				= false;
@@ -138,10 +142,10 @@ protected:
   should_reuse_type_from_corpus_group();
 
   void
-  maybe_add_fn_to_exported_decls(const function_decl* fn);
+  add_fn_to_exported_or_undefined_decls(const function_decl* fn);
 
   void
-  maybe_add_var_to_exported_decls(const var_decl* var);
+  add_var_to_exported_or_undefined_decls(const var_decl_sptr& var);
 
   virtual ir::corpus_sptr
   read_corpus(status& status) = 0;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -25,12 +25,16 @@ namespace filtering
 {
 
 bool
-has_harmless_name_change(const decl_base_sptr& f, const decl_base_sptr& s);
+has_harmless_name_change(const decl_base_sptr& f,
+			 const decl_base_sptr& s,
+			 const diff_context_sptr& ctxt);
 
 bool union_diff_has_harmless_changes(const diff *d);
 
 bool
-has_harmful_name_change(const decl_base_sptr& f, const decl_base_sptr& s);
+has_harmful_name_change(const decl_base_sptr& f,
+			const decl_base_sptr& s,
+			const diff_context_sptr& ctxt);
 
 bool
 has_harmful_name_change(const diff* dif);
@@ -97,6 +101,72 @@ is_var_1_dim_unknown_size_array_change(const diff*);
 bool
 is_var_1_dim_unknown_size_array_change(const var_decl_sptr& var1,
 				       const var_decl_sptr& var2);
+
+bool
+has_strict_fam_conversion(const class_decl_sptr& first,
+			  const class_decl_sptr& second);
+
+bool
+has_strict_fam_conversion(const diff *d);
+
+bool
+has_lvalue_reference_ness_change(const diff *d);
+
+bool
+has_void_ptr_to_ptr_change(const diff* d);
+
+bool
+has_void_to_non_void_change(const diff* d);
+
+bool
+has_void_to_non_void_change(const diff_sptr& d);
+
+bool
+has_harmless_enum_to_int_change(const diff* d);
+
+bool
+has_benign_array_of_unknown_size_change(const diff* dif);
+
+diff_category
+has_fn_return_or_parm_harmful_change(const diff* d);
+
+diff_category
+has_var_harmful_local_change(const diff* d);
+
+diff_category
+has_var_harmful_local_change(const diff_sptr& d);
+
+bool
+has_fn_with_virtual_offset_change(const diff* d);
+
+bool
+has_fn_with_virtual_offset_change(const diff_sptr& d);
+
+bool
+has_incompatible_fn_or_var_change(const diff* d);
+
+bool
+has_incompatible_fn_or_var_change(const diff_sptr& d);
+
+bool
+is_type_to_compatible_anonymous_type_change(const diff* d);
+
+bool
+is_type_to_compatible_anonymous_type_change(const diff_sptr& d);
+
+bool
+is_type_to_compatible_anonymous_type_change(const type_base_sptr&,
+					    const type_base_sptr&);
+
+bool
+is_data_member_to_compatible_anonymous_dm_change(const diff* d);
+
+bool
+is_data_member_to_compatible_anonymous_dm_change(const diff_sptr& d);
+
+bool
+is_data_member_to_compatible_anonymous_dm_change(const decl_base_sptr&,
+						 const decl_base_sptr&);
 
 struct filter_base;
 /// Convenience typedef for a shared pointer to filter_base

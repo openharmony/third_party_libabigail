@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2017-2023 Red Hat, Inc.
+// Copyright (C) 2017-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -59,7 +59,7 @@ struct types_or_decls_hash
   {
     size_t h1 = hash_type_or_decl(d.first);
     size_t h2 = hash_type_or_decl(d.second);
-    return hashing::combine_hashes(h1, h2);
+    return *hashing::combine_hashes(hash_t(h1), hash_t(h2));
   }
 };
 
@@ -429,9 +429,12 @@ struct array_diff::priv
 {
   /// The diff between the two array element types.
   diff_sptr element_type_diff_;
+  vector<subrange_diff_sptr> subrange_diffs_;
 
-  priv(diff_sptr element_type_diff)
-    : element_type_diff_(element_type_diff)
+  priv(diff_sptr element_type_diff,
+       vector<subrange_diff_sptr>& subrange_diffs)
+    : element_type_diff_(element_type_diff),
+      subrange_diffs_(subrange_diffs)
   {}
 };//end struct array_diff::priv
 
@@ -442,6 +445,19 @@ struct reference_diff::priv
     : underlying_type_diff_(underlying)
   {}
 };//end struct reference_diff::priv
+
+/// The private data of the @ref ptr_to_mbr_diff type.
+struct ptr_to_mbr_diff::priv
+{
+  diff_sptr member_type_diff_;
+  diff_sptr containing_type_diff_;
+
+  priv(const diff_sptr& member_type_diff,
+       const diff_sptr& containing_type_diff)
+    : member_type_diff_(member_type_diff),
+      containing_type_diff_(containing_type_diff)
+  {}
+};//end ptr_to_mbr_diff::priv
 
 struct qualified_type_diff::priv
 {
@@ -698,6 +714,13 @@ struct base_diff_comp
   {return operator()(l.get(), r.get());}
 }; // end struct base_diff_comp
 
+bool
+is_less_than(const decl_diff_base& first, const decl_diff_base& second);
+
+bool
+is_less_than(const decl_diff_base_sptr& first,
+	     const decl_diff_base_sptr& second);
+
 /// A comparison functor to compare two instances of @ref var_diff
 /// that represent changed data members based on the offset of the
 /// initial data members, or if equal, based on their qualified name.
@@ -759,7 +782,7 @@ struct data_member_diff_comp
 
     return name1 < name2;
   }
-}; // end struct var_diff_comp
+}; // end struct data_member_diff_comp
 
 /// A comparison functor for instances of @ref function_decl_diff that
 /// represent changes between two virtual member functions.
@@ -772,8 +795,12 @@ struct virtual_member_function_diff_comp
     ABG_ASSERT(get_member_function_is_virtual(l.first_function_decl()));
     ABG_ASSERT(get_member_function_is_virtual(r.first_function_decl()));
 
-    return (get_member_function_vtable_offset(l.first_function_decl())
-	    < get_member_function_vtable_offset(r.first_function_decl()));
+    size_t l_offset = get_member_function_vtable_offset(l.first_function_decl());
+    size_t r_offset = get_member_function_vtable_offset(r.first_function_decl());
+    if (l_offset != r_offset)
+      return l_offset < r_offset;
+
+    return is_less_than(l, r);
   }
 
   bool
@@ -858,9 +885,9 @@ struct diff_comp
   bool
   operator()(const diff& l, diff& r) const
   {
-    return (get_pretty_representation(l.first_subject(), true)
+    return (get_pretty_representation(l.first_subject())
 	    <
-	    get_pretty_representation(r.first_subject(), true));
+	    get_pretty_representation(r.first_subject()));
   }
 
   /// Lexicographically compare two diff nodes.
@@ -990,6 +1017,10 @@ struct var_comp
   bool
   operator() (const var_decl* l, const var_decl* r) const
   {return operator()(*l, *r);}
+
+  bool
+  operator() (const var_decl_sptr& l, const var_decl_sptr& r) const
+  {return operator()(l.get(), r.get());}
 };// end struct var_comp
 
 /// A functor to compare instances of @ref elf_symbol base on their
@@ -1052,11 +1083,13 @@ struct corpus_diff::priv
   string_function_ptr_map		suppressed_added_fns_;
   string_function_decl_diff_sptr_map	changed_fns_map_;
   function_decl_diff_sptrs_type	changed_fns_;
+  function_decl_diff_sptrs_type	incompatible_changed_fns_;
   string_var_ptr_map			deleted_vars_;
   string_var_ptr_map			suppressed_deleted_vars_;
   string_var_ptr_map			added_vars_;
   string_var_ptr_map			suppressed_added_vars_;
   string_var_diff_sptr_map		changed_vars_map_;
+  var_diff_sptrs_type			incompatible_changed_vars_;
   var_diff_sptrs_type			sorted_changed_vars_;
   string_elf_symbol_map		added_unrefed_fn_syms_;
   string_elf_symbol_map		suppressed_added_unrefed_fn_syms_;
@@ -1124,10 +1157,10 @@ struct corpus_diff::priv
   added_function_is_suppressed(const function_decl* fn) const;
 
   bool
-  deleted_variable_is_suppressed(const var_decl* var) const;
+  deleted_variable_is_suppressed(const var_decl_sptr& var) const;
 
   bool
-  added_variable_is_suppressed(const var_decl* var) const;
+  added_variable_is_suppressed(const var_decl_sptr& var) const;
 
   bool
   added_unreachable_type_is_suppressed(const type_base *t)const ;
@@ -1244,30 +1277,7 @@ struct function_decl_diff_comp
   operator()(const function_decl_diff& first,
 	     const function_decl_diff& second)
   {
-    function_decl_sptr f = first.first_function_decl(),
-      s = second.first_function_decl();
-
-    string fr = f->get_qualified_name(),
-      sr = s->get_qualified_name();
-
-    if (fr == sr)
-      {
-	if (f->get_symbol())
-	  fr = f->get_symbol()->get_id_string();
-	else if (!f->get_linkage_name().empty())
-	  fr = f->get_linkage_name();
-	else
-	  fr = f->get_pretty_representation();
-
-	if (s->get_symbol())
-	  sr = s->get_symbol()->get_id_string();
-	else if (!s->get_linkage_name().empty())
-	  sr = s->get_linkage_name();
-	else
-	  sr = s->get_pretty_representation();
-      }
-
-    return (fr.compare(sr) < 0);
+    return is_less_than(first, second);
   }
 
   /// The actual less than operator.
@@ -1298,11 +1308,9 @@ struct var_diff_sptr_comp
   ///
   /// @return true if @p f is less than @p s.
   bool
-  operator()(const var_diff_sptr f,
-	     const var_diff_sptr s)
+  operator()(const var_diff_sptr f, const var_diff_sptr s)
   {
-    return (f->first_var()->get_qualified_name()
-	    < s->first_var()->get_qualified_name());
+    return is_less_than(f, s);
   }
 }; // end struct var_diff_sptr_comp
 
@@ -1319,6 +1327,10 @@ struct corpus_diff::diff_stats::priv
   size_t		num_func_changed;
   size_t		num_changed_func_filtered_out;
   size_t		num_func_with_virt_offset_changes;
+  size_t		num_func_with_local_harmful_changes;
+  size_t		num_func_with_incompatible_changes;
+  size_t		num_var_with_local_harmful_changes;
+  size_t		num_var_with_incompatible_changes;
   size_t		num_vars_removed;
   size_t		num_removed_vars_filtered_out;
   size_t		num_vars_added;
@@ -1338,8 +1350,10 @@ struct corpus_diff::diff_stats::priv
   size_t		num_leaf_type_changes;
   size_t		num_leaf_type_changes_filtered_out;
   size_t		num_leaf_func_changes;
+  size_t		num_leaf_func_with_incompatible_changes;
   size_t		num_leaf_func_changes_filtered_out;
   size_t		num_leaf_var_changes;
+  size_t		num_leaf_var_with_incompatible_changes;
   size_t		num_leaf_var_changes_filtered_out;
   size_t		num_added_unreachable_types;
   size_t		num_added_unreachable_types_filtered_out;
@@ -1357,6 +1371,10 @@ struct corpus_diff::diff_stats::priv
       num_func_changed(),
       num_changed_func_filtered_out(),
       num_func_with_virt_offset_changes(),
+      num_func_with_local_harmful_changes(),
+      num_func_with_incompatible_changes(),
+      num_var_with_local_harmful_changes(),
+      num_var_with_incompatible_changes(),
       num_vars_removed(),
       num_removed_vars_filtered_out(),
       num_vars_added(),
@@ -1376,8 +1394,10 @@ struct corpus_diff::diff_stats::priv
       num_leaf_type_changes(),
       num_leaf_type_changes_filtered_out(),
       num_leaf_func_changes(),
+      num_leaf_func_with_incompatible_changes(),
       num_leaf_func_changes_filtered_out(),
       num_leaf_var_changes(),
+      num_leaf_var_with_incompatible_changes(),
       num_leaf_var_changes_filtered_out(),
       num_added_unreachable_types(),
       num_added_unreachable_types_filtered_out(),
@@ -1409,7 +1429,7 @@ sort_changed_data_members(changed_var_sptrs_type& input);
 
 void
 sort_string_function_ptr_map(const string_function_ptr_map& map,
-			     vector<function_decl*>& sorted);
+			     vector<const function_decl*>& sorted);
 
 void
 sort_string_member_function_sptr_map(const string_member_function_sptr_map& map,
@@ -1425,8 +1445,14 @@ sort_string_function_decl_diff_sptr_map
  function_decl_diff_sptrs_type& sorted);
 
 void
+sort_function_decl_diffs(function_decl_diff_sptrs_type& fn_diffs);
+
+void
 sort_string_var_diff_sptr_map(const string_var_diff_sptr_map& map,
 			      var_diff_sptrs_type& sorted);
+
+void
+sort_var_diffs(var_diff_sptrs_type& var_diffs);
 
 void
 sort_string_elf_symbol_map(const string_elf_symbol_map& map,
@@ -1434,7 +1460,7 @@ sort_string_elf_symbol_map(const string_elf_symbol_map& map,
 
 void
 sort_string_var_ptr_map(const string_var_ptr_map& map,
-			vector<var_decl*>& sorted);
+			vector<var_decl_sptr>& sorted);
 
 void
 sort_string_data_member_diff_sptr_map(const string_var_diff_sptr_map& map,
