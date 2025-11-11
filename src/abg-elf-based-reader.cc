@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -49,7 +49,7 @@ struct elf_based_reader::priv
 ///
 /// @param env the environment used by the reader.
 elf_based_reader::elf_based_reader(const std::string& elf_path,
-				   const vector<char**>& debug_info_root_paths,
+				   const vector<string>& debug_info_root_paths,
 				   environment& env)
   : elf::reader(elf_path, debug_info_root_paths, env),
     priv_(new priv)
@@ -72,7 +72,7 @@ elf_based_reader::~elf_based_reader()
 /// split debug info files.
 void
 elf_based_reader::initialize(const std::string& elf_path,
-			     const vector<char**>& debug_info_root_paths)
+			     const vector<string>& debug_info_root_paths)
 {
   elf::reader::initialize(elf_path, debug_info_root_paths);
   priv_->initialize();
@@ -88,7 +88,7 @@ void
 elf_based_reader::initialize(const std::string& corpus_path)
 {
   fe_iface::initialize(corpus_path);
-  vector<char**> v;
+  vector<string> v;
   initialize(corpus_path, v, /*load_all_type=*/false,
 	     /*linux_kernel_mode=*/false);
 }
@@ -107,8 +107,8 @@ ir::corpus_sptr
 elf_based_reader::read_and_add_corpus_to_group(ir::corpus_group& group,
 					       fe_iface::status& status)
 {
-  group.add_corpus(corpus());
   ir::corpus_sptr corp = read_corpus(status);
+  group.add_corpus(corp);
   return corp;
 }
 

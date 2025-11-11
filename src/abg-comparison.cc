@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -168,6 +168,86 @@ sort_changed_data_members(changed_var_sptrs_type& to_sort)
   std::sort(to_sort.begin(), to_sort.end(), comp);
 }
 
+/// Get the ELF symbol associated to a decl.
+///
+/// Please note that ELF symbol are only associated to function or
+/// global variable decls.  So for any other kind of decl, this
+/// function returns nullptr.
+///
+/// @param d the decl to consider.
+///
+/// @return the ELF symbol associated to @p if any or nullptr.
+static elf_symbol_sptr
+get_symbol(const decl_base_sptr& d)
+{
+  if (function_decl_sptr fn = is_function_decl(d))
+    return fn->get_symbol();
+  else if (var_decl_sptr var = is_var_decl(d))
+    return var->get_symbol();
+
+  return elf_symbol_sptr();
+}
+
+/// Compare two decl diff nodes (@ref decl_diff_base) for the purpose
+/// of sorting.
+///
+/// @param first the first @ref decl_diff to consider.
+///
+/// @param second the second @ref function_decl_diff to consider.
+///
+/// @return true iff @p first compares less than @p second.
+bool
+is_less_than(const decl_diff_base& first, const decl_diff_base& second)
+{
+  decl_base_sptr f = is_decl(first.first_subject()),
+    s = is_decl(second.first_subject());
+
+  string fr = f->get_qualified_name(), sr = s->get_qualified_name();
+
+  if (fr != sr)
+    return fr < sr;
+
+  if (!f->get_linkage_name().empty()
+      && !s->get_linkage_name().empty())
+    {
+      fr = f->get_linkage_name();
+      sr = s->get_linkage_name();
+      if (fr != sr)
+	return fr < sr;
+    }
+
+  if (get_symbol(f) && get_symbol(s))
+    {
+      fr = get_symbol(f)->get_id_string();
+      sr = get_symbol(s)->get_id_string();
+      if (fr != sr)
+	return fr < sr;
+    }
+
+  fr = f->get_pretty_representation(true, true);
+  sr = s->get_pretty_representation(true, true);
+
+  return fr < sr;
+}
+
+/// Compare two decl diff nodes (@ref decl_diff_base) for the purpose
+/// of sorting.
+///
+/// @param first the first @ref decl_diff to consider.
+///
+/// @param second the second @ref function_decl_diff to consider.
+///
+/// @return true iff @p first compares less than @p second.
+bool
+is_less_than(const decl_diff_base_sptr& first,
+	     const decl_diff_base_sptr& second)
+{
+  if (!first || !second)
+    return false;
+
+  return is_less_than(*first, *second);
+}
+
 /// Sort an instance of @ref string_function_ptr_map map and stuff a
 /// resulting sorted vector of pointers to function_decl.
 ///
@@ -176,7 +256,7 @@ sort_changed_data_members(changed_var_sptrs_type& to_sort)
 /// @param sorted the resulting sorted vector.
 void
 sort_string_function_ptr_map(const string_function_ptr_map& map,
-			     vector<function_decl*>& sorted)
+			     vector<const function_decl*>& sorted)
 {
   sorted.reserve(map.size());
   for (string_function_ptr_map::const_iterator i = map.begin();
@@ -231,6 +311,19 @@ sort_string_function_decl_diff_sptr_map
   std::sort(sorted.begin(), sorted.end(), comp);
 }
 
+/// Sort a vector of @ref function_decl_diff_sptr.
+///
+/// The comparison functor used is function_decl_diff_comp.
+///
+/// @param fn_diffs in/out parameter.  The vector of @ref
+/// function_decl_diff_sptr to sort.
+void
+sort_function_decl_diffs(function_decl_diff_sptrs_type& fn_diffs)
+{
+  function_decl_diff_comp comp;
+  std::sort(fn_diffs.begin(), fn_diffs.end(), comp);
+}
+
 /// Sort of an instance of @ref string_var_diff_sptr_map map.
 ///
 /// @param map the input map to sort.
@@ -249,6 +342,19 @@ sort_string_var_diff_sptr_map(const string_var_diff_sptr_map& map,
 
   var_diff_sptr_comp comp;
   std::sort(sorted.begin(), sorted.end(), comp);
+}
+
+/// Sort a vector of @ref var_diff_sptr.
+///
+/// The comparison functor used is @ref var_diff_sptr_comp.
+///
+/// @param var_diffs in/out parameter the vector of @ref var_diff_sptr
+/// to sort.
+void
+sort_var_diffs(var_diff_sptrs_type& var_diffs)
+{
+  var_diff_sptr_comp comp;
+  std::sort(var_diffs.begin(), var_diffs.end(), comp);
 }
 
 /// Sort a map of string -> pointer to @ref elf_symbol.
@@ -283,7 +389,7 @@ sort_string_elf_symbol_map(const string_elf_symbol_map& map,
 /// @param sorted out parameter; the sorted vector of @ref var_decl.
 void
 sort_string_var_ptr_map(const string_var_ptr_map& map,
-			vector<var_decl*>& sorted)
+			vector<var_decl_sptr>& sorted)
 {
   for (string_var_ptr_map::const_iterator i = map.begin();
        i != map.end();
@@ -673,9 +779,8 @@ is_class_or_union_diff(const diff* d)
 ///
 /// @param d the diff node to consider.
 ///
-/// @return a non-nil pointer to the @ref class_or_union_diff iff @p
-/// denoted by @p d iff @p is pointer to an anonymous class or union
-/// diff.
+/// @return a non-nil pointer to the @ref class_or_union_diff denoted
+/// by @p d iff @p is a pointer to an anonymous class or union diff.
 const class_or_union_diff*
 is_anonymous_class_or_union_diff(const diff* d)
 {
@@ -704,6 +809,23 @@ is_typedef_diff(const diff *diff)
 const subrange_diff*
 is_subrange_diff(const diff* diff)
 {return dynamic_cast<const subrange_diff*>(diff);}
+
+/// Test if a diff node is a @ref subrange_diff between two anonymous
+/// subranges.
+///
+/// @param d the diff node to consider.
+///
+/// @return a non-nil pointer to the @ref subrange_diff denoted by @p
+/// d iff @p d is a pointer to an anonymous @ref subrange_diff.
+const subrange_diff*
+is_anonymous_subrange_diff(const diff* d)
+{
+  if (const subrange_diff* dif = is_subrange_diff(d))
+    if (dif->first_subrange()->get_is_anonymous())
+      return dif;
+
+  return nullptr;
+}
 
 /// Test if a diff node is a @ref array_diff node.
 ///
@@ -2579,12 +2701,26 @@ diff::is_suppressed(bool &is_private_type) const
     if (d->suppresses_diff(this))
       {
 	do_suppress = true;
-	if (is_private_type_suppr_spec(d))
+	if (is_opaque_type_suppr_spec(d))
 	  is_private_type = true;
 	break;
       }
 
   return do_suppress;
+}
+
+/// Test if the current diff node has been suppressed by a suppression
+/// specification or it has been categorized as suppressed due to
+/// category propagation.
+///
+/// @return true iff the current diff node has been suppressed by a
+/// suppression specification or it has been categorized as suppressed
+/// due to category propagation.
+bool
+diff::is_categorized_as_suppressed() const
+{
+  return (get_category() & SUPPRESSED_CATEGORY
+	  || get_category()  & PRIVATE_TYPE_CATEGORY);
 }
 
 /// Test if this diff tree node should be reported.
@@ -2819,15 +2955,17 @@ distinct_diff::compatible_child_diff() const
 {
   if (!priv_->compatible_child_diff)
     {
-      type_base_sptr fs = strip_typedef(is_type(first())),
-	ss = strip_typedef(is_type(second()));
+      if (entities_are_of_distinct_kinds(first(), second())
+	  && types_are_compatible(is_type(first()), is_type(second())))
+	{
+	  type_base_sptr fs = peel_qualified_or_typedef_type(is_type(first())),
+	    ss = peel_qualified_or_typedef_type(is_type(second()));
 
-      if (fs && ss
-	  && !entities_are_of_distinct_kinds(get_type_declaration(fs),
-					     get_type_declaration(ss)))
-	priv_->compatible_child_diff = compute_diff(get_type_declaration(fs),
-						    get_type_declaration(ss),
-						    context());
+	    priv_->compatible_child_diff =
+	      compute_diff(get_type_declaration(fs),
+			   get_type_declaration(ss),
+			   context());
+	}
     }
   return priv_->compatible_child_diff;
 }
@@ -3041,6 +3179,7 @@ compute_diff_for_types(const type_or_decl_base_sptr& first,
    ||(d = try_to_diff<class_decl>(f, s,ctxt))
    ||(d = try_to_diff<pointer_type_def>(f, s, ctxt))
    ||(d = try_to_diff<reference_type_def>(f, s, ctxt))
+   ||(d = try_to_diff<ptr_to_mbr_type>(f, s, ctxt))
    ||(d = try_to_diff<array_type_def::subrange_type>(f, s, ctxt))
    ||(d = try_to_diff<array_type_def>(f, s, ctxt))
    ||(d = try_to_diff<qualified_type_def>(f, s, ctxt))
@@ -3102,7 +3241,7 @@ get_default_harmless_categories_bitmap()
 	  | abigail::comparison::STATIC_DATA_MEMBER_CHANGE_CATEGORY
 	  | abigail::comparison::HARMLESS_ENUM_CHANGE_CATEGORY
 	  | abigail::comparison::HARMLESS_SYMBOL_ALIAS_CHANGE_CATEGORY
-	  | abigail::comparison::HARMLESS_UNION_CHANGE_CATEGORY
+	  | abigail::comparison::HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY
 	  | abigail::comparison::HARMLESS_DATA_MEMBER_CHANGE_CATEGORY
 	  | abigail::comparison::TYPE_DECL_ONLY_DEF_CHANGE_CATEGORY
 	  | abigail::comparison::FN_PARM_TYPE_TOP_CV_CHANGE_CATEGORY
@@ -3123,7 +3262,36 @@ get_default_harmful_categories_bitmap()
 {
   return (abigail::comparison::SIZE_OR_OFFSET_CHANGE_CATEGORY
 	  | abigail::comparison::VIRTUAL_MEMBER_CHANGE_CATEGORY
+	  | abigail::comparison::REFERENCE_LVALUENESS_CHANGE_CATEGORY
+	  | abigail::comparison::NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY
+	  | abigail::comparison::NON_COMPATIBLE_NAME_CHANGE_CATEGORY
 	  | abigail::comparison::FN_PARM_ADD_REMOVE_CHANGE_CATEGORY);
+}
+
+/// Test if an instance of @ref diff_category (a category bit-field)
+/// is harmful or not.
+///
+/// A harmful change is a change that is not harmless.  OK, that
+/// smells bit like a tasteless tautology, but bear with me please.
+///
+/// A harmless change is a change that should be filtered out by
+/// default to avoid unnecessarily cluttering the change report.
+///
+/// A harmful change is thus a change that SHOULD NOT be filtered out
+/// by default because it CAN represent an incompatible ABI change.
+///
+/// An incompatbile ABI change is a harmful change that makes the new
+/// ABI incompatible with the previous one.
+///
+/// @param c the instance of @ref diff_category to consider.  It is a
+/// bit-field of the categories of a given diff node.
+///
+/// @return true 
+bool
+is_harmful_category(diff_category c)
+{
+  diff_category dc = get_default_harmful_categories_bitmap();
+  return c & dc;
 }
 
 /// Serialize an instance of @ref diff_category to an output stream.
@@ -3208,11 +3376,11 @@ operator<<(ostream& o, diff_category c)
       emitted_a_category |= true;
     }
 
-  if (c & HARMLESS_UNION_CHANGE_CATEGORY)
+  if (c & HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY)
     {
       if (emitted_a_category)
 	o << "|";
-      o << "HARMLESS_UNION_CHANGE_CATEGORY";
+      o << "HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY";
       emitted_a_category |= true;
     }
 
@@ -3245,6 +3413,30 @@ operator<<(ostream& o, diff_category c)
       if (emitted_a_category)
 	o << "|";
       o << "VIRTUAL_MEMBER_CHANGE_CATEGORY";
+      emitted_a_category |= true;
+    }
+
+  if (c & REFERENCE_LVALUENESS_CHANGE_CATEGORY)
+    {
+      if (emitted_a_category)
+	o << "|";
+      o << "REFERENCE_LVALUENESS_CHANGE_CATEGORY";
+      emitted_a_category |= true;
+    }
+
+    if (c & NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY)
+    {
+      if (emitted_a_category)
+	o << "|";
+      o << "NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY";
+      emitted_a_category |= true;
+    }
+
+    if (c & NON_COMPATIBLE_NAME_CHANGE_CATEGORY)
+    {
+      if (emitted_a_category)
+	o << "|";
+      o << "NON_COMPATIBLE_NAME_CHANGE_CATEGORY";
       emitted_a_category |= true;
     }
 
@@ -3869,7 +4061,11 @@ compute_diff(array_type_def::subrange_sptr first,
 /// diff::children_node().
 void
 array_diff::chain_into_hierarchy()
-{append_child_node(element_type_diff());}
+{
+  append_child_node(element_type_diff());
+  for (const auto& subrange_diff : subrange_diffs())
+    append_child_node(subrange_diff);
+}
 
 /// Constructor for array_diff
 ///
@@ -3884,9 +4080,10 @@ array_diff::chain_into_hierarchy()
 array_diff::array_diff(const array_type_def_sptr	first,
 		       const array_type_def_sptr	second,
 		       diff_sptr			element_type_diff,
+		       vector<subrange_diff_sptr>&	subrange_diffs,
 		       diff_context_sptr		ctxt)
   : type_diff_base(first, second, ctxt),
-    priv_(new priv(element_type_diff))
+    priv_(new priv(element_type_diff, subrange_diffs))
 {}
 
 /// Getter for the first array of the diff.
@@ -3910,12 +4107,40 @@ const diff_sptr&
 array_diff::element_type_diff() const
 {return priv_->element_type_diff_;}
 
+/// Getter for the diffs between the array subranges.
+///
+/// @return the diffs between the array subranges.
+const vector<subrange_diff_sptr>&
+array_diff::subrange_diffs() const
+{return priv_->subrange_diffs_;}
+
+/// Test if any subrange diff is to be reported.
+///
+/// @return true if any subrange diff is to be reported, false
+/// otherwise.
+bool
+array_diff::any_subrange_diff_to_be_reported() const
+{
+  for (const auto& diff: subrange_diffs())
+    if (diff->to_be_reported())
+      return true;
+
+  return false;
+}
+
 /// Setter for the diff between the two array element types.
 ///
-/// @param d the new diff betweend the two array element types.
+/// @param d the new diff between the two array element types.
 void
 array_diff::element_type_diff(diff_sptr d)
 {priv_->element_type_diff_ = d;}
+
+/// Setter for the diff between the two sets of array sub-ranges.
+///
+/// @param d the new diff between the two sets of array sub-ranges.
+void
+array_diff::subrange_diffs(const vector<subrange_diff_sptr>& d)
+{priv_->subrange_diffs_ = d;}
 
 /// @return the pretty representation for the current instance of @ref
 /// array_diff.
@@ -3960,6 +4185,9 @@ array_diff::has_changes() const
     ? element_type_diff()->has_changes()
     : false;
 
+  for (const auto& subrange_diff : subrange_diffs())
+    l |= subrange_diff->has_changes();
+
   return l;
 }
 
@@ -4002,10 +4230,25 @@ compute_diff(array_type_def_sptr	first,
 	     array_type_def_sptr	second,
 	     diff_context_sptr		ctxt)
 {
-  diff_sptr d = compute_diff_for_types(first->get_element_type(),
-				       second->get_element_type(),
-				       ctxt);
-  array_diff_sptr result(new array_diff(first, second, d, ctxt));
+  diff_sptr element_diff = compute_diff_for_types(first->get_element_type(),
+						  second->get_element_type(),
+						  ctxt);
+  vector<subrange_diff_sptr> subrange_diffs;
+  if (first->get_subranges().size() == first->get_subranges().size())
+    {
+      for (unsigned i = 0; i < first->get_subranges().size(); ++i)
+	{
+	  subrange_diff_sptr subrange_diff =
+	    compute_diff(first->get_subranges()[i],
+			 second->get_subranges()[i],
+			 ctxt);
+	  subrange_diffs.push_back(subrange_diff);
+	}
+    }
+  array_diff_sptr result(new array_diff(first, second,
+					element_diff,
+					subrange_diffs,
+					ctxt));
   ctxt->initialize_canonical_diff(result);
   return result;
 }
@@ -4142,6 +4385,166 @@ compute_diff(reference_type_def_sptr	first,
   return result;
 }
 // </reference_type_def>
+
+// <ptr_to_mbr_diff stuff>
+
+
+/// Constructor of @ref ptr_to_mbr_diff.
+///
+/// @param first the first pointer-to-member subject of the diff.
+///
+/// @param second the second pointer-to-member subject of the diff.
+///
+/// @param member_type_diff the diff node carrying changes to the
+/// member type of the pointer-to-member we are considering.
+///
+/// @param containing_type_diff the diff node carrying changes to the
+/// containing type of the pointer-to-member we are considering.
+///
+/// @param ctxt the context of the diff we are considering.
+ptr_to_mbr_diff::ptr_to_mbr_diff(const ptr_to_mbr_type_sptr& first,
+				 const ptr_to_mbr_type_sptr& second,
+				 const diff_sptr&	     member_type_diff,
+				 const diff_sptr&	     containing_type_diff,
+				 diff_context_sptr	     ctxt)
+  : type_diff_base(first, second, ctxt),
+    priv_(new priv(member_type_diff, containing_type_diff))
+{}
+
+/// Getter of the first pointer-to-member subject of the current diff
+/// node.
+///
+/// @return the first pointer-to-member subject of the current diff
+/// node.
+ptr_to_mbr_type_sptr
+ptr_to_mbr_diff::first_ptr_to_mbr_type() const
+{return dynamic_pointer_cast<ptr_to_mbr_type>(first_subject());}
+
+/// Getter of the second pointer-to-member subject of the current diff
+/// node.
+///
+/// @return the second pointer-to-member subject of the current diff
+/// node.
+ptr_to_mbr_type_sptr
+ptr_to_mbr_diff::second_ptr_to_mbr_type() const
+{return dynamic_pointer_cast<ptr_to_mbr_type>(second_subject());}
+
+/// Getter of the diff node carrying changes to the member type of
+/// first subject of the current diff node.
+///
+/// @return The diff node carrying changes to the member type of first
+/// subject of the current diff node.
+const diff_sptr
+ptr_to_mbr_diff::member_type_diff() const
+{return priv_->member_type_diff_;}
+
+/// Getter of the diff node carrying changes to the containing type of
+/// first subject of the current diff node.
+///
+/// @return The diff node carrying changes to the containing type of
+/// first subject of the current diff node.
+const diff_sptr
+ptr_to_mbr_diff::containing_type_diff() const
+{return priv_->containing_type_diff_;}
+
+/// Test whether the current diff node carries any change.
+///
+/// @return true iff the current diff node carries any change.
+bool
+ptr_to_mbr_diff::has_changes() const
+{
+  return first_ptr_to_mbr_type() != second_ptr_to_mbr_type();
+}
+
+/// Test whether the current diff node carries any local change.
+///
+/// @return true iff the current diff node carries any local change.
+enum change_kind
+ptr_to_mbr_diff::has_local_changes() const
+{
+  ir::change_kind k = ir::NO_CHANGE_KIND;
+  if (!equals(*first_ptr_to_mbr_type(), *second_ptr_to_mbr_type(), &k))
+    return k & ir::ALL_LOCAL_CHANGES_MASK;
+  return ir::NO_CHANGE_KIND;
+}
+
+/// Get the pretty representation of the current @ref ptr_to_mbr_diff
+/// node.
+///
+/// @return the pretty representation of the current diff node.
+const string&
+ptr_to_mbr_diff::get_pretty_representation() const
+{
+  if (diff::priv_->pretty_representation_.empty())
+    {
+      std::ostringstream o;
+      o << "ptr_to_mbr_diff["
+	<< first_subject()->get_pretty_representation()
+	<< ", "
+	<< second_subject()->get_pretty_representation()
+	<< "]";
+      diff::priv_->pretty_representation_ = o.str();
+    }
+  return diff::priv_->pretty_representation_;
+}
+
+void
+ptr_to_mbr_diff::report(ostream& out, const string& indent) const
+{
+  context()->get_reporter()->report(*this, out, indent);
+}
+
+/// Populate the vector of children node of the @ref diff base type
+/// sub-object of this instance of @ref ptr_to_mbr_diff.
+///
+/// The children node can then later be retrieved using
+/// diff::children_node().
+void
+ptr_to_mbr_diff::chain_into_hierarchy()
+{
+  append_child_node(member_type_diff());
+  append_child_node(containing_type_diff());
+}
+
+/// Destructor of @ref ptr_to_mbr_diff.
+ptr_to_mbr_diff::~ptr_to_mbr_diff()
+{
+}
+
+/// Compute the diff between two @ref ptr_to_mbr_type types.
+///
+/// Note that the two types must have been created in the same @ref
+/// environment, otherwise, this function aborts.
+///
+/// @param first the first pointer-to-member type to consider for the diff.
+///
+/// @param second the second pointer-to-member type to consider for the diff.
+///
+/// @param ctxt the diff context to use.
+ptr_to_mbr_diff_sptr
+compute_diff(const ptr_to_mbr_type_sptr& first,
+	     const ptr_to_mbr_type_sptr& second,
+	     diff_context_sptr&	 ctxt)
+{
+  diff_sptr member_type_diff =
+    compute_diff(is_type(first->get_member_type()),
+		 is_type(second->get_member_type()),
+		 ctxt);
+
+  diff_sptr containing_type_diff =
+    compute_diff(is_type(first->get_containing_type()),
+		 is_type(second->get_containing_type()),
+		 ctxt);
+
+  ptr_to_mbr_diff_sptr result(new ptr_to_mbr_diff(first, second,
+						  member_type_diff,
+						  containing_type_diff,
+						  ctxt));
+  ctxt->initialize_canonical_diff(result);
+  return result;
+}
+
+// </ptr_to_mbr_diff stuff>
 
 // <qualified_type_diff stuff>
 
@@ -4369,6 +4772,66 @@ enum_diff::ensure_lookup_tables_populated()
 	      }
 	  }
       }
+
+    // If a new enumerator is added with a value that already existed
+    // in the old enum but with a new name, then populate the
+    // enum_diff::priv_::changed_enumerators_ data member with a
+    // change that represents a change to an enumerator name.  The
+    // enum_diff::priv_::inserted_enumerators_ is adjusted accordingly
+    // an the 'new' enumerator is removed in this case.
+
+    enum_type_decl::enumerators enums_to_erase;
+    for (auto& entry : priv_->inserted_enumerators_)
+      {
+	enum_type_decl::enumerator& final_enumerator = entry.second;
+	enum_type_decl::enumerator initial_enumerator;
+	if (first_enum()->find_enumerator_by_value(entry.second.get_value(),
+						   initial_enumerator))
+	  {
+	    enum_type_decl::enumerator foo;
+	    if (!second_enum()->
+		find_enumerator_by_name(initial_enumerator.get_name(),
+					foo))
+	      {
+		priv_->changed_enumerators_[initial_enumerator.get_name()] =
+		  std::make_pair(initial_enumerator, final_enumerator);
+		enums_to_erase.push_back(final_enumerator);
+	      }
+	  }
+      }
+
+    for (auto& enomerator : enums_to_erase)
+      priv_->inserted_enumerators_.erase(enomerator.get_name());
+
+    // If an enumerator is deleted yet its value (with a new name) is
+    // still present among enumerators of the newer enum then populate
+    // the enum_diff::priv_::changed_enumerators_ data member with a
+    // change that represents a change to an enumerator name.  The
+    // enum_diff::priv_::deleted_enumerators_ is adjusted accordingly
+    // an the 'new' enumerator is removed in this case.
+
+    enums_to_erase.clear();
+    for (auto& entry : priv_->deleted_enumerators_)
+      {
+	enum_type_decl::enumerator& initial_enumerator = entry.second;
+	enum_type_decl::enumerator final_enumerator;
+	if (second_enum()->find_enumerator_by_value(entry.second.get_value(),
+						    final_enumerator))
+	  {
+	    enum_type_decl::enumerator foo;
+	    if (!first_enum()->
+		find_enumerator_by_name(final_enumerator.get_name(),
+					foo))
+	      {
+		priv_->changed_enumerators_[initial_enumerator.get_name()] =
+		  std::make_pair(initial_enumerator, final_enumerator);
+		enums_to_erase.push_back(initial_enumerator);
+	      }
+	  }
+      }
+
+    for (auto& enomerator : enums_to_erase)
+      priv_->deleted_enumerators_.erase(enomerator.get_name());
   }
 }
 
@@ -4644,8 +5107,7 @@ class_or_union_diff::priv::count_filtered_subtype_changed_dm(bool local_only)
     {
       if (local_only)
 	{
-	  if ((*i)->has_changes()
-	      && !(*i)->has_local_changes_to_be_reported())
+	  if ((*i)->has_local_changes() && (*i)->is_filtered_out())
 	    ++num_filtered;
 	}
       else
@@ -4677,8 +5139,7 @@ class_or_union_diff::priv::count_filtered_changed_dm(bool local_only)
       diff_sptr diff = i->second;
       if (local_only)
 	{
-	  if ((diff->has_changes() && !diff->has_local_changes_to_be_reported())
-	      || diff->is_filtered_out())
+	  if (diff->has_changes() && diff->is_filtered_out())
 	    ++num_filtered;
 	}
       else
@@ -5099,7 +5560,7 @@ class_or_union_diff::ensure_lookup_tables_populated(void) const
 		//
 		// 2/ It must have been deleted as well.
 		//
-		// 3/ It there must be a non-empty difference between the
+		// 3/ There must be a non-empty difference between the
 		// deleted D and the added D.
 		string_decl_base_sptr_map::const_iterator j =
 		  priv_->deleted_data_members_.find(name);
@@ -5168,6 +5629,59 @@ class_or_union_diff::ensure_lookup_tables_populated(void) const
 	priv_->inserted_data_members_.erase
 	  (i->second->second_var()->get_anon_dm_reliable_name());
       }
+
+    // Now detect anonymous data members that might appear as deleted
+    // even though all their data members are still present.  Consider
+    // these as being non-deleted.
+    string_decl_base_sptr_map non_anonymous_dms_in_second_class;
+    collect_non_anonymous_data_members(second_class_or_union(),
+				       non_anonymous_dms_in_second_class);
+    vector<string> deleted_data_members_to_delete;
+    // Walk data members considered deleted ...
+    for (auto& entry : priv_->deleted_data_members_)
+      {
+	var_decl_sptr data_member = is_var_decl(entry.second);
+	ABG_ASSERT(data_member);
+	if (is_anonymous_data_member(data_member))
+	  {
+	    // Let's look at this anonymous data member that is
+	    // considered deleted because it's moved from where it was
+	    // initially, at very least.  If its leaf data members are
+	    // still present in the second class then, we won't
+	    // consider it as deleted.
+	    class_or_union_sptr cou = anonymous_data_member_to_class_or_union(data_member);
+	    ABG_ASSERT(cou);
+	    string_decl_base_sptr_map non_anonymous_data_members;
+	    // Lets collect the leaf data members of the anonymous
+	    // data member.
+	    collect_non_anonymous_data_members(cou, non_anonymous_data_members);
+	    bool anonymous_dm_members_present = true;
+	    // Let's see if at least one of the leaf members of the
+	    // anonymous data member is NOT present in the second
+	    // version of the class.
+	    for (auto& e : non_anonymous_data_members)
+	      {
+		if (non_anonymous_dms_in_second_class.find(e.first)
+		    == non_anonymous_dms_in_second_class.end())
+		  // Grrr, OK, it looks like at least one leaf data
+		  // member of the original anonymous data member was
+		  // removed from the class, so yeah, the anonymous
+		  // data member might have been removed after all.
+		  anonymous_dm_members_present = false;
+	      }
+	    if (anonymous_dm_members_present)
+	      // All leaf data members of the anonymous data member
+	      // are still present in the second version of the class.
+	      // So let's mark that anonymous data member as NOT being
+	      // deleted.
+	      deleted_data_members_to_delete.push_back(data_member->get_anon_dm_reliable_name());
+	  }
+      }
+    // All anonymous data members that were recognized as being NOT
+    // deleted should be removed from the set of deleted data members
+    // now.
+    for (string& name_of_dm_to_delete: deleted_data_members_to_delete)
+      priv_->deleted_data_members_.erase(name_of_dm_to_delete);
   }
   sort_string_data_member_diff_sptr_map(priv_->subtype_changed_dm_,
 					priv_->sorted_subtype_changed_dm_);
@@ -5641,6 +6155,46 @@ class_diff::ensure_lookup_tables_populated(void) const
 	    else
 	      get_priv()->inserted_bases_[name] = b;
 	  }
+      }
+
+    // ===============================================================
+    // Detect when a data member is deleted from the class but is now
+    // present in one of the bases at the same offset.  In that case,
+    // the data member should not be considered as removed.
+    // ===============================================================
+    string_decl_base_sptr_map& deleted_data_members =
+      class_or_union_diff::priv_->deleted_data_members_;
+
+    vector<var_decl_sptr> deleted_data_members_present_in_bases;
+    for (auto entry : deleted_data_members)
+      {
+	var_decl_sptr deleted_member = is_var_decl(entry.second);
+	ABG_ASSERT(deleted_member);
+	for (class_decl::base_spec_sptr base : second_class_decl()->get_base_specifiers())
+	  {
+	    class_decl_sptr klass = base->get_base_class();
+	    var_decl_sptr member = klass->find_data_member(deleted_member->get_name());
+	    if (member)
+	      deleted_data_members_present_in_bases.push_back(member);
+	  }
+      }
+    // Walk the deleted data members that are now in one of the bases,
+    // of the new type, at the same offset, and let's see if they have
+    // sub-type changes.  In any cases, these should not be considered
+    // as being deleted.
+    for (var_decl_sptr m : deleted_data_members_present_in_bases)
+      {
+	string name = m->get_name();
+	auto it = deleted_data_members.find(name);
+	ABG_ASSERT(it != deleted_data_members.end());
+	var_decl_sptr deleted_member = is_var_decl(it->second);
+	if (*deleted_member != *m)
+	  {
+	    var_diff_sptr dif = compute_diff(deleted_member, m, context());
+	    ABG_ASSERT(dif);
+	    class_or_union_diff::priv_->subtype_changed_dm_[name]= dif;
+	  }
+	deleted_data_members.erase(name);
       }
   }
 
@@ -8412,6 +8966,74 @@ void
 corpus_diff::diff_stats::num_func_with_virtual_offset_changes(size_t n)
 {priv_->num_func_with_virt_offset_changes = n;}
 
+/// Getter for the number of functions with local harmful changes.
+///
+/// A local harmful change is a harmful change that is local to the
+/// function itself or is local to a return or parameter type.
+///
+/// @return the number of functions with local harmful changes.
+size_t
+corpus_diff::diff_stats::num_func_with_local_harmful_changes() const
+{return priv_->num_func_with_local_harmful_changes;}
+
+/// Setter for the number of functions with local harmful changes.
+///
+/// A local harmful change is a harmful change that is local to the
+/// function itself or is local to a return or parameter type.
+///
+/// @param n the number of functions with local harmful changes.
+void
+corpus_diff::diff_stats::num_func_with_local_harmful_changes(size_t n)
+{priv_->num_func_with_local_harmful_changes = n;}
+
+/// Getter for the number of variables with local harmful changes.
+///
+/// A local harmful change is a harmful change that is local to the
+/// variable itself or is local to its type.
+///
+/// @return the number of variables with local harmful changes.
+size_t
+corpus_diff::diff_stats::num_var_with_local_harmful_changes() const
+{return priv_->num_var_with_local_harmful_changes;}
+
+/// Setter for the number of variables with local harmful changes.
+///
+/// A local harmful change is a harmful change that is local to the
+/// variable itself or is local to its type.
+///
+/// @param n the number of variables with local harmful changes.
+void
+corpus_diff::diff_stats::num_var_with_local_harmful_changes(size_t n)
+{priv_->num_var_with_local_harmful_changes = n;}
+
+/// Getter for the number of functions with incompatible changes.
+///
+/// @return the number of functions with incompatible changes.
+size_t
+corpus_diff::diff_stats::num_func_with_incompatible_changes() const
+{return priv_->num_func_with_incompatible_changes;}
+
+/// Setter for the number of functions with incompatible changes.
+///
+/// @param n the number of functions with incompatible changes.
+void
+corpus_diff::diff_stats::num_func_with_incompatible_changes(size_t n)
+{priv_->num_func_with_incompatible_changes = n;}
+
+/// Getter for the number of variables with incompatible changes.
+///
+/// @return the number of variables with incompatible changes.
+size_t
+corpus_diff::diff_stats::num_var_with_incompatible_changes() const
+{return priv_->num_var_with_incompatible_changes;}
+
+/// Setter for the number of variables with incompatible changes.
+///
+/// @param n the number of variables with incompatible changes.
+void
+corpus_diff::diff_stats::num_var_with_incompatible_changes(size_t n)
+{priv_->num_var_with_incompatible_changes = n;}
+
 /// Getter for the number of functions that have a change in their
 /// sub-types, minus the number of these functions that got filtered
 /// out from the diff.
@@ -8422,6 +9044,15 @@ corpus_diff::diff_stats::num_func_with_virtual_offset_changes(size_t n)
 size_t
 corpus_diff::diff_stats::net_num_func_changed() const
 {return num_func_changed() - num_changed_func_filtered_out();}
+
+/// Getter of the net number of functions with changes that are not
+/// incompatible.
+///
+/// @return net number of functions with changes that are not
+/// incompatible.
+size_t
+corpus_diff::diff_stats::net_num_non_incompatible_func_changed() const
+{return net_num_func_changed() - num_func_with_incompatible_changes();}
 
 /// Getter for the number of variables removed.
 ///
@@ -8565,6 +9196,15 @@ corpus_diff::diff_stats::num_changed_vars_filtered_out(size_t n)
 size_t
 corpus_diff::diff_stats::net_num_vars_changed() const
 {return num_vars_changed() - num_changed_vars_filtered_out();}
+
+/// Getter of the net number of variables with changes that are not
+/// incompatible.
+///
+/// @return net number of variables with changes that are not
+/// incompatible.
+size_t
+corpus_diff::diff_stats::net_num_non_incompatible_var_changed() const
+{return net_num_vars_changed() - num_var_with_incompatible_changes();}
 
 /// Getter for the number of function symbols (not referenced by any
 /// debug info) that got removed.
@@ -8897,6 +9537,24 @@ void
 corpus_diff::diff_stats::num_leaf_func_changes(size_t n)
 {priv_->num_leaf_func_changes = n;}
 
+/// Getter for the number of leaf function diff nodes that carry
+/// incompatible changes.
+///
+/// @return the number of leaf function diff nodes that carry
+/// incompatible changes.
+size_t
+corpus_diff::diff_stats::num_leaf_func_with_incompatible_changes() const
+{return priv_->num_leaf_func_with_incompatible_changes;}
+
+/// Setter for the number of leaf function diff nodes that carry
+/// incompatible changes.
+///
+/// @param n the new number of leaf function diff nodes that carry
+/// incompatible changes.
+void
+corpus_diff::diff_stats::num_leaf_func_with_incompatible_changes(size_t n)
+{priv_->num_leaf_func_with_incompatible_changes = n;}
+
 /// Getter for the number of leaf function change diff nodes that were
 /// filtered out.
 ///
@@ -8926,6 +9584,18 @@ size_t
 corpus_diff::diff_stats::net_num_leaf_func_changes() const
 {return num_leaf_func_changes() - num_leaf_func_changes_filtered_out();}
 
+/// Getter for the net number of leaf function diff nodes that carry
+/// changes that are NOT incompatible.
+///
+/// @return net number of leaf function diff nodes that carry changes
+/// that are NOT incompatible.
+size_t
+corpus_diff::diff_stats::net_num_leaf_func_non_incompatible_changes() const
+{
+  return (net_num_leaf_func_changes()
+	  - num_leaf_func_with_incompatible_changes());
+}
+
 /// Getter for the number of leaf variable change diff nodes.
 ///
 /// @return the number of leaf variable change diff nodes.
@@ -8939,6 +9609,24 @@ corpus_diff::diff_stats::num_leaf_var_changes() const
 void
 corpus_diff::diff_stats::num_leaf_var_changes(size_t n)
 {priv_->num_leaf_var_changes = n;}
+
+/// Getter for the number of leaf variable diff nodes that carry
+/// incompatible changes.
+///
+/// @return the number of leaf variable diff nodes that carry
+/// incompatible changes.
+size_t
+corpus_diff::diff_stats::num_leaf_var_with_incompatible_changes() const
+{return priv_->num_leaf_var_with_incompatible_changes;}
+
+/// Setter for the number of leaf variable diff nodes that carry
+/// incompatible changes.
+///
+/// @param n the new number of leaf variable diff nodes that carry
+/// incompatible changes.
+void
+corpus_diff::diff_stats::num_leaf_var_with_incompatible_changes(size_t n)
+{priv_->num_leaf_var_with_incompatible_changes = n;}
 
 /// Getter of the number of added types that are unreachable from the
 /// public interface of the ABI corpus.
@@ -9165,7 +9853,14 @@ size_t
 corpus_diff::diff_stats::net_num_leaf_var_changes() const
 {return num_leaf_var_changes() - num_leaf_var_changes_filtered_out();}
 
-
+/// Getter for the net number of leaf variable diff nodes that carry
+/// changes that are NOT incompatible.
+///
+/// @return the net number of leaf variable diff nodes that carry
+/// changes that are NOT incompatible.
+size_t
+corpus_diff::diff_stats::net_num_leaf_var_non_incompatible_changes() const
+{return net_num_leaf_var_changes() - num_leaf_var_with_incompatible_changes();}
 // <corpus_diff stuff>
 
 /// Getter of the context associated with this corpus.
@@ -9221,7 +9916,7 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	unsigned i = it->index();
 	ABG_ASSERT(i < first_->get_functions().size());
 
-	function_decl* deleted_fn = first_->get_functions()[i];
+	const function_decl* deleted_fn = first_->get_functions()[i];
 	string n = get_function_id_or_pretty_representation(deleted_fn);
 	ABG_ASSERT(!n.empty());
 	// The below is commented out because there can be several
@@ -9241,7 +9936,7 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	     ++iit)
 	  {
 	    unsigned i = *iit;
-	    function_decl* added_fn = second_->get_functions()[i];
+	    const function_decl* added_fn = second_->get_functions()[i];
 	    string n = get_function_id_or_pretty_representation(added_fn);
 	    ABG_ASSERT(!n.empty());
 	    // The below is commented out because there can be several
@@ -9252,8 +9947,10 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	      deleted_fns_.find(n);
 	    if (j != deleted_fns_.end())
 	      {
-		function_decl_sptr f(j->second, noop_deleter());
-		function_decl_sptr s(added_fn, noop_deleter());
+		function_decl_sptr f(const_cast<function_decl*>(j->second),
+				     noop_deleter());
+		function_decl_sptr s(const_cast<function_decl*>(added_fn),
+				     noop_deleter());
 		function_decl_diff_sptr d = compute_diff(f, s, ctxt);
 		if (*j->second != *added_fn)
 		  changed_fns_map_[j->first] = d;
@@ -9321,11 +10018,33 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	unsigned i = it->index();
 	ABG_ASSERT(i < first_->get_variables().size());
 
-	var_decl* deleted_var = first_->get_variables()[i];
+	const var_decl_sptr deleted_var = first_->get_variables()[i];
 	string n = deleted_var->get_id();
 	ABG_ASSERT(!n.empty());
-	ABG_ASSERT(deleted_vars_.find(n) == deleted_vars_.end());
-	deleted_vars_[n] = deleted_var;
+	// The below is commented out because there can be several
+	// global variables with the same ID in the corpus.  So
+	// several global variables with the same ID can be deleted.
+	//
+	// In general these are static member variables.  There can be
+	// multiple instances of these (one per translation unit) that
+	// appear to be different, but they are put into a COMDAT
+	// section (with CLOOS ELF binding in modern toolchains) in
+	// the end.
+	//
+	// In that case, let's keep track of the first global variable
+	// removed and let's ignore the subsequent ones as they should
+	// all be "merged" into one by the linker.
+	//
+	// ABG_ASSERT(deleted_vars_.find(n) == deleted_vars_.end());
+	string_var_ptr_map::const_iterator j = deleted_vars_.find(n);
+	if (j != deleted_vars_.end())
+	  {
+	    ABG_ASSERT(is_member_decl(j->second)
+		       && get_member_is_static(j->second));
+	    continue;
+	  }
+	else
+	  deleted_vars_[n] = deleted_var;
       }
 
     for (vector<insertion>::const_iterator it = e.insertions().begin();
@@ -9338,7 +10057,7 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	     ++iit)
 	  {
 	    unsigned i = *iit;
-	    var_decl* added_var = second_->get_variables()[i];
+	    const var_decl_sptr added_var = second_->get_variables()[i];
 	    string n = added_var->get_id();
 	    ABG_ASSERT(!n.empty());
 	    {
@@ -9346,7 +10065,7 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	      if ( k != added_vars_.end())
 		{
 		  ABG_ASSERT(is_member_decl(k->second)
-			 && get_member_is_static(k->second));
+			     && get_member_is_static(k->second));
 		  continue;
 		}
 	    }
@@ -9356,8 +10075,8 @@ corpus_diff::priv::ensure_lookup_tables_populated()
 	      {
 		if (*j->second != *added_var)
 		  {
-		    var_decl_sptr f(j->second, noop_deleter());
-		    var_decl_sptr s(added_var, noop_deleter());
+		    var_decl_sptr f = j->second;
+		    var_decl_sptr s = added_var;
 		    changed_vars_map_[n] = compute_diff(f, s, ctxt);
 		  }
 		deleted_vars_.erase(j);
@@ -9807,7 +10526,7 @@ function_is_suppressed(const function_decl* fn,
 /// change reports about variable @p fn, if that variable changes in
 /// the way expressed by @p k.
 static bool
-variable_is_suppressed(const var_decl* var,
+variable_is_suppressed(const var_decl_sptr& var,
 		       const suppression_sptr suppr,
 		       variable_suppression::change_kind k,
 		       const diff_context_sptr ctxt)
@@ -9884,7 +10603,7 @@ corpus_diff::priv::apply_supprs_to_added_removed_fns_vars_unreachable_types()
 	    if (is_member_function(e->second)
 		&& get_member_function_is_virtual(e->second))
 	      {
-		function_decl *f = e->second;
+		const function_decl *f = e->second;
 		class_decl_sptr c =
 		  is_class_type(is_method_type(f->get_type())->get_class_type());
 		ABG_ASSERT(c);
@@ -9898,7 +10617,7 @@ corpus_diff::priv::apply_supprs_to_added_removed_fns_vars_unreachable_types()
 	    if (is_member_function(e->second)
 		&& get_member_function_is_virtual(e->second))
 	      {
-		function_decl *f = e->second;
+		const function_decl *f = e->second;
 		class_decl_sptr c =
 		  is_class_type(is_method_type(f->get_type())->get_class_type());
 		ABG_ASSERT(c);
@@ -10059,7 +10778,7 @@ corpus_diff::priv::added_function_is_suppressed(const function_decl* fn) const
 /// @return true iff the change reports for a give given deleted
 /// variable has been deleted.
 bool
-corpus_diff::priv::deleted_variable_is_suppressed(const var_decl* var) const
+corpus_diff::priv::deleted_variable_is_suppressed(const var_decl_sptr& var) const
 {
   if (!var)
     return false;
@@ -10078,7 +10797,7 @@ corpus_diff::priv::deleted_variable_is_suppressed(const var_decl* var) const
 /// @return true iff the change reports for a given deleted
 /// variable has been deleted.
 bool
-corpus_diff::priv::added_variable_is_suppressed(const var_decl* var) const
+corpus_diff::priv::added_variable_is_suppressed(const var_decl_sptr& var) const
 {
   if (!var)
     return false;
@@ -10440,6 +11159,7 @@ corpus_diff::priv::apply_filters_and_compute_diff_stats(diff_stats& stat)
        i != changed_fns_.end();
        ++i)
     {
+      bool incompatible_change = false;
       if ((*i)->is_filtered_out())
 	{
 	  stat.num_changed_func_filtered_out
@@ -10449,16 +11169,64 @@ corpus_diff::priv::apply_filters_and_compute_diff_stats(diff_stats& stat)
 	    stat.num_leaf_func_changes_filtered_out
 	      (stat.num_leaf_func_changes_filtered_out() + 1);
 	}
-      else
+
+      // Now let's detect functions with incompatible changes.
+      if (!(*i)->is_categorized_as_suppressed())
 	{
-	  if ((*i)->get_category() & VIRTUAL_MEMBER_CHANGE_CATEGORY)
-	    stat.num_func_with_virtual_offset_changes
-	      (stat.num_func_with_virtual_offset_changes() + 1);
+	  // Note that a filtered-out function diff (because of
+	  // redundancy) can still carry an incompatible change.  In
+	  // that case, the diff will later be removed from the
+	  // account of filtered diff nodes.
+	  //
+	  // Also note that such a filtered-out function was *NOT*
+	  // suppressed by a user-provided suppression specification.
+
+	  if (filtering::has_fn_with_virtual_offset_change(*i))
+	    {
+	      stat.num_func_with_virtual_offset_changes
+		(stat.num_func_with_virtual_offset_changes() + 1);
+	      incompatible_change = true;
+	    }
+
+	  // Are any of the local changes of the function_diff harmful?
+	  // If yes, then set stat.num_func_with_local_harmful_changes()
+	  // and stat.num_var_with_local_harmful_changes().
+	  if (filtering::has_fn_return_or_parm_harmful_change((*i).get()))
+	    {
+	      stat.num_func_with_local_harmful_changes
+		(stat.num_func_with_local_harmful_changes() + 1);
+	      incompatible_change = true;
+	    }
 	}
 
       if ((*i)->has_local_changes())
 	stat.num_leaf_func_changes
 	  (stat.num_leaf_func_changes() + 1);
+
+      if (incompatible_change)
+	{
+	  incompatible_changed_fns_.push_back(*i);
+	  stat.num_func_with_incompatible_changes
+	    (stat.num_func_with_incompatible_changes() + 1);
+
+	  if ((*i)->has_local_changes())
+	    // The function is a leaf node.
+	    stat.num_leaf_func_with_incompatible_changes
+	      (stat.num_leaf_func_with_incompatible_changes() + 1);
+
+	  if ((*i)->is_filtered_out())
+	    {
+	      // If the incompatible change was filtered-out (possibly
+	      // b/c of redundancy) consider it as not being filtered
+	      // out anymore.
+	      stat.num_changed_func_filtered_out
+		(stat.num_changed_func_filtered_out() - 1);
+
+	      if ((*i)->has_local_changes())
+		stat.num_leaf_func_changes_filtered_out
+		  (stat.num_leaf_func_changes_filtered_out() - 1);
+	    }
+	}
     }
 
   if (get_context()->do_log())
@@ -10472,12 +11240,14 @@ corpus_diff::priv::apply_filters_and_compute_diff_stats(diff_stats& stat)
       t.start();
     }
 
-  // Walk the changed variables diff nodes to count the number of
-  // filtered-out variables.
+  // Similarly to function diff nodes above, walk the changed
+  // variables diff nodes to count the number of filtered-out,
+  // suppressed and incompatible variable diff nodes.
   for (var_diff_sptrs_type ::const_iterator i = sorted_changed_vars_.begin();
        i != sorted_changed_vars_.end();
        ++i)
     {
+      bool incompatible_change = false;
       if ((*i)->is_filtered_out())
 	{
 	  stat.num_changed_vars_filtered_out
@@ -10487,9 +11257,39 @@ corpus_diff::priv::apply_filters_and_compute_diff_stats(diff_stats& stat)
 	    stat.num_leaf_var_changes_filtered_out
 	      (stat.num_leaf_var_changes_filtered_out() + 1);
 	}
+
+      if (!(*i)->is_categorized_as_suppressed())
+	{
+	  if (filtering::has_var_harmful_local_change(*i))
+	    {
+	      incompatible_change = true;
+	      incompatible_changed_vars_.push_back(*i);
+	      stat.num_var_with_local_harmful_changes
+		(stat.num_var_with_local_harmful_changes() + 1);
+	      stat.num_var_with_incompatible_changes
+		(stat.num_var_with_incompatible_changes() + 1);
+
+	      if ((*i)->is_filtered_out())
+		{
+		  stat.num_changed_vars_filtered_out
+		    (stat.num_changed_vars_filtered_out() - 1);
+
+		  if ((*i)->has_local_changes())
+		    stat.num_leaf_var_changes_filtered_out
+		      (stat.num_leaf_var_changes_filtered_out() - 1);
+		}
+	    }
+	}
+
       if ((*i)->has_local_changes())
-	stat.num_leaf_var_changes
-	  (stat.num_leaf_var_changes() + 1);
+	{
+	  stat.num_leaf_var_changes
+	    (stat.num_leaf_var_changes() + 1);
+
+	  if (incompatible_change)
+	    stat.num_leaf_var_with_incompatible_changes
+	      (stat.num_leaf_var_with_incompatible_changes() + 1);
+	}
     }
 
   if (get_context()->do_log())
@@ -11128,7 +11928,7 @@ corpus_diff::added_functions()
 /// usually made of the name and version of the underlying ELF symbol
 /// of the function for corpora that were built from ELF files.
 const string_function_decl_diff_sptr_map&
-corpus_diff::changed_functions()
+corpus_diff::changed_functions() const
 {return priv_->changed_fns_map_;}
 
 /// Getter for a sorted vector of functions which signature didn't
@@ -11137,8 +11937,26 @@ corpus_diff::changed_functions()
 /// @return a sorted vector of functions which signature didn't
 /// change, but which do have some indirect changes in their parms.
 const function_decl_diff_sptrs_type&
-corpus_diff::changed_functions_sorted()
+corpus_diff::changed_functions_sorted() const
 {return priv_->changed_fns_;}
+
+/// Getter of the set of diff nodes representing incompatibly changed
+/// functions
+///
+/// @return the set of diff nodes representing incompatibly changed
+/// functions
+const function_decl_diff_sptrs_type&
+corpus_diff::incompatible_changed_functions() const
+{return priv_->incompatible_changed_fns_;}
+
+/// Getter of the set of diff nodes representing incompatibly changed
+/// functions
+///
+/// @return the set of diff nodes representing incompatibly changed
+/// functions
+function_decl_diff_sptrs_type&
+corpus_diff::incompatible_changed_functions()
+{return priv_->incompatible_changed_fns_;}
 
 /// Getter for the variables that got deleted from the first subject
 /// of the diff.
@@ -11170,6 +11988,24 @@ corpus_diff::changed_variables()
 const var_diff_sptrs_type&
 corpus_diff::changed_variables_sorted()
 {return priv_->sorted_changed_vars_;}
+
+/// Getter of the set of diff nodes representing incompatibly changed
+/// global variables.
+///
+/// @return the set of diff nodes representing incompatibly changed
+/// global variables.
+const var_diff_sptrs_type&
+corpus_diff::incompatible_changed_variables() const
+{return priv_->incompatible_changed_vars_;}
+
+/// Getter of the set of diff nodes representing incompatibly changed
+/// global variables.
+///
+/// @return the set of diff nodes representing incompatibly changed
+/// global variables.
+var_diff_sptrs_type&
+corpus_diff::incompatible_changed_variables()
+{return priv_->incompatible_changed_vars_;}
 
 /// Getter for function symbols not referenced by any debug info and
 /// that got deleted.
@@ -11354,18 +12190,21 @@ corpus_diff::has_incompatible_changes() const
     apply_filters_and_suppressions_before_reporting();
 
   bool has_incompatible_changes  =
-    (soname_changed() || architecture_changed()
-	  || stats.net_num_func_removed() != 0
-	  || (stats.num_func_with_virtual_offset_changes() != 0
-	      // If all reports about functions with sub-type changes
-	      // have been suppressed, then even those about functions
-	      // that are virtual don't matter anymore because the
-	      // user willingly requested to shut them down
-	      && stats.net_num_func_changed() != 0)
-	  || stats.net_num_vars_removed() != 0
-	  || stats.net_num_removed_func_syms() != 0
-	  || stats.net_num_removed_var_syms() != 0
-	  || stats.net_num_removed_unreachable_types() != 0);
+    (soname_changed()
+     || architecture_changed()
+     || stats.net_num_func_removed() != 0
+     || (stats.num_func_with_incompatible_changes()
+	 // If all reports about functions changes have been
+	 // suppressed, then even those about incompatible changes
+	 // don't matter anymore because the user willingly requested
+	 // to shut them down.
+	 && stats.net_num_func_changed() != 0)
+     || stats.net_num_vars_removed() != 0
+     || (stats.num_var_with_incompatible_changes()
+	 && stats.net_num_vars_changed() != 0)
+     || stats.net_num_removed_func_syms() != 0
+     || stats.net_num_removed_var_syms() != 0
+     || stats.net_num_removed_unreachable_types() != 0);
 
   // If stats.net_num_changed_unreachable_types() != 0 then walk the
   // corpus_diff::priv::changed_unreachable_types_, and see if there
@@ -11548,6 +12387,8 @@ struct leaf_diff_node_marker_visitor : public diff_node_visitor
 	// typedef change which underlying type is an anonymous
 	// struct/union.
 	&& !is_anonymous_class_or_union_diff(d)
+	// An anonymous subrange doesn't make sense either.
+	&& !is_anonymous_subrange_diff(d)
 	// Don't show decl-only-ness changes either.
 	&& !filtering::has_decl_only_def_change(d)
 	// Sometime, we can encounter artifacts of bogus DWARF that
@@ -12184,6 +13025,58 @@ struct category_propagation_visitor : public diff_node_visitor
 	  if (update_canonical)
 	    canonical->add_to_category(c);
       }
+
+    if (filtering::has_void_ptr_to_ptr_change(d)
+	|| filtering::has_harmless_enum_to_int_change(d))
+      {
+	// The current diff node has either:
+	//
+	//   1/ a harmless "void pointer to pointer" change
+	//
+	//   or:
+	//
+	//   2/ a harmless "enum to int" change.
+	//
+	// The change 1/ was most likely flagged locally as a
+	// non-compatible distinct change, aka, a non-compatible
+	// change between two types of different kinds.  At a higher
+	// level however, as we see that it's just a void pointer to
+	// pointer change, we should unset the
+	// NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY categorization.
+	//
+	// The change 2/ was most likely flagged locally (in the
+	// children nodes of the current diff node) as a
+	// non-compatible name change.  At a higher level however, as
+	// we see that it's just a harmless "enum to int" change,
+	// let's unset the NON_COMPATIBLE_NAME_CHANGE_CATEGORY
+	// categorization as well.
+	diff_category c = d->get_category();
+	c &= (~NON_COMPATIBLE_NAME_CHANGE_CATEGORY
+	      & ~NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY);
+	d->set_category(c);
+	if (is_pointer_diff(d) || is_reference_diff(d))
+	  {
+	    // For pointers and references, changes to
+	    // pointed-to-types are considered local.  So, if some
+	    // pointed-to-types have non-compatible name or distinct
+	    // change, then the local category of the
+	    // pointer/reference will reflect that.  Let's thus clear
+	    // those NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY and
+	    // NON_COMPATIBLE_NAME_CHANGE_CATEGORY bits from the local
+	    // category as well.
+	    c = d->get_local_category();
+	    c &= (~NON_COMPATIBLE_NAME_CHANGE_CATEGORY
+		  & ~NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY);
+	    d->set_local_category(c);
+	  }
+      }
+
+    if (filtering::has_benign_array_of_unknown_size_change(d))
+      {
+	diff_category c = d->get_category();
+	c &= ~NON_COMPATIBLE_NAME_CHANGE_CATEGORY;
+	d->set_category(c);
+      }
   }
 };// end struct category_propagation_visitor
 
@@ -12653,6 +13546,8 @@ struct diff_node_printer : public diff_node_visitor
     do_indent(level_ + 1);
     out_ << "category: "<< d->get_category() << "\n";
     do_indent(level_ + 1);
+    out_ << "local category: "<< d->get_local_category() << "\n";
+    do_indent(level_ + 1);
     out_ << "@: " << std::hex << d << std::dec << "\n";
     do_indent(level_ + 1);
     out_ << "@-canonical: " << std::hex
@@ -12746,6 +13641,15 @@ print_diff_tree(corpus_diff_sptr diff_tree,
 		std::ostream& o)
 {print_diff_tree(diff_tree.get(), o);}
 
+/// Print a given category out to stdout for debuging purposes
+///
+/// @param c the category to print to stdout.
+void
+print_category(diff_category c)
+{
+  std::cout << c << std::endl;
+}
+
 // <redundancy_marking_visitor>
 
 /// A tree visitor to categorize nodes with respect to the
@@ -12813,7 +13717,7 @@ struct redundancy_marking_visitor : public diff_node_visitor
 		    continue;
 		  if (sib->get_canonical_diff() == d->get_canonical_diff()
 		      // Sibbling diff nodes that carry base type
-		      // changes ar to be marked as redundant.
+		      // changes are to be marked as redundant.
 		      && (is_base_diff(sib) || is_distinct_diff(sib)))
 		    {
 		      redundant_with_sibling_node = true;
@@ -12902,14 +13806,17 @@ struct redundancy_marking_visitor : public diff_node_visitor
       }
     else
       {
-	// Propagate the redundancy categorization of the children nodes
-	// to this node.  But if this node has local changes, then it
-	// doesn't inherit redundancy from its children nodes.
+	// Propagate the redundancy categorization of the children
+	// nodes to this node.  But if this node has local harmful
+	// changes then it doesn't inherit redundancy from its
+	// children nodes.
 	if (!(d->get_category() & REDUNDANT_CATEGORY)
-	    && (!d->has_local_changes_to_be_reported()
-		// By default, pointer, reference and qualified types
-		// consider that a local changes to their underlying
-		// type is always a local change for themselves.
+	    && ((!d->has_local_changes_to_be_reported()
+		 || !is_harmful_category(d->get_local_category()))
+		// By default, pointer, reference, array and qualified
+		// types consider that a local changes to their
+		// underlying type is always a local change for
+		// themselves.
 		//
 		// This is as if those types don't have local changes
 		// in the same sense as other types.  So we always
@@ -12926,6 +13833,7 @@ struct redundancy_marking_visitor : public diff_node_visitor
 		// typedef itself are considered local of
 		// LOCAL_NON_TYPE_CHANGE_KIND kind.
 		|| is_pointer_diff(d)
+		|| is_array_diff(d)
 		|| is_qualified_type_diff(d)
 		// A typedef with local non-type changes should not
 		// see redundancy propagation from its underlying
@@ -12956,6 +13864,7 @@ struct redundancy_marking_visitor : public diff_node_visitor
 	  {
 	    bool has_non_redundant_child = false;
 	    bool has_non_empty_child = false;
+	    bool is_array_diff_node = is_array_diff(d);
 	    for (vector<diff*>::const_iterator i =
 		   d->children_nodes().begin();
 		 i != d->children_nodes().end();
@@ -12963,7 +13872,16 @@ struct redundancy_marking_visitor : public diff_node_visitor
 	      {
 		if ((*i)->has_changes())
 		  {
-		    has_non_empty_child = true;
+		    // If we are looking at a child node of an array,
+		    // do not take a subrange diff node change into
+		    // account when considering redundancy.  In other
+		    // words, a subrange diff node that carries a
+		    // change should not be considered as a non-empty
+		    // child node.  This is because we want to report
+		    // all subrange diff node changes and not consider
+		    // them as redundant.
+		    if (!is_array_diff_node || !is_subrange_diff(*i))
+		      has_non_empty_child = true;
 		    // Let's see if the current child node '*i' is
 		    // "non-redundant".
 		    //
@@ -13118,18 +14036,40 @@ void
 clear_redundancy_categorization(corpus_diff_sptr diff_tree)
 {clear_redundancy_categorization(diff_tree.get());}
 
-/// Apply the @ref diff tree filters that have been associated to the
-/// context of the a given @ref corpus_diff tree.  As a result, the
-/// nodes of the @diff tree are going to be categorized into one of
-/// several of the categories of @ref diff_category.
+/// Apply the @ref diff tree filters that have been associated with
+/// the context of the a given @ref diff, categorize the diff nodes
+/// subsequently.  As a result, the nodes of the @p diff_tree tree are
+/// going to be properly filtered out at reporting time.
 ///
-/// @param diff_tree the @ref corpus_diff instance which @ref diff are
-/// to be categorized.
+/// @param diff_tree the @ref diff instance to consider.
 void
-apply_filters(corpus_diff_sptr diff_tree)
+apply_filters_and_categorize_diff_node_tree(diff_sptr& diff_tree)
 {
-  diff_tree->context()->maybe_apply_filters(diff_tree);
-  propagate_categories(diff_tree);
+  if (!diff_tree)
+    return;
+
+  diff_context_sptr ctxt = diff_tree->context();
+  ABG_ASSERT(ctxt);
+
+  if (!ctxt->perform_change_categorization())
+    return;
+
+  apply_suppressions(diff_tree);
+  ctxt->maybe_apply_filters(diff_tree);
+  categorize_redundancy(diff_tree);
+}
+
+/// Apply the @ref diff tree filters that have been associated with
+/// the context of the a given @ref corpus_diff, categorize the diff
+/// nodes subsequently.  As a result, the nodes of the @p c tree are
+/// going to be properly filtered out at reporting time.
+///
+/// @param c the @ref corpus_diff instance to consider.
+void
+apply_filters_and_categorize_diff_node_tree(corpus_diff_sptr& c)
+{
+  if (c)
+    c->apply_filters_and_suppressions_before_reporting();
 }
 
 /// Test if a diff node represents the difference between a variadic

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
-// Copyright (C) 2020-2023 Google, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
+// Copyright (C) 2020-2025 Google, Inc.
 //
 // Author: Matthias Maennich
 
@@ -115,6 +115,184 @@ symtab::lookup_symbol(GElf_Addr symbol_addr) const
   return empty_result;
 }
 
+/// Lookup an undefined function symbol with a given name.
+///
+/// @param sym_name the name of the function symbol to lookup.
+///
+/// @return the undefined function symbol found or nil if none was
+/// found.
+const elf_symbol_sptr
+symtab::lookup_undefined_function_symbol(const std::string& sym_name)
+{
+  symtab_filter f = make_filter();
+  f.set_variables(false);
+  f.set_public_symbols(false);
+  f.set_functions(true);
+  f.set_undefined_symbols(true);
+
+  elf_symbol_sptr result;
+  for (auto sym : filtered_symtab(*this, f))
+    if (sym_name == sym->get_name())
+      {
+	result = sym;
+	break;
+      }
+
+  return result;
+}
+
+/// Lookup an undefined variable symbol with a given name.
+///
+/// @param sym_name the name of the variable symbol to lookup.
+///
+/// @return the undefined variable symbol found or nil if none was
+/// found.
+const elf_symbol_sptr
+symtab::lookup_undefined_variable_symbol(const std::string& sym_name)
+{
+  symtab_filter f = make_filter();
+  f.set_functions(false);
+  f.set_public_symbols(false);
+  f.set_undefined_symbols(true);
+  f.set_variables(true);
+
+  elf_symbol_sptr result;
+  for (auto sym : filtered_symtab(*this, f))
+    if (sym_name == sym->get_name())
+      {
+	result = sym;
+	break;
+      }
+  return result;
+}
+
+/// Test if a given function symbol has been exported.
+///
+/// Note that this doesn't test if the symbol is defined or not, but
+/// assumes the symbol is defined.
+///
+/// @param name the name of the symbol we are looking for.
+///
+/// @return the elf symbol if found, or nil otherwise.
+elf_symbol_sptr
+symtab::function_symbol_is_exported(const string& name)
+{
+  const elf_symbols& syms = lookup_symbol(name);
+  for (auto s : syms)
+    if (s->is_function() && s->is_public())
+      return s;
+
+  return elf_symbol_sptr();
+}
+
+/// Test if a given function symbol has been exported.
+///
+/// Note that this doesn't test if the symbol is defined or not, but
+/// assumes the symbol is defined.
+///
+/// @param symbol_address the address of the symbol we are looking
+/// for.  Note that this address must be a relative offset from the
+/// beginning of the .text section, just like the kind of addresses
+/// that are present in the .symtab section.
+///
+/// @return the elf symbol if found, or nil otherwise.
+elf_symbol_sptr
+symtab::function_symbol_is_exported(const GElf_Addr symbol_address)
+{
+  elf_symbol_sptr symbol = lookup_symbol(symbol_address);
+  if (!symbol)
+    return symbol;
+
+  if (!symbol->is_function() || !symbol->is_public())
+    return elf_symbol_sptr();
+
+  return symbol;
+}
+
+/// Test if a given variable symbol has been exported.
+///
+/// Note that this assumes the symbol is exported but doesn't test for
+/// it.
+///
+/// @param name the name of the symbol we are looking
+/// for.
+///
+/// @return the elf symbol if found, or nil otherwise.
+elf_symbol_sptr
+symtab::variable_symbol_is_exported(const string& name)
+{
+  const elf_symbols& syms = lookup_symbol(name);
+  for (auto s : syms)
+    if (s->is_variable() && s->is_public())
+      return s;
+
+  return elf_symbol_sptr();
+}
+
+/// Test if a given variable symbol has been exported.
+///
+/// Note that this assumes the symbol is exported but doesn't test for
+/// it.
+///
+/// @param symbol_address the address of the symbol we are looking
+/// for.  Note that this address must be a relative offset from the
+/// beginning of the .text section, just like the kind of addresses
+/// that are present in the .symtab section.
+///
+/// @return the elf symbol if found, or nil otherwise.
+elf_symbol_sptr
+symtab::variable_symbol_is_exported(const GElf_Addr symbol_address)
+{
+  elf_symbol_sptr symbol = lookup_symbol(symbol_address);
+  if (!symbol)
+    return symbol;
+
+  if (!symbol->is_variable() || !symbol->is_public())
+    return elf_symbol_sptr();
+
+  return symbol;
+}
+
+/// Test if a name is a the name of an undefined function symbol.
+///
+/// @param sym_name the symbol name to consider.
+///
+/// @return the undefined symbol if found, nil otherwise.
+elf_symbol_sptr
+symtab::function_symbol_is_undefined(const string& sym_name)
+{
+  collect_undefined_fns_and_vars_linkage_names();
+  if (undefined_function_linkage_names_.count(sym_name))
+    {
+      elf_symbol_sptr sym = lookup_undefined_function_symbol(sym_name);
+      ABG_ASSERT(sym);
+      ABG_ASSERT(sym->is_function());
+      ABG_ASSERT(!sym->is_defined());
+      return sym;
+    }
+  return elf_symbol_sptr();
+}
+
+/// Test if a name is a the name of an undefined variable symbol.
+///
+/// @param sym_name the symbol name to consider.
+///
+// @return the undefined symbol if found, nil otherwise.
+elf_symbol_sptr
+symtab::variable_symbol_is_undefined(const string& sym_name)
+{
+  collect_undefined_fns_and_vars_linkage_names();
+  if (undefined_variable_linkage_names_.count(sym_name))
+    {
+      elf_symbol_sptr sym = lookup_undefined_variable_symbol(sym_name);
+      ABG_ASSERT(sym);
+      ABG_ASSERT(sym->is_variable());
+      ABG_ASSERT(!sym->is_defined());
+      return sym;
+    }
+  return elf_symbol_sptr();
+}
+
 /// A symbol sorting functor.
 static struct
 {
@@ -173,7 +351,8 @@ symtab::load(string_elf_symbols_map_sptr function_symbol_map,
 
 /// Default constructor of the @ref symtab type.
 symtab::symtab()
-  : is_kernel_binary_(false), has_ksymtab_entries_(false)
+  : is_kernel_binary_(false), has_ksymtab_entries_(false),
+    cached_undefined_symbol_names_(false)
 {}
 
 /// Load the symtab representation from an Elf binary presented to us by an
@@ -350,6 +529,9 @@ symtab::load_(Elf*	       elf_handle,
 	    // section it refers to cannot be absolute.
 	    // Otherwise that OBJECT is not a variable.
 	    || (sym_type == STT_OBJECT && sym->st_shndx != SHN_ABS)
+	    // Undefined global variable symbols have symbol type
+	    // STT_NOTYPE.  No idea why.
+	    || (sym_type == STT_NOTYPE && sym->st_shndx == SHN_UNDEF)
 	    || sym_type == STT_TLS))
 	continue;
 
@@ -368,15 +550,6 @@ symtab::load_(Elf*	       elf_handle,
 	 sym_is_defined, sym_is_common, ver,
 	 elf_helpers::stv_to_elf_symbol_visibility
 	 (GELF_ST_VISIBILITY(sym->st_other)));
-
-      // We do not take suppressed symbols into our symbol vector to avoid
-      // accidental leakage. But we ensure supressed symbols are otherwise set
-      // up for lookup.
-      if (!(is_suppressed && is_suppressed(symbol_sptr)))
-	// add to the symbol vector
-	symbols_.push_back(symbol_sptr);
-      else
-	symbol_sptr->set_is_suppressed(true);
 
       // add to the name->symbol lookup
       name_symbol_map_[name].push_back(symbol_sptr);
@@ -399,6 +572,25 @@ symtab::load_(Elf*	       elf_handle,
 	}
       else if (symbol_sptr->is_defined())
 	setup_symbol_lookup_tables(elf_handle, sym, symbol_sptr);
+    }
+
+  // Now that symbols aliases have been constructed, let's determine
+  // what symbol has been suppressed or not.  Suppression takes into
+  // account
+  for (auto& elem : name_symbol_map_)
+    {
+      auto& symbols = elem.second;
+      for (auto& symbol : symbols)
+	{
+	  // We do not take suppressed symbols into our symbol vector
+	  // to avoid accidental leakage. But we ensure supressed
+	  // symbols are otherwise set up for lookup.
+	  if (!(is_suppressed && is_suppressed(symbol)))
+	    // add to the symbol vector
+	    symbols_.push_back(symbol);
+	  else
+	    symbol->set_is_suppressed(true);
+	}
     }
 
   add_alternative_address_lookups(elf_handle);
@@ -524,7 +716,7 @@ symtab::update_main_symbol(GElf_Addr addr, const std::string& name)
 /// Various adjustments and bookkeeping may be needed to provide a correct
 /// interpretation (one that matches DWARF addresses) of raw symbol values.
 ///
-/// This is a sub-routine for symtab::load_and
+/// This is a sub-routine for symtab::load_ and
 /// symtab::add_alternative_address_lookups and must be called only
 /// once (per symbol) during the execution of the former.
 ///
@@ -736,5 +928,37 @@ symtab::add_alternative_address_lookups(Elf* elf_handle)
     }
 }
 
+/// Collect the names of the variable and function symbols that are
+/// undefined.  Cache those names into sets to speed up their lookup.
+///
+/// Once the names are cached into sets, subsequent invocations of
+/// this function are essentially a no-op.
+void
+symtab::collect_undefined_fns_and_vars_linkage_names()
+{
+  if (!cached_undefined_symbol_names_)
+    {
+      {
+	symtab_filter f = make_filter();
+	f.set_variables(false);
+	f.set_functions(true);
+	f.set_public_symbols(false);
+	f.set_undefined_symbols(true);
+	for (auto sym : filtered_symtab(*this, f))
+	  undefined_function_linkage_names_.insert(sym->get_name());
+      }
+
+      {
+	symtab_filter f = make_filter();
+	f.set_variables(true);
+	f.set_functions(false);
+	f.set_public_symbols(false);
+	f.set_undefined_symbols(true);
+	for (auto sym : filtered_symtab(*this, f))
+	  undefined_variable_linkage_names_.insert(sym->get_name());
+      }
+    }
+  cached_undefined_symbol_names_ = true;
+}
 } // end namespace symtab_reader
 } // end namespace abigail

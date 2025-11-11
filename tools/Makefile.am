@@ -3,10 +3,19 @@ h=$(abs_srcdir)
 
 bin_PROGRAMS = abidiff abilint abidw abicompat abipkgdiff kmidiff
 
+noinst_SCRIPTS=
+dist_bin_SCRIPTS=
+
 if ENABLE_FEDABIPKGDIFF
-  dist_bin_SCRIPTS = fedabipkgdiff
+  dist_bin_SCRIPTS += fedabipkgdiff
 else
-  noinst_SCRIPTS = fedabipkgdiff
+  noinst_SCRIPTS += fedabipkgdiff
+endif
+
+if ENABLE_ABIDB
+  dist_bin_SCRIPTS += abidb
+else
+  noinst_SCRIPTS += abidb
 endif
 
 noinst_PROGRAMS = abisym abinilint
@@ -32,8 +41,6 @@ abicompatdir = $(bindir)
 
 abipkgdiff_SOURCES = abipkgdiff.cc
 abipkgdiffdir = $(bindir)
-abipkgdiff_CPPFLAGS = $(FTS_CFLAGS)
-abipkgdiff_LDADD = $(FTS_LIBS)
 abipkgdiff_LDFLAGS = $(abs_top_builddir)/src/libabigail.la -pthread
 
 kmidiff_SOURCES = kmidiff.cc

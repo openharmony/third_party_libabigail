@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -35,6 +35,7 @@ namespace abigail
 {
 using namespace ir;
 
+/// Namespace of the reader for the BTF debug information.
 namespace btf
 {
 
@@ -52,33 +53,178 @@ btf_offset_to_string(const ::btf* btf, uint32_t offset)
   return btf__name_by_offset(btf, offset) ?: "(invalid string offset)";
 }
 
-/// A convenience typedef of a map that associates a btf type id to a
-/// libabigail ABI artifact.
-typedef std::unordered_map<int, type_or_decl_base_sptr>
-btf_type_id_to_abi_artifact_map_type;
+/// A convenience typedef of a map that associates a btf type to a
+/// libabigail ABI artifact.  The type is allocated inside a given btf
+/// handle (of type ::btf*).  All handles (one for each kernel binary)
+/// should be kept around until a complete corpus group is built.
+typedef std::unordered_map<const btf_type*, type_or_decl_base_sptr>
+btf_type_to_abi_artifact_map_type;
 
 /// The BTF front-end abstraction type.
+///
+/// Note that one instance of front-end is meant to analyze one
+/// vmlinux file and all its associated modules.  For now, the
+/// front-end doesn't know how to analyze a module without having
+/// analyzed a vmlinux first.
+///
+/// The BTF information of a vmlinux is parsed with the btf__parse
+/// function.  The result is called a "base BTF" handle.
+///
+/// The BTF information of a kernel module is parsed with the function
+/// btf__parse_split.  The result is called a "split BTF" handle.  A
+/// split BTF handle references information that are in the base BTF
+/// handle.  The base BTF handle can be retrieved from a split BTF
+/// handle using btf__base_btf.
 class reader : public elf_based_reader
 {
-  ::btf*				btf_handle_ = nullptr;
+  ::btf*				base_btf_handle_	= nullptr;
+  // The path to the binary that contains the base BTF information
+  // held in base_btf_handle_
+  string				base_btf_file_name_;
+  ::btf*				split_btf_handle_	= nullptr;
+  // The path to the binary that contains the split BTF information
+  // held in split_btf_handle_
+  string				split_btf_file_name_;
+  // A vector of (split) BTF objects that are to be freed once the
+  // corpus group is built for an entire kernel (vmliunx + modules).
+  vector<::btf*>			split_btfs_to_free_;
   translation_unit_sptr		cur_tu_;
   vector<type_base_sptr>		types_to_canonicalize_;
-  btf_type_id_to_abi_artifact_map_type	btf_type_id_to_artifacts_;
+  btf_type_to_abi_artifact_map_type	btf_type_to_artifacts_;
 
-  /// Getter of the handle to the BTF data as returned by libbpf.
+  /// Getter of the "do_log" flag.
   ///
-  /// @return the handle to the BTF data as returned by libbpf.
+  /// This flag tells if we should log about various internal
+  /// details.
+  ///
+  /// return the "do_log" flag.
+  bool
+  do_log() const
+  {return options().do_log;}
+
+  /// Setter of the "do_log" flag.
+  ///
+  /// This flag tells if we should log about various internal details.
+  ///
+  /// @param f the new value of the flag.
+  void
+  do_log(bool f)
+  {options().do_log = f;}
+
+  /// Getter of the "show_stats" flag.
+  ///
+  /// This flag tells if we should emit statistics about various
+  /// internal stuff.
+  ///
+  /// @return the value of the flag.
+  bool
+  show_stats() const
+  {return options().show_stats;}
+
+  /// Setter of the "show_stats" flag.
+  ///
+  /// This flag tells if we should emit statistics about various
+  /// internal stuff.
+  ///
+  /// @param f the value of the flag.
+  void
+  show_stats(bool f)
+  {options().show_stats = f;}
+
+  /// Getter of the handle to the base BTF object of the current
+  /// binary being analyzed.
+  ///
+  /// The base BTF object ALWAYS represents the BTF information of the
+  /// vmlinux binary, even if the current binary being analyzed is a
+  /// kernel module.
+  ///
+  /// @return handle to the base BTF object of the current binary
+  /// being analyzed.
+  ::btf*
+  base_btf_handle()
+  {
+    if (base_btf_handle_ == nullptr)
+      {
+	base_btf_handle_ = btf__parse(corpus_path().c_str(), nullptr);
+	if (!base_btf_handle_)
+	  {
+	    std::cerr << "Could not parse base BTF information from file '"
+		      << corpus_path().c_str() << "'" << std::endl;
+	    return nullptr;
+	  }
+	base_btf_file_name_ = corpus_path();
+      }
+    return base_btf_handle_;
+  }
+
+  /// Read the BTF information of the current binary which path is
+  /// @ref fe_iface::corpus_path() and return its associated object
+  /// handle.  This is called the split BTF object.
+  ///
+  /// Note that this function expects the base BTF object (the one for
+  /// the vmlinux binary) to be already present, otherwise, it returns
+  /// nullptr.
+  ///
+  /// @return the split BTF object for the file designed by
+  /// fe_iface::corpus_path().
+  ::btf*
+  read_split_btf()
+  {
+    if (!base_btf_handle_)
+      {
+	std::cerr << "Base BTF information not present.  "
+		  << "Not attempting to parse split BTF information"
+		  << std::endl;
+	return nullptr;
+      }
+
+    if (corpus_path().empty() || corpus_path() == base_btf_file_name_)
+      {
+	std::cerr << "BTF reader not initialized with split file name.  "
+		  << "Not attending to read split BTF information"
+		  << std::endl;
+	return nullptr;
+      }
+
+    split_btf_handle_ = btf__parse_split(corpus_path().c_str(),
+					 base_btf_handle());
+    if (!split_btf_handle_)
+      {
+	std::cerr << "Could not read split BTF information from file "
+		  << corpus_path() << std::endl;
+	return nullptr;
+      }
+    split_btf_file_name_ = corpus_path();
+
+    return split_btf_handle_;
+  }
+
+  /// Getter of the handle to the BTF object as returned by libbpf.
+  ///
+  /// This returns the handle to the current BTF object.  If the
+  /// current BTF object is for a vmlinux binary, then it's the base
+  /// BTF object that is returned.  Otherwise, if the current BTF
+  /// object if for a kernel module then it's the split BTF object
+  /// that is returned.
+  ///
+  /// @return the handle to the BTF object of the current binary being
+  /// analyeed by this front-end.
   ::btf*
   btf_handle()
   {
-    if (btf_handle_ == nullptr)
-      {
-	btf_handle_ = btf__parse(corpus_path().c_str(), nullptr);
-	if (!btf_handle_)
-	  std::cerr << "Could not parse BTF information from file '"
-		    << corpus_path().c_str() << "'" << std::endl;
-      }
-    return btf_handle_;
+    if (split_btf_handle_)
+      return split_btf_handle_;
+
+    if (!base_btf_handle_)
+      return base_btf_handle();
+
+    if (corpus_path() != base_btf_file_name_)
+      // The reader was re-initialized with a corpus_path that is
+      // different from the the BTF base file.  That means we are
+      // instructed to read a split BTF file information.
+      return read_split_btf();
+
+    return base_btf_handle();
   }
 
   /// Getter of the environment of the current front-end.
@@ -128,57 +274,60 @@ class reader : public elf_based_reader
   cur_tu(const translation_unit_sptr& tu)
   {cur_tu_ = tu;}
 
-  /// Getter of the map that associates a BTF type ID to an ABI
-  /// artifact.
+  /// Getter of the map that associates a BTF type to the internal
+  /// representation of an ABI artifact.
   ///
-  /// @return The map that associates a BTF type ID to an ABI
+  /// @return The map that associates a BTF type to the IR of an ABI
   /// artifact.
-  btf_type_id_to_abi_artifact_map_type&
-  btf_type_id_to_artifacts()
-  {return btf_type_id_to_artifacts_;}
+  btf_type_to_abi_artifact_map_type&
+  btf_type_to_artifacts()
+  {return btf_type_to_artifacts_;}
 
-  /// Getter of the map that associates a BTF type ID to an ABI
+  /// Getter of the map that associates a BTF type to the IR of an ABI
   /// artifact.
   ///
-  /// @return The map that associates a BTF type ID to an ABI
+  /// @return The map that associates a BTF type to the IR of an ABI
   /// artifact.
-  const btf_type_id_to_abi_artifact_map_type&
-  btf_type_id_to_artifacts() const
-  {return btf_type_id_to_artifacts_;}
+  const btf_type_to_abi_artifact_map_type&
+  btf_type_to_artifacts() const
+  {return btf_type_to_artifacts_;}
 
-  /// Get the ABI artifact that is associated to a given BTF type ID.
+  /// Get the IR of the ABI artifact that is associated to a given BTF
+  /// type.
   ///
-  /// If no ABI artifact is associated to the BTF type id, then return
-  /// nil.
+  /// If no ABI artifact is associated to the BTF type, then return
+  /// nullptr.
   ///
-  /// @return the ABI artifact that is associated to a given BTF type
-  /// id.
+  /// @return the ABI artifact that is associated to a given BTF type.
   type_or_decl_base_sptr
-  lookup_artifact_from_btf_id(int btf_id)
+  lookup_artifact_from_btf_type(const btf_type* t)
   {
-    auto i = btf_type_id_to_artifacts().find(btf_id);
-    if (i != btf_type_id_to_artifacts().end())
+    auto i = btf_type_to_artifacts().find(t);
+    if (i != btf_type_to_artifacts().end())
       return i->second;
     return type_or_decl_base_sptr();
   }
 
-  /// Associate an ABI artifact to a given BTF type ID.
+  /// Associate an ABI artifact to a given BTF type.
   ///
   /// @param artifact the ABI artifact to consider.
   ///
-  /// @param btf_type_id the BTF type ID to associate to @p artifact.
+  /// @param btf_type_id the BTF type to associate to @p artifact.
   void
-  associate_artifact_to_btf_type_id(const type_or_decl_base_sptr& artifact,
-				    int btf_type_id)
-  {btf_type_id_to_artifacts()[btf_type_id] = artifact;}
+  associate_artifact_to_btf_type(const type_or_decl_base_sptr& artifact,
+				    const btf_type* t)
+  {btf_type_to_artifacts()[t] = artifact;}
 
   /// Schecule a type for canonicalization at the end of the debug
   /// info loading.
   ///
   /// @param t the type to schedule.
   void
-  schedule_type_for_canonocalization(const type_base_sptr& t)
-  {types_to_canonicalize_.push_back(t);}
+  schedule_type_for_canonicalization(const type_base_sptr& t)
+  {
+    if (t && !t->get_naked_canonical_type())
+      types_to_canonicalize_.push_back(t);
+  }
 
   /// Canonicalize all the types scheduled for canonicalization using
   /// abigail::ir::canonicalize_types() which performs some sanity
@@ -186,14 +335,41 @@ class reader : public elf_based_reader
   void
   canonicalize_types()
   {
-    ir::canonicalize_types(types_to_canonicalize_.begin(),
-			   types_to_canonicalize_.end(),
-			   [](const vector<type_base_sptr>::const_iterator& i)
-			   {return *i;});
+    tools_utils::timer cn_timer;
+    if (do_log())
+      {
+	std::cerr << "BTF Reader is going to canonicalize "
+	     << std::dec
+	     << types_to_canonicalize_.size()
+	     << " types";
+	corpus_sptr c = corpus();
+	if (c)
+	  std::cerr << " from corpus " << corpus()->get_path() << "\n";
+	cn_timer.start();
+      }
+
+    ir::hash_and_canonicalize_types(types_to_canonicalize_.begin(),
+				    types_to_canonicalize_.end(),
+				    [](const vector<type_base_sptr>::const_iterator& i)
+				    {return *i;}, do_log(), show_stats());
+
+    if (do_log())
+      {
+	cn_timer.stop();
+	std::cerr << "BTF Reader finished types "
+	     << "sorting, hashing & canonicalizing in: "
+	     << cn_timer << "\n";
+      }
+
   }
 
+  /// Getter of the number of types carried by a given BTF object.
+  ///
+  /// @param handle the BTF object to consider.
+  ///
+  /// @return the number of types carried by a given BTF object.
   uint64_t
-  nr_btf_types() const
+  nr_btf_types(const ::btf* handle) const
   {
 #ifdef WITH_BTF__GET_NR_TYPES
 #define GET_NB_TYPES btf__get_nr_types
@@ -209,7 +385,7 @@ class reader : public elf_based_reader
     return 0;
 #endif
 
-    return GET_NB_TYPES(const_cast<reader*>(this)->btf_handle());
+    return GET_NB_TYPES(handle);
   }
 
 protected:
@@ -233,12 +409,25 @@ protected:
   /// @param linux_kernel_mode
   void
   initialize(const string&		elf_path,
-	     const vector<char**>&	debug_info_root_paths,
+	     const vector<string>&	debug_info_root_paths,
 	     bool			load_all_types,
 	     bool			linux_kernel_mode)
   {
+    if (split_btf_handle_)
+      {
+	// We need to keep this split_btf_handle_ on the side so that
+	// we can free it when we are done analyzing all the kernel
+	// modules.  We cannot free it right now because the memory of
+	// all btf types lives in it.
+	split_btfs_to_free_.push_back(split_btf_handle_);
+	split_btf_handle_ = nullptr;
+      }
+
+    split_btf_file_name_.clear();
+    types_to_canonicalize_.clear();
+    cur_tu_.reset();
     elf_based_reader::initialize(elf_path, debug_info_root_paths);
-    btf__free(btf_handle_);
+    corpus_path(elf_path);
     options().load_all_types = load_all_types;
     options().load_in_linux_kernel_mode = linux_kernel_mode;
   }
@@ -259,7 +448,7 @@ protected:
   /// @param linux_kernel_mode if true, then consider the binary being
   /// analyzed as a linux kernel binary.
   reader(const string&		elf_path,
-	 const vector<char**>&	debug_info_root_paths,
+	 const vector<string>&	debug_info_root_paths,
 	 environment&		environment,
 	 bool			load_all_types,
 	 bool			linux_kernel_mode)
@@ -290,7 +479,7 @@ public:
   /// analyzed as a linux kernel binary.
   static btf::reader_sptr
   create(const string&		elf_path,
-	 const vector<char**>&	debug_info_root_paths,
+	 const vector<string>&	debug_info_root_paths,
 	 environment&		environment,
 	 bool			load_all_types,
 	 bool			linux_kernel_mode)
@@ -303,7 +492,12 @@ public:
   /// Destructor of the btf::reader type.
   ~reader()
   {
-    btf__free(btf_handle_);
+    for (auto b : split_btfs_to_free_)
+      btf__free(b);
+    btf__free(split_btf_handle_);
+    btf__free(base_btf_handle_);
+    split_btf_handle_ = nullptr;
+    base_btf_handle_ = nullptr;
   }
 
   /// Read the ELF information as well as the BTF type information to
@@ -321,6 +515,11 @@ public:
     corpus::origin origin = corpus()->get_origin();
     origin |= corpus::BTF_ORIGIN;
     corpus()->set_origin(origin);
+    if (corpus_group())
+      {
+	origin |= corpus_group()->get_origin();
+	corpus_group()->set_origin(origin);
+      }
 
     if ((status & STATUS_NO_SYMBOLS_FOUND)
 	|| !(status & STATUS_OK))
@@ -345,15 +544,43 @@ public:
   corpus_sptr
   read_debug_info_into_corpus()
   {
-    btf_handle();
+    if (!btf_handle())
+      return corpus_sptr();
 
     translation_unit_sptr artificial_tu
       (new translation_unit(env(), "", /*address_size=*/64));
     corpus()->add(artificial_tu);
     cur_tu(artificial_tu);
 
-    int number_of_types = nr_btf_types();
+#ifdef WITH_DEBUG_SELF_COMPARISON
+    if (env().self_comparison_debug_is_on())
+      {
+	corpus_group_sptr g = corpus_group();
+	if (g)
+	  env().set_self_comparison_debug_input(g);
+	else
+	  env().set_self_comparison_debug_input(corpus());
+      }
+#endif
+
+    int number_of_types = nr_btf_types(btf_handle());
     int first_type_id = 1;
+    // Are we looking at the BTF for a kernel module?
+    const ::btf* base = btf__base_btf(btf_handle());
+    if (base)
+      {
+	// So, base is non-nil.  This means we are looking at the BTF
+	// for a kernel module and base points to the BTF for the
+	// corresponding vmlinux.  That base BTF should be the same as
+	// base_btf_handle().
+	ABG_ASSERT(base == base_btf_handle());
+
+	// The ID of the first type that is contained in this BTF
+	// representing a kernel module is the number of types
+	// contained in the base BTF (i.e, the BTF for the vmlinux
+	// binary).
+	first_type_id = nr_btf_types(base);
+      }
 
     // Let's cycle through whatever is described in the BTF section
     // and emit libabigail IR for it.
@@ -397,7 +624,8 @@ public:
       }
 
     canonicalize_types();
-
+    corpus()->sort_functions();
+    corpus()->sort_variables();
     return corpus();
   }
 
@@ -413,13 +641,10 @@ public:
     type_or_decl_base_sptr result;
     const btf_type *t = nullptr;
 
-    if ((result = lookup_artifact_from_btf_id(type_id)))
-      return result;
+    t = btf__type_by_id(btf_handle(), type_id);
 
-    if (type_id == 0)
-      result = build_ir_node_for_void_type();
-    else
-      t = btf__type_by_id(btf_handle(), type_id);
+    if ((result = lookup_artifact_from_btf_type(t)))
+      return result;
 
     if (!result)
       {
@@ -428,6 +653,11 @@ public:
 
 	switch(type_kind)
 	  {
+	  case BTF_KIND_UNKN/* Unknown: This is really for the void
+			       type. */:
+	    result = build_ir_node_for_void_type();
+	    break;
+
 	  case BTF_KIND_INT/* Integer */:
 	    result = build_int_type(type_id);
 	    break;
@@ -484,12 +714,14 @@ public:
 
 #ifdef WITH_BTF_KIND_TYPE_TAG
 	  case BTF_KIND_TYPE_TAG/* Type Tag */:
+	    break;
 #endif
 #ifdef WITH_BTF_KIND_DECL_TAG
 	  case BTF_KIND_DECL_TAG/* Decl Tag */:
+	    break;
 #endif
 	  case BTF_KIND_DATASEC/* Section */:
-	  case BTF_KIND_UNKN/* Unknown	*/:
+	    break;
 	  default:
 	    ABG_ASSERT_NOT_REACHED;
 	    break;
@@ -499,20 +731,14 @@ public:
     add_decl_to_scope(is_decl(result), cur_tu()->get_global_scope());
 
     if (type_base_sptr type = is_type(result))
-      schedule_type_for_canonocalization(type);
+      schedule_type_for_canonicalization(type);
 
-    associate_artifact_to_btf_type_id(result, type_id);
+    associate_artifact_to_btf_type(result, t);
 
     if (function_decl_sptr fn = is_function_decl(result))
-      {
-	if (fn->get_is_in_public_symbol_table())
-	  maybe_add_fn_to_exported_decls(fn.get());
-      }
+      add_fn_to_exported_or_undefined_decls(fn.get());
     else if (var_decl_sptr var = is_var_decl(result))
-      {
-	if (var->get_is_in_public_symbol_table())
-	  maybe_add_var_to_exported_decls(var.get());
-      }
+      add_var_to_exported_or_undefined_decls(var);
 
     return result;
   }
@@ -525,7 +751,7 @@ public:
   {
     type_base_sptr t = env().get_void_type();
     add_decl_to_scope(is_decl(t), cur_tu()->get_global_scope());
-    canonicalize(t);
+    schedule_type_for_canonicalization(t);
     return t;
   }
 
@@ -537,7 +763,7 @@ public:
   {
     type_base_sptr t = env().get_void_pointer_type();
     add_decl_to_scope(is_decl(t), cur_tu()->get_global_scope());
-    canonicalize(t);
+    schedule_type_for_canonicalization(t);
     return t;
   }
 
@@ -550,7 +776,7 @@ public:
     type_base_sptr t = env().get_variadic_parameter_type();
     add_decl_to_scope(is_decl(t), cur_tu()->get_global_scope());
     decl_base_sptr t_decl = get_type_declaration(t);
-    canonicalize(t);
+    schedule_type_for_canonicalization(t);
     return t;
   }
 
@@ -643,7 +869,7 @@ public:
     result->set_is_anonymous(is_anonymous);
     result->set_is_artificial(true);
     add_decl_to_scope(result, cur_tu()->get_global_scope());
-    canonicalize(result);
+    schedule_type_for_canonicalization(result);
     return result;
   }
 
@@ -789,16 +1015,18 @@ public:
     if (!underlying_type)
       return type_or_decl_base_sptr();
 
-    uint64_t lower_boud = 0;
+    uint64_t lower_bound = 0;
     // Note that arr->nelems can be 0;
     uint64_t upper_bound = arr->nelems ? arr->nelems - 1: 0;
 
     array_type_def::subrange_sptr subrange(new array_type_def::subrange_type
 					   (env(), /*name=*/"",
-					    lower_boud, upper_bound,
+					    lower_bound, upper_bound,
 					    location()));
+    subrange->is_non_finite(!arr->nelems);
+    subrange->set_size_in_bits(cur_tu()->get_address_size());
     add_decl_to_scope(subrange, cur_tu()->get_global_scope());
-    canonicalize(subrange);
+    schedule_type_for_canonicalization(subrange);
     array_type_def::subranges_type subranges = {subrange};
     array_type_def_sptr result(new array_type_def(underlying_type,
 						  subranges, location()));
@@ -892,7 +1120,7 @@ public:
 
     add_decl_to_scope(result, cur_tu()->get_global_scope());
 
-    associate_artifact_to_btf_type_id(result, type_id);
+    associate_artifact_to_btf_type(result, t);
 
     // For defined classes and unions, add data members to the type
     // being built.
@@ -955,7 +1183,7 @@ public:
 						/*alignment=*/0));
     result->set_return_type(return_type);
 
-    associate_artifact_to_btf_type_id(result, type_id);
+    associate_artifact_to_btf_type(result, t);
 
     uint16_t nb_parms = btf_vlen(t);
     const struct btf_param* parm =
@@ -1020,10 +1248,12 @@ public:
 				   location(), /*linkage_name=*/fn_name));
 
     elf_symbol_sptr fn_sym;
-    if ((fn_sym = function_symbol_is_exported(fn_name)))
+    if ((fn_sym = function_symbol_is_exported(fn_name))
+	|| (fn_sym = function_symbol_is_undefined(fn_name)))
       {
 	result->set_symbol(fn_sym);
-	result->set_is_in_public_symbol_table(true);
+	if (fn_sym->is_defined())
+	  result->set_is_in_public_symbol_table(true);
       }
     return result;
   }
@@ -1054,10 +1284,12 @@ public:
 			      /*linkage_name=*/var_name));
 
     elf_symbol_sptr var_sym;
-    if ((var_sym = variable_symbol_is_exported(var_name)))
+    if ((var_sym = variable_symbol_is_exported(var_name))
+	|| (var_sym = variable_symbol_is_undefined(var_name)))
       {
 	result->set_symbol(var_sym);
-	result->set_is_in_public_symbol_table(true);
+	if (var_sym->is_defined())
+	  result->set_is_in_public_symbol_table(true);
       }
     return result;
   }
@@ -1098,7 +1330,7 @@ public:
 /// @return a smart pointer to the resulting btf::reader.
 elf_based_reader_sptr
 create_reader(const std::string&	elf_path,
-	      const vector<char**>&	debug_info_root_paths,
+	      const vector<string>&	debug_info_root_paths,
 	      environment&		env,
 	      bool			load_all_types,
 	      bool			linux_kernel_mode)

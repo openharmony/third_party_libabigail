@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -67,19 +67,19 @@ class reader : public fe_iface
  public:
 
   reader(const std::string&	elf_path,
-	 const vector<char**>&	debug_info_roots,
+	 const vector<string>&	debug_info_roots,
 	 environment&		env);
 
   ~reader();
 
   virtual void
   initialize(const std::string&	elf_path,
-	     const vector<char**>&	debug_info_roots);
+	     const vector<string>&	debug_info_roots);
 
   virtual void
   initialize(const std::string& elf_path);
 
-  const vector<char**>&
+  const vector<string>&
   debug_info_root_paths() const;
 
   const Dwfl_Callbacks&
@@ -147,6 +147,12 @@ class reader : public fe_iface
 
   elf_symbol_sptr
   variable_symbol_is_exported(const string& name) const;
+
+  elf_symbol_sptr
+  function_symbol_is_undefined(const string& name) const;
+
+  elf_symbol_sptr
+  variable_symbol_is_undefined(const string& name) const;
 
   void
   load_dt_soname_and_needed();

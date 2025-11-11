@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2015-2023 Red Hat, Inc.
+// Copyright (C) 2015-2025 Red Hat, Inc.
 //
 // Author: Sinny Kumari
 
@@ -129,7 +129,6 @@ using abigail::tools_utils::file_type;
 using abigail::tools_utils::make_path_absolute;
 using abigail::tools_utils::base_name;
 using abigail::tools_utils::get_rpm_arch;
-using abigail::tools_utils::file_is_kernel_package;
 using abigail::tools_utils::gen_suppr_spec_from_headers;
 using abigail::tools_utils::get_default_system_suppression_file_path;
 using abigail::tools_utils::get_default_user_suppression_file_path;
@@ -140,6 +139,7 @@ using abigail::tools_utils::load_default_system_suppressions;
 using abigail::tools_utils::load_default_user_suppressions;
 using abigail::tools_utils::abidiff_status;
 using abigail::tools_utils::create_best_elf_based_reader;
+using abigail::tools_utils::timer;
 using abigail::ir::corpus_sptr;
 using abigail::ir::corpus_group_sptr;
 using abigail::comparison::diff_context;
@@ -164,6 +164,14 @@ class package;
 /// Convenience typedef for a shared pointer to a @ref package.
 typedef shared_ptr<package> package_sptr;
 
+class package_set;
+
+/// Convenience typedef for a shared pointer to a @ref package_set.
+typedef shared_ptr<package_set> package_set_sptr;
+
+static package_set*
+is_package_set(const package* pkg);
+
 /// The options passed to the current program.
 class options
 {
@@ -179,14 +187,15 @@ public:
   bool		nonexistent_file;
   bool		abignore;
   bool		parallel;
-  string	package1;
-  string	package2;
+  set<string>	package_set_paths1;
+  set<string>	package_set_paths2;
   vector<string> debug_packages1;
   vector<string> debug_packages2;
   string	devel_package1;
   string	devel_package2;
   size_t	num_workers;
   bool		verbose;
+  bool		verbose_diff;
   bool		drop_private_types;
   bool		show_relative_offset_changes;
   bool		no_default_suppression;
@@ -219,12 +228,12 @@ public:
   bool		use_btf;
 #endif
 
-  vector<string> kabi_whitelist_packages;
+  vector<string> kabi_stablelist_packages;
   vector<string> suppression_paths;
-  vector<string> kabi_whitelist_paths;
+  vector<string> kabi_stablelist_paths;
   suppressions_type kabi_suppressions;
-  package_sptr  pkg1;
-  package_sptr  pkg2;
+  package_set_sptr pkg_set1;
+  package_set_sptr pkg_set2;
 
   options(const string& program_name)
     : prog_name(program_name),
@@ -235,6 +244,7 @@ public:
       abignore(true),
       parallel(true),
       verbose(),
+      verbose_diff(),
       drop_private_types(),
       show_relative_offset_changes(true),
       no_default_suppression(),
@@ -276,13 +286,28 @@ public:
 };
 
 static bool
-get_interesting_files_under_dir(const string	dir,
-				const string&	file_name_to_look_for,
-				options&	opts,
-				vector<string>& interesting_files);
+get_interesting_files_under(const string	dir,
+			    const string&	file_name_to_look_for,
+			    options&	opts,
+			    vector<string>& interesting_files);
+
+static bool
+get_interesting_files_under(const package_set_sptr	package,
+			    const string&		file_name_to_look_for,
+			    options&			opts,
+			    vector<string>&		interesting_files);
 
 static string
 get_pretty_printed_list_of_packages(const vector<string>& packages);
+
+static bool
+is_kernel_package(const package_sptr& package);
+
+static package_sptr
+get_core_kernel_package(const package_set_sptr& ps);
+
+static package_sptr
+get_core_kernel_package(const package_set* ps);
 
 /// Abstract ELF files from the packages which ABIs ought to be
 /// compared
@@ -354,8 +379,8 @@ public:
     /// Debug info package.  Contains the debug info for the binaries
     /// int he main packge.
     KIND_DEBUG_INFO,
-    /// Contains kernel ABI whitelists
-    KIND_KABI_WHITELISTS,
+    /// Contains kernel ABI stablelists
+    KIND_KABI_STABLELISTS,
     /// Source package.  Contains the source of the binaries in the
     /// main package.
     KIND_SRC
@@ -370,7 +395,7 @@ private:
   map<string, elf_file_sptr>		path_elf_file_sptr_map_;
   vector<package_sptr>			debug_info_packages_;
   package_sptr				devel_package_;
-  package_sptr				kabi_whitelist_package_;
+  package_sptr				kabi_stablelist_package_;
   vector<string>			elf_file_paths_;
   set<string>				public_dso_sonames_;
 
@@ -395,6 +420,9 @@ public:
     else
       extracted_dir_path_ = extracted_packages_parent_dir() + "/" + dir;
   }
+
+  virtual ~package()
+  {}
 
   /// Getter of the path of the package.
   ///
@@ -564,19 +592,19 @@ public:
   devel_package(const package_sptr& p)
   {devel_package_ = p;}
 
-  /// Getter of the associated kernel abi whitelist package, if any.
+  /// Getter of the associated kernel abi stablelist package, if any.
   ///
-  /// @return the associated kernel abi whitelist package.
+  /// @return the associated kernel abi stablelist package.
   const package_sptr
-  kabi_whitelist_package() const
-  {return kabi_whitelist_package_;}
+  kabi_stablelist_package() const
+  {return kabi_stablelist_package_;}
 
-  /// Setter of the associated kernel abi whitelist package.
+  /// Setter of the associated kernel abi stablelist package.
   ///
-  /// @param p the new kernel abi whitelist package.
+  /// @param p the new kernel abi stablelist package.
   void
-  kabi_whitelist_package(const package_sptr& p)
-  {kabi_whitelist_package_ = p;}
+  kabi_stablelist_package(const package_sptr& p)
+  {kabi_stablelist_package_ = p;}
 
   /// Getter of the path to the elf files of the package.
   ///
@@ -672,9 +700,9 @@ public:
       // We have already loaded the elf file paths, don't do it again.
       return;
 
-    get_interesting_files_under_dir(extracted_dir_path(),
-				    /*file_name_to_look_for=*/"",
-				    opts, elf_file_paths());
+    get_interesting_files_under(extracted_dir_path(),
+				/*file_name_to_look_for=*/"",
+				opts, elf_file_paths());
     std::sort(elf_file_paths().begin(), elf_file_paths().end());
     string common_prefix;
     sorted_strings_common_prefix(elf_file_paths(), common_paths_prefix());
@@ -753,10 +781,95 @@ public:
       debug_info_packages().front()->erase_extraction_directory(opts);
     if (devel_package())
       devel_package()->erase_extraction_directory(opts);
-    if (kabi_whitelist_package())
-      kabi_whitelist_package()->erase_extraction_directory(opts);
+    if (kabi_stablelist_package())
+      kabi_stablelist_package()->erase_extraction_directory(opts);
   }
 }; // end class package.
+
+/// The abstraction of a set of packages.
+///
+/// The abipkgdiff tool is meant to compare the ABI of a set of
+/// packages against the ABI of another set of packages.
+///
+/// A set of packages keeps track of its individual constituant
+/// packages.  This consituent packages all share the same extraction
+/// directory as well a few other properties.
+///
+/// Please note that the package_set class inherit the package class
+/// just because that makes it easier to re-use several of the
+/// properties and behaviours of a package, even if a package set is
+/// not a package but rather an aggregation of packages.  This is more
+/// of an implementation hack than anything else.
+class package_set : public package
+{
+  set<string> package_paths_;
+  set<package_sptr> packages_;
+
+public:
+
+  /// Constructor of the @ref package_set type.
+  ///
+  /// @param paths the paths of the constituent packages of this set.
+  ///
+  /// @param dir the extraction directory name for this package set.
+  ///
+  /// @param pkg_kind the kind of the constituent packages of this
+  /// set.  This is thus the kind of this package set.
+  package_set(const set<string>& paths, const string& dir,
+	      package::kind pkg_kind = package::KIND_MAIN)
+    : package(/*path=*/"", dir, pkg_kind),
+      package_paths_(paths)
+  {
+    for (auto& p : paths)
+      {
+	package_sptr pkg(new package(p, dir));
+	packages_.insert(pkg);
+      }
+    if (!packages_.empty())
+      {
+	package_sptr first_package = *packages().begin();
+	if (package_sptr c = get_core_kernel_package(this))
+	  // So this is a set of kernel packages.  Let's consider that
+	  // the path to the set is the path to the core kernel
+	  // package (the one that contains the vmlinuz binary).
+	  // Otherwise, we just pick one random package in the set and
+	  // use its path as the path to the set.
+	  first_package = c;
+
+	type(first_package->type());
+	path(first_package->path());
+	if (type() == abigail::tools_utils::FILE_TYPE_DIR)
+	  extracted_dir_path(first_package->extracted_dir_path());
+	type((*packages_.begin())->type());
+	path((*packages_.begin())->path());
+      }
+  }
+
+  /// Getter of the paths of the constituent packages of this set.
+  const set<string>&
+  package_paths() const
+  {return package_paths_;}
+
+  /// Getter of the constituent packages of this set.
+  const set<package_sptr>&
+  packages() const
+  {return packages_;}
+}; // end class package_set
+
+/// This converts of a @ref package type into a @ref package_set type
+/// iff the a given pointer to @ref package points to an instance of
+/// @ref package_set.
+///
+/// @param pkg the package to consider.
+///
+/// @return a pointer to the instance of @ref package_set that @p pkg
+/// points to.  Otherwise, returns nil.
+static package_set*
+is_package_set(const package* pkg)
+{
+  package_set* result = dynamic_cast<package_set*>(const_cast<package*>(pkg));
+  return result;
+}
 
 /// Arguments passed to the comparison tasks.
 struct compare_args
@@ -799,8 +912,9 @@ struct compare_args
 /// A convenience typedef for arguments passed to the comparison workers.
 typedef shared_ptr<compare_args> compare_args_sptr;
 
-static bool extract_package_and_map_its_content(const package_sptr &pkg,
-						options &opts);
+static bool
+extract_package_set_and_map_its_content(const package_set_sptr &ps,
+					options &opts);
 
 /// Getter for the path to the parent directory under which packages
 /// extracted by the current thread are placed.
@@ -891,8 +1005,8 @@ display_usage(const string& prog_name, ostream& out)
     "full impact analysis report rather than the default leaf changes reports\n"
     << " --non-reachable-types|-t  consider types non reachable"
     " from public interfaces\n"
-    << "  --exported-interfaces-only  analyze exported interfaces only\n"
-    << "  --allow-non-exported-interfaces  analyze interfaces that "
+    << " --exported-interfaces-only  analyze exported interfaces only\n"
+    << " --allow-non-exported-interfaces  analyze interfaces that "
     "might not be exported\n"
     << " --no-linkage-name		do not display linkage names of "
     "added/removed/changed\n"
@@ -918,6 +1032,7 @@ display_usage(const string& prog_name, ostream& out)
     << " --no-assume-odr-for-cplusplus  do not assume the ODR to speed-up the"
     "analysis of the binary\n"
     << " --verbose                      emit verbose progress messages\n"
+    << " --verbose-diff                 emit verbose diff progress messages\n"
     << " --self-check                   perform a sanity check by comparing "
     "binaries inside the input package against their ABIXML representation\n"
 #ifdef WITH_CTF
@@ -1102,20 +1217,22 @@ extract_tar(const string& package_path,
 #endif // WITH_TAR
 
 /// Erase the temporary directories created for the extraction of two
-/// packages.
+/// sets of packages.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first set of packages to consider.
+///
+/// @param second_ps the second set of packagfes to consider.
 ///
 /// @param opts the options passed to the current program.
 ///
 /// @param second_package the second package to consider.
 static void
-erase_created_temporary_directories(const package& first_package,
-				    const package& second_package,
+erase_created_temporary_directories(const package_set_sptr& first_ps,
+				    const package_set_sptr& second_ps,
 				    const options &opts)
 {
-  first_package.erase_extraction_directories(opts);
-  second_package.erase_extraction_directories(opts);
+  first_ps->erase_extraction_directories(opts);
+  second_ps->erase_extraction_directories(opts);
 }
 
 /// Erase the root of all the temporary directories created by the
@@ -1154,17 +1271,16 @@ erase_created_temporary_directories_parent(const options &opts)
 ///
 /// @param opts the options passed to the current program.
 static bool
-extract_package(const package& package,
-		const options &opts)
+extract_package(const package_sptr& package, const options &opts)
 {
-  switch(package.type())
+  switch(package->type())
     {
     case abigail::tools_utils::FILE_TYPE_RPM:
 #ifdef WITH_RPM
-      if (!extract_rpm(package.path(), package.extracted_dir_path(), opts))
+      if (!extract_rpm(package->path(), package->extracted_dir_path(), opts))
         {
           emit_prefix("abipkgdiff", cerr)
-	    << "Error while extracting package " << package.path() << "\n";
+	    << "Error while extracting package " << package->path() << "\n";
           return false;
         }
       return true;
@@ -1177,10 +1293,10 @@ extract_package(const package& package,
       break;
     case abigail::tools_utils::FILE_TYPE_DEB:
 #ifdef WITH_DEB
-      if (!extract_deb(package.path(), package.extracted_dir_path(), opts))
+      if (!extract_deb(package->path(), package->extracted_dir_path(), opts))
         {
           emit_prefix("abipkgdiff", cerr)
-	    << "Error while extracting package" << package.path() << "\n";
+	    << "Error while extracting package" << package->path() << "\n";
           return false;
         }
       return true;
@@ -1199,11 +1315,11 @@ extract_package(const package& package,
 
     case abigail::tools_utils::FILE_TYPE_TAR:
 #ifdef WITH_TAR
-      if (!extract_tar(package.path(), package.extracted_dir_path(), opts))
+      if (!extract_tar(package->path(), package->extracted_dir_path(), opts))
         {
           emit_prefix("abipkgdiff", cerr)
 	    << "Error while extracting GNU tar archive "
-	    << package.path() << "\n";
+	    << package->path() << "\n";
           return false;
         }
       return true;
@@ -1238,8 +1354,8 @@ maybe_check_suppression_files(const options& opts)
       return false;
 
   for (vector<string>::const_iterator i =
-	 opts.kabi_whitelist_paths.begin();
-       i != opts.kabi_whitelist_paths.end();
+	 opts.kabi_stablelist_paths.begin();
+       i != opts.kabi_stablelist_paths.end();
        ++i)
     if (!check_file(*i, cerr, "abidiff"))
       return false;
@@ -1275,6 +1391,7 @@ set_diff_context_from_opts(diff_context_sptr ctxt,
     (opts.show_added_syms);
   ctxt->show_symbols_unreferenced_by_debug_info
     (opts.show_symbols_not_referenced_by_debug_info);
+  ctxt->do_log(opts.verbose_diff);
 
   if (!opts.show_harmless_changes)
     ctxt->switch_categories_off(get_default_harmless_categories_bitmap());
@@ -1303,6 +1420,7 @@ set_generic_options(abigail::elf_based_reader& rdr, const options& opts)
     opts.leverage_dwarf_factorization;
   rdr.options().assume_odr_for_cplusplus =
     opts.assume_odr_for_cplusplus;
+  rdr.options().do_log = opts.verbose;
 }
 
 /// Emit an error message on standard error about alternate debug info
@@ -1324,20 +1442,25 @@ emit_alt_debug_info_not_found_error(abigail::elf_based_reader&	reader,
 				    ostream&			out,
 				    bool			is_old_package)
 {
-  ABG_ASSERT(is_old_package
-	     ? !opts.debug_packages1.empty()
-	     : !opts.debug_packages2.empty());
+  string fname;
+  tools_utils::base_name(elf_file.path, fname);
 
-  string filename;
-  tools_utils::base_name(elf_file.path, filename);
+  const vector<string>& debug_pkgs_list =
+    is_old_package
+    ? opts.debug_packages1
+    : opts.debug_packages2;
+
+  if (debug_pkgs_list.empty())
+    emit_prefix("abipkgdiff", out)
+      << "Could not find alternate debug info found for file '" << fname << "'"
+      << "Maybe look into properly setting up debuginfod service "
+      << "to fetch debug info?\n";
+
   emit_prefix("abipkgdiff", out)
-    << "While reading elf file '"
-    << filename
-    << "', could not find alternate debug info in provided "
-    "debug info package(s) "
-    << get_pretty_printed_list_of_packages(is_old_package
-					   ? opts.debug_packages1
-					   : opts.debug_packages2)
+    << "While reading elf file '" << fname << "'"
+    << ", could not find alternate debug info in provided "
+    << "debug info package(s) "
+    << get_pretty_printed_list_of_packages(debug_pkgs_list)
     << "\n";
 
   string alt_di_path;
@@ -1409,12 +1532,11 @@ compare(const elf_file&		elf1,
 	ostream&			out,
 	abigail::fe_iface::status*	detailed_error_status = 0)
 {
-  char *di_dir1 = (char*) debug_dir1.c_str(),
-	*di_dir2 = (char*) debug_dir2.c_str();
-
-  vector<char**> di_dirs1, di_dirs2;
-  di_dirs1.push_back(&di_dir1);
-  di_dirs2.push_back(&di_dir2);
+  vector<string> di_dirs1, di_dirs2;
+  if (!debug_dir1.empty())
+    di_dirs1.push_back(debug_dir1);
+  if (!debug_dir2.empty())
+    di_dirs2.push_back(debug_dir2);
 
   if (opts.verbose)
     emit_prefix("abipkgdiff", cerr)
@@ -1483,7 +1605,7 @@ compare(const elf_file&		elf1,
 				   opts.show_all_types);
     ABG_ASSERT(reader);
 
-    reader->add_suppressions(priv_types_supprs1);
+    reader->add_suppressions(supprs);
     set_generic_options(*reader, opts);
 
     corpus1 = reader->read_corpus(c1_status);
@@ -1522,8 +1644,8 @@ compare(const elf_file&		elf1,
 		<< "while reading file" << elf1.path << "\n";
 
 	    emit_prefix("abipkgdiff", cerr) << "Could not find debug info file";
-	    if (di_dir1 && strcmp(di_dir1, ""))
-	      cerr << " under " << di_dir1 << "\n";
+	    if (!debug_dir1.empty())
+	      cerr << " under " << debug_dir1 << "\n";
 	    else
 	       cerr << "\n";
 
@@ -1611,8 +1733,8 @@ compare(const elf_file&		elf1,
 		<< "while reading file" << elf2.path << "\n";
 
 	    emit_prefix("abipkgdiff", cerr) << "Could not find debug info file";
-	    if (di_dir2 && strcmp(di_dir2, ""))
-	      cerr << " under " << di_dir2 << "\n";
+	    if (!debug_dir2.empty())
+	      cerr << " under " << debug_dir2 << "\n";
 	    else
 	      cerr << "\n";
 
@@ -1664,6 +1786,9 @@ compare(const elf_file&		elf1,
 ///
 /// @param debug_dir the debug directory of the ELF file.
 ///
+/// @param priv_types_supprs type suppression specification that
+/// suppress private types.
+///
 /// @param opts the options passed the user.
 ///
 /// @param env the environment to use for the comparison.
@@ -1681,6 +1806,7 @@ compare(const elf_file&		elf1,
 static abidiff_status
 compare_to_self(const elf_file&		elf,
 		const string&			debug_dir,
+		const suppressions_type&	priv_types_supprs,
 		const options&			opts,
 		abigail::ir::environment&	env,
 		corpus_diff_sptr&		diff,
@@ -1688,10 +1814,9 @@ compare_to_self(const elf_file&		elf,
 		ostream&			out,
 		abigail::fe_iface::status*	detailed_error_status = 0)
 {
-  char *di_dir = (char*) debug_dir.c_str();
-
-  vector<char**> di_dirs;
-  di_dirs.push_back(&di_dir);
+  vector<string> di_dirs;
+  if (!debug_dir.empty())
+    di_dirs.push_back(debug_dir);
 
   abigail::fe_iface::status c_status = abigail::fe_iface::STATUS_OK;
 
@@ -1706,6 +1831,14 @@ compare_to_self(const elf_file&		elf,
       << "Reading file "
       << elf.path
       << " ...\n";
+
+  ctxt.reset(new diff_context);
+  set_diff_context_from_opts(ctxt, opts);
+  suppressions_type& supprs = ctxt->suppressions();
+
+  // Add the opaque type suppressions set to the set of suppressions.
+  for (auto& suppr : priv_types_supprs)
+    supprs.push_back(suppr);
 
   corpus_sptr corp;
   abigail::elf_based_reader_sptr reader;
@@ -1726,6 +1859,7 @@ compare_to_self(const elf_file&		elf,
 				   opts.show_all_types);
     ABG_ASSERT(reader);
 
+    reader->add_suppressions(supprs);
     corp = reader->read_corpus(c_status);
 
     if (!(c_status & abigail::fe_iface::STATUS_OK))
@@ -1763,7 +1897,7 @@ compare_to_self(const elf_file&		elf,
   corpus_sptr reread_corp;
   string abi_file_path;
   {
-    if (!opts.pkg1->create_abi_file_path(elf.path, abi_file_path))
+    if (!opts.pkg_set1->create_abi_file_path(elf.path, abi_file_path))
       {
 	if (opts.verbose)
 	  emit_prefix("abipkgdiff", cerr)
@@ -1887,18 +2021,19 @@ compare_to_self(const elf_file&		elf,
 /// If the function succeeds, it returns a non-empty vector of
 /// suppression specifications.
 ///
-/// @param pkg the main package we are looking at.
+/// @param ps the main package set we are looking at.
 ///
 /// @param opts the options of the current program.
 ///
 /// @return a vector of suppression_sptr.  If no suppressions
 /// specification were constructed, the returned vector is empty.
 static suppressions_type
-create_private_types_suppressions(const package& pkg, const options &opts)
+create_private_types_suppressions(const package_set_sptr& ps,
+				  const options &opts)
 {
   suppressions_type supprs;
 
-  package_sptr devel_pkg = pkg.devel_package();
+  package_sptr devel_pkg = ps->devel_package();
   if (!devel_pkg
       || !file_exists(devel_pkg->extracted_dir_path())
       || !is_dir(devel_pkg->extracted_dir_path()))
@@ -1928,39 +2063,41 @@ create_private_types_suppressions(const package& pkg, const options &opts)
 }
 
 /// If the user wants to avoid comparing DSOs that are private to this
-/// package, then we build the set of public DSOs as advertised in the
-/// package's "provides" property.
+/// package set, then we build the set of public DSOs as advertised in
+/// the "provides" property of the packages of the set.
 ///
 /// Note that at the moment this function only works for RPMs.  It
 /// doesn't yet support other packaging formats.
 ///
-/// @param pkg the package to consider.
+/// @param ps the package set to consider.
 ///
 /// @param opts the options of this program.
 ///
 /// @return true iff the set of public DSOs was built.
 static bool
-maybe_create_public_dso_sonames_set(package& pkg, const options &opts)
+maybe_create_public_dso_sonames_set(const package_set_sptr& ps,
+				    const options &opts)
 {
-  if (opts.compare_private_dsos || !pkg.public_dso_sonames().empty())
+  if (opts.compare_private_dsos || !ps->public_dso_sonames().empty())
     return false;
 
-  if (pkg.type() == abigail::tools_utils::FILE_TYPE_RPM)
-    return get_dsos_provided_by_rpm(pkg.path(), pkg.public_dso_sonames());
+  if (ps->type() == abigail::tools_utils::FILE_TYPE_RPM)
+     for (auto& p : ps->packages())
+       get_dsos_provided_by_rpm(p->path(), ps->public_dso_sonames());
 
   // We don't support this yet for non-RPM packages.
   return false;
 }
 
-/// Test if we should only compare the public DSOs of a given package.
+/// Test if we should only compare the public DSOs of a given package set.
 ///
-/// @param pkg the package to consider.
+/// @param ps the package set to consider.
 ///
 /// @param opts the options of this program
 static bool
-must_compare_public_dso_only(package& pkg, options& opts)
+must_compare_public_dso_only(const package_set_sptr& ps, options& opts)
 {
-  if (pkg.type() == abigail::tools_utils::FILE_TYPE_RPM
+  if (ps->type() == abigail::tools_utils::FILE_TYPE_RPM
       && !opts.compare_private_dsos)
     return true;
 
@@ -1968,20 +2105,20 @@ must_compare_public_dso_only(package& pkg, options& opts)
 }
 
 /// While walking a file directory, check if a directory entry is a
-/// kabi whitelist of a particular architecture.
+/// kabi stablelist of a particular architecture.
 ///
-/// If it is, then save its file path in a vector of whitelists.
+/// If it is, then save its file path in a vector of stablelists.
 ///
 /// @param entry the directory entry to consider.
 ///
 /// @param arch the architecture to consider.
 ///
-/// @param whitelists out parameter.  If @p entry is the whitelist we
-/// are looking for, add its path to this output parameter.
+/// @param stablelists out parameter.  If @p entry is the stablelist
+/// we are looking for, add its path to this output parameter.
 static void
-maybe_collect_kabi_whitelists(const FTSENT *entry,
-			      const string arch,
-			      vector<string> &whitelists)
+maybe_collect_kabi_stablelists(const FTSENT *entry,
+			       const string arch,
+			       vector<string> &stablelists)
 {
   if (entry == NULL
       || (entry->fts_info != FTS_F && entry->fts_info != FTS_SL)
@@ -1992,28 +2129,35 @@ maybe_collect_kabi_whitelists(const FTSENT *entry,
   string path = entry->fts_path;
   maybe_get_symlink_target_file_path(path, path);
 
-  string kabi_whitelist_name = "kabi_whitelist_" + arch;
+  vector<string> stablelist_prefixes;
+  stablelist_prefixes.push_back("kabi_whitelist_");
+  stablelist_prefixes.push_back("kabi_stablelist_");
 
-  if (string_ends_with(path, kabi_whitelist_name))
-    whitelists.push_back(path);
+  string kabi_stablelist_name;
+  for (auto prefix : stablelist_prefixes)
+    {
+      kabi_stablelist_name = prefix + arch;
+      if (string_ends_with(path, kabi_stablelist_name))
+	stablelists.push_back(path);
+    }
 }
 
-/// Get the kabi whitelist for a particular architecture under a given
+/// Get the kabi stablelist for a particular architecture under a given
 /// directory.
 ///
 /// @param dir the directory to look at.
 ///
 /// @param arch the architecture to consider.
 ///
-/// @param whitelist_paths the vector where to add the whitelists
-/// found.  Note that a whitelist is added to this parameter iff the
+/// @param stablelist_paths the vector where to add the stablelists
+/// found.  Note that a stablelist is added to this parameter iff the
 /// function returns true.
 ///
-/// @return true iff the function found a whitelist at least.
+/// @return true iff the function found a stablelist at least.
 static bool
-get_kabi_whitelists_from_arch_under_dir(const string& dir,
+get_kabi_stablelists_from_arch_under_dir(const string& dir,
 					const string& arch,
-					vector<string>& whitelist_paths)
+					vector<string>& stablelist_paths)
 {
  bool is_ok = false;
   char* paths[] = {const_cast<char*>(dir.c_str()), 0};
@@ -2024,65 +2168,146 @@ get_kabi_whitelists_from_arch_under_dir(const string& dir,
 
   FTSENT *entry;
   while ((entry = fts_read(file_hierarchy)))
-    maybe_collect_kabi_whitelists(entry, arch, whitelist_paths);
+    maybe_collect_kabi_stablelists(entry, arch, stablelist_paths);
 
   fts_close(file_hierarchy);
 
   return true;
 }
 
-/// Find a kabi whitelist in a linux kernel RPM package.
+/// Test if a given package (or a package set) is a kernel package or
+/// not.
 ///
-/// Note that the linux kernel RPM package must have been extracted
-/// somewhere already.
+/// A kernal package is a package that contains the vmlinuz binary.
 ///
-/// This function then looks for the whitelist under the /lib/modules
-/// directory inside the extracted content of the package.  If it
-/// finds it and saves its file path in the
-/// options::kabi_whitelist_paths data member.
+/// In the case of a package set, this function walks the constituent
+/// packages of the set and returns true if it finds one package that
+/// is a kernel package.
 ///
-/// @param pkg the linux kernel package to consider.
+/// @param package the package (or package set) to consider.
+///
+/// @return true iff @p package is a kernel package.
+static bool
+is_kernel_package(const package* package)
+{
+  if (package_set* set = is_package_set(package))
+    {
+      for (auto& pkg : set->packages())
+	if (is_kernel_package(pkg))
+	  return true;
+    }
+
+  if (file_is_kernel_package(package->path(), package->type()))
+    return true;
+
+  return false;
+}
+
+/// Test if a given package (or a package set) is a kernel package or
+/// not.
+///
+/// A kernal package is a package that contains the vmlinuz binary.
+///
+/// In the case of a package set, this function walks all the packages
+/// of the set and returns true if it finds one package that is a
+/// kernel package.
+///
+/// @param package the package (or package set) to consider.
+///
+/// @return true iff @p package is a kernel package.
+static bool
+is_kernel_package(const package_sptr& package)
+{return is_kernel_package(package.get());}
+
+/// Get the core kernel package of a set of kernel package.
+///
+/// The core kernel package is the package that contains the vmlinuz
+/// binary.
+///
+/// @param ps the package set to consider.
+///
+/// @return the core kernel package or nil if none was found.
+static package_sptr
+get_core_kernel_package(const package_set* ps)
+{
+  if (!is_kernel_package(ps))
+    return package_sptr();
+
+  for (auto& p : ps->packages())
+    if (is_kernel_package(p))
+      return p;
+
+  return package_sptr();
+}
+
+/// Get the core kernel package of a set of kernel package.
+///
+/// The core kernel package is the package that contains the vmlinuz
+/// binary.
+///
+/// @param ps the package set to consider.
+///
+/// @return the core kernel package or nil if none was found.
+static package_sptr
+get_core_kernel_package(const package_set_sptr& ps)
+{return get_core_kernel_package(ps.get());}
+
+/// Find a kabi stablelist in a "KABI stablelist RPM" associated to a
+/// set of Linux Kernel RPM packages.
+///
+/// Note that the KABI stablelist RPM package set must have been
+/// extracted somewhere already.
+///
+/// This function then looks for the stablelist under the /lib/modules
+/// directory inside the extracted content of the KABI stablelist
+/// package.  If it finds it, then it saves its file path in the
+/// options::kabi_stablelist_paths data member.
+///
+/// @param ps the linux kernel package set to consider.
 ///
 /// @param opts the options the program was invoked with.
 static bool
-maybe_handle_kabi_whitelist_pkg(const package& pkg, options &opts)
+maybe_handle_kabi_stablelist_pkg(const package_set_sptr& ps, options &opts)
 {
-  if (opts.kabi_whitelist_packages.empty()
-      || !opts.kabi_whitelist_paths.empty()
-      || !pkg.kabi_whitelist_package())
+  if (opts.kabi_stablelist_packages.empty()
+      || !opts.kabi_stablelist_paths.empty()
+      || !ps->kabi_stablelist_package())
     return false;
 
-  if (pkg.type() != abigail::tools_utils::FILE_TYPE_RPM)
+  if (ps->type() != abigail::tools_utils::FILE_TYPE_RPM)
     return false;
 
-  bool is_linux_kernel_package = file_is_kernel_package(pkg.path(),
-							pkg.type());
+  bool is_linux_kernel_package = is_kernel_package(ps);
 
   if (!is_linux_kernel_package)
     return false;
 
-  package_sptr kabi_wl_pkg = pkg.kabi_whitelist_package();
+  package_sptr kabi_wl_pkg = ps->kabi_stablelist_package();
   assert(kabi_wl_pkg);
 
   if (!file_exists(kabi_wl_pkg->extracted_dir_path())
       || !is_dir(kabi_wl_pkg->extracted_dir_path()))
     return false;
 
+  string base_name = ps->base_name();
   string rpm_arch;
-  if (!get_rpm_arch(pkg.base_name(), rpm_arch))
+
+  get_rpm_arch(base_name, rpm_arch);
+
+  if (rpm_arch.empty())
     return false;
 
   string kabi_wl_path = kabi_wl_pkg->extracted_dir_path();
   kabi_wl_path += "/lib/modules";
-  vector<string> whitelist_paths;
+  vector<string> stablelist_paths;
 
-  get_kabi_whitelists_from_arch_under_dir(kabi_wl_path, rpm_arch,
-					  whitelist_paths);
+  get_kabi_stablelists_from_arch_under_dir(kabi_wl_path, rpm_arch,
+					   stablelist_paths);
 
-  if (!whitelist_paths.empty())
+  if (!stablelist_paths.empty())
     {
-      std::sort(whitelist_paths.begin(), whitelist_paths.end());
-      opts.kabi_whitelist_paths.push_back(whitelist_paths.back());
+      std::sort(stablelist_paths.begin(), stablelist_paths.end());
+      opts.kabi_stablelist_paths.push_back(stablelist_paths.back());
     }
 
   return true;
@@ -2122,44 +2347,45 @@ public:
     for (vector<package_sptr>::const_iterator p = pkgs.begin();
 	 p != pkgs.end();
 	 ++p)
-      is_ok &= extract_package(**p, opts);
+      is_ok &= extract_package(*p, opts);
   }
 }; //end class pkg_extraction_task
 
 /// A convenience typedef for a shared pointer to @f pkg_extraction_task.
 typedef shared_ptr<pkg_extraction_task> pkg_extraction_task_sptr;
 
-/// The worker task which job is to prepares a package.
+/// The worker task which job is to prepares a package set.
 ///
-/// Preparing a package means:
+/// Preparing a package set means:
 ///
-/// 	1/ Extract the package and its ancillary packages.
+///	1/ Extract the packages making up the set as well as its
+///	ancillary packages.
 ///
-/// 	2/ Analyze the extracted content, map that content so that we
-/// 	determine what the ELF files to be analyze are.
-class pkg_prepare_task : public abigail::workers::task
+///	2/ Analyze the extracted content, map that content so that we
+///	determine what the ELF files to be analyzed are.
+class pkg_set_prepare_task : public abigail::workers::task
 {
-  pkg_prepare_task();
+  pkg_set_prepare_task();
 
 public:
-  package_sptr pkg;
+  package_set_sptr pkg_set;
   options &opts;
   bool is_ok;
 
-  pkg_prepare_task(package_sptr &p, options &o)
-    : pkg(p), opts(o), is_ok(false)
+  pkg_set_prepare_task(const package_set_sptr &ps, options &o)
+    : pkg_set(ps), opts(o), is_ok(false)
   {}
 
   /// The job performed by this task.
   virtual void
   perform()
   {
-    is_ok = pkg && extract_package_and_map_its_content(pkg, opts);
+    is_ok = pkg_set && extract_package_set_and_map_its_content(pkg_set, opts);
   }
-}; //end class pkg_prepare_task
+}; //end class pkg_set_prepare_task
 
-/// A convenience typedef for a shared_ptr to @ref pkg_prepare_task
-typedef shared_ptr<pkg_prepare_task> pkg_prepare_task_sptr;
+/// A convenience typedef for a shared_ptr to @ref pkg_set_prepare_task
+typedef shared_ptr<pkg_set_prepare_task> pkg_set_prepare_task_sptr;
 
 /// The worker task which job is to compare two ELF binaries
 class compare_task : public abigail::workers::task
@@ -2291,6 +2517,7 @@ public:
       abigail::fe_iface::STATUS_UNKNOWN;
 
     status |= compare_to_self(args->elf1, args->debug_dir1,
+			      args->private_types_suppr1,
 			      args->opts, env, diff, ctxt, out,
 			      &detailed_status);
 
@@ -2305,11 +2532,11 @@ public:
 /// Convenience typedef for a shared_ptr of @ref compare_task.
 typedef shared_ptr<self_compare_task> self_compare_task_sptr;
 
-/// This function is a sub-routine of create_maps_of_package_content.
+/// This function is a sub-routine of get_interesting_files_under.
 ///
 /// It's called during the walking of the directory tree containing
-/// the extracted content of package.  It's called with an entry of
-/// that directory tree.
+/// the extracted content of a package or package set.  It's called
+/// with an entry of that directory tree.
 ///
 /// Depending on the kind of file this function is called on, it
 /// updates the vector of paths of the directory and the set of
@@ -2386,10 +2613,10 @@ maybe_update_package_content(const FTSENT*		entry,
 ///
 /// @return true iff the function completed successfully.
 static bool
-get_interesting_files_under_dir(const string dir,
-				const string& file_name_to_look_for,
-				options& opts,
-				vector<string>& interesting_files)
+get_interesting_files_under(const string dir,
+			    const string& file_name_to_look_for,
+			    options& opts,
+			    vector<string>& interesting_files)
 {
   bool is_ok = false;
   string root;
@@ -2406,7 +2633,9 @@ get_interesting_files_under_dir(const string dir,
   FTSENT *entry;
   unordered_set<string> files;
   while ((entry = fts_read(file_hierarchy)))
-    maybe_update_package_content(entry, opts, file_name_to_look_for, dir, files);
+    maybe_update_package_content(entry, opts,
+				 file_name_to_look_for,
+				 dir, files);
 
   for (unordered_set<string>::const_iterator i = files.begin();
        i != files.end();
@@ -2418,6 +2647,40 @@ get_interesting_files_under_dir(const string dir,
   is_ok = true;
 
   return is_ok;
+}
+
+/// Walk the directory where a package set has been extracted to in
+/// order to collect files that are "interesting" to analyze.  By
+/// default, "interesting" means interesting from either a kernel
+/// package or a userspace binary analysis point of view.
+///
+/// @param ps the set of packages to consider.  This function will
+/// look into the directory where the package set has been extracted
+/// to.
+///
+/// @param file_name_to_look_for if this parameter is set, only a file
+/// with this name is going to be collected.
+///
+/// @param interesting_files out parameter.  This parameter is
+/// populated with the interesting files found by the function iff the
+/// function returns true.
+///
+/// @return true iff the function completed successfully.
+static bool
+get_interesting_files_under(const package_set_sptr	ps,
+			    const string&		file_name_to_look_for,
+			    options&			opts,
+			    vector<string>&		interesting_files)
+{
+  if (!ps)
+    return false;
+
+  for (auto& p : ps->packages())
+    get_interesting_files_under(p->extracted_dir_path(),
+				file_name_to_look_for,
+				opts, interesting_files);
+
+  return true;
 }
 
 /// Return a string representing a list of packages that can be
@@ -2449,35 +2712,36 @@ get_pretty_printed_list_of_packages(const vector<string>& packages)
 
 /// Create maps of the content of a given package.
 ///
-/// The maps contain relevant metadata about the content of the
-/// files.  These maps are used afterwards during the comparison of
-/// the content of the package.  Note that the maps are stored in the
-/// object that represents that package.
+/// The maps contain relevant metadata about the content of the files.
+/// These maps are used afterwards during the comparison of the
+/// content of the package set.  Note that the maps are stored in the
+/// object that represents that package set.
 ///
-/// @param package the package to consider.
+/// @param ps the package set to consider.
 ///
 /// @param opts the options the current program has been called with.
 ///
 /// @param true upon successful completion, false otherwise.
 static bool
-create_maps_of_package_content(package& package, options& opts)
+create_maps_of_package_set_content(const package_set_sptr& ps,
+				   options& opts)
 {
   if (opts.verbose)
     emit_prefix("abipkgdiff", cerr)
-      << "Analyzing the content of package "
-      << package.path()
+      << "Analyzing the content of package set"
+      << ps->path()
       << " extracted to "
-      << package.extracted_dir_path()
+      << ps->extracted_dir_path()
       << " ...\n";
 
   bool is_ok = true;
   vector<string> elf_file_paths;
 
-  // if package is linux kernel package and its associated debug
-  // info package looks like a kernel debuginfo package, then try to
-  // go find the vmlinux file in that debug info file.
-  bool is_linux_kernel_package = file_is_kernel_package(package.path(),
-							package.type());
+  // if package (set) is a linux kernel package set and its associated
+  // debug info package looks like a kernel debuginfo package, then
+  // try to go find the vmlinux file in that debug info file.
+  bool is_linux_kernel_package = is_kernel_package(ps);
+
   if (is_linux_kernel_package)
     {
       // For a linux kernel package, no analysis is done.  It'll be
@@ -2486,25 +2750,24 @@ create_maps_of_package_content(package& package, options& opts)
       is_ok = true;
       if (opts.verbose)
 	emit_prefix("abipkgdiff", cerr)
-	  << " Analysis of linux package " << package.path() << " DONE\n";
+	  << " Analysis of linux package set " << ps->path() << " DONE\n";
       return is_ok;
     }
 
-  is_ok &= get_interesting_files_under_dir(package.extracted_dir_path(),
-					   /*file_name_to_look_for=*/"",
-					   opts, elf_file_paths);
+  is_ok &= get_interesting_files_under(ps, /*file_name_to_look_for=*/"",
+				       opts, elf_file_paths);
 
   if (opts.verbose)
     emit_prefix("abipkgdiff", cerr)
       << "Found " << elf_file_paths.size() << " files in "
-      << package.extracted_dir_path() << "\n";
+      << ps->extracted_dir_path() << "\n";
 
   // determine if all files have the same prefix.  Compute that prefix
   // and stick it into the package!  That prefix is going to be used
   // later by the package::convert_path_to_unique_suffix method.
-  package.load_elf_file_paths(opts);
+  ps->load_elf_file_paths(opts);
 
-  maybe_create_public_dso_sonames_set(package, opts);
+  maybe_create_public_dso_sonames_set(ps, opts);
 
   for (vector<string>::const_iterator file = elf_file_paths.begin();
        file != elf_file_paths.end();
@@ -2531,7 +2794,7 @@ create_maps_of_package_content(package& package, options& opts)
 	{
 	  if (e->type != abigail::elf::ELF_TYPE_DSO
 	      && e->type != abigail::elf::ELF_TYPE_EXEC
-              && e->type != abigail::elf::ELF_TYPE_PI_EXEC)
+	      && e->type != abigail::elf::ELF_TYPE_PI_EXEC)
 	    {
 	      if (is_linux_kernel_package)
 		{
@@ -2555,7 +2818,7 @@ create_maps_of_package_content(package& package, options& opts)
       if (e->soname.empty())
 	{
 	  if (e->type == abigail::elf::ELF_TYPE_DSO
-	      && must_compare_public_dso_only(package, opts))
+	      && must_compare_public_dso_only(ps, opts))
 	    {
 	      // We are instructed to compare public DSOs only.  Yet
 	      // this DSO does not have a soname.  so it can not be a
@@ -2571,14 +2834,14 @@ create_maps_of_package_content(package& package, options& opts)
 	  // base name.  So let's consider the full path of the binary
 	  // inside the extracted directory.
 	  string key = e->name;
-	  package.convert_path_to_unique_suffix(resolved_e_path, key);
-	  if (package.path_elf_file_sptr_map().find(key)
-	      != package.path_elf_file_sptr_map().end())
+	  ps->convert_path_to_unique_suffix(resolved_e_path, key);
+	  if (ps->path_elf_file_sptr_map().find(key)
+	      != ps->path_elf_file_sptr_map().end())
 	    // 'key' has already been seen before.  So we won't map it
 	    // twice.
 	    continue;
 
-	  package.path_elf_file_sptr_map()[key] = e;
+	  ps->path_elf_file_sptr_map()[key] = e;
 	  if (opts.verbose)
 	    emit_prefix("abipkgdiff", cerr)
 	      << "mapped binary with key '" << key << "'"
@@ -2590,12 +2853,12 @@ create_maps_of_package_content(package& package, options& opts)
 	  // soname.  So let's *also* consider the full path of the
 	  // binary inside the extracted directory, not just the
 	  // soname.
-	  string key = e->soname;
+	  string key = string("/@soname:") + e->soname;
 
-	  if (must_compare_public_dso_only(package, opts))
+	  if (must_compare_public_dso_only(ps, opts))
 	    {
-	      if (package.public_dso_sonames().find(key)
-		  == package.public_dso_sonames().end())
+	      if (ps->public_dso_sonames().find(e->soname)
+		  == ps->public_dso_sonames().end())
 		{
 		  // We are instructed to compare public DSOs only and
 		  // this one seems to be private.  So skip it.
@@ -2607,19 +2870,13 @@ create_maps_of_package_content(package& package, options& opts)
 		}
 	    }
 
-	  if (package.convert_path_to_unique_suffix(resolved_e_path, key))
-	    {
-	      dir_name(key, key);
-	      key += string("/@soname:") + e->soname;
-	    }
-
-	  if (package.path_elf_file_sptr_map().find(key)
-	      != package.path_elf_file_sptr_map().end())
+	  if (ps->path_elf_file_sptr_map().find(key)
+	      != ps->path_elf_file_sptr_map().end())
 	    // 'key' has already been seen before.  So we won't do itl
 	    // twice.
 	    continue;
 
-	  package.path_elf_file_sptr_map()[key] = e;
+	  ps->path_elf_file_sptr_map()[key] = e;
 	  if (opts.verbose)
 	    emit_prefix("abipkgdiff", cerr)
 	      << "mapped binary with key '" << key << "'"
@@ -2629,57 +2886,67 @@ create_maps_of_package_content(package& package, options& opts)
 
   if (opts.verbose)
     emit_prefix("abipkgdiff", cerr)
-      << " Analysis of " << package.path() << " DONE\n";
+      << " Analysis of " << ps->path() << " DONE\n";
 
   is_ok = true;
 
   return is_ok;
 }
 
-/// Extract the content of a package (and its ancillary packages) and
-/// map its content.
+/// Extract the content of a package set (and its ancillary packages)
+/// and map its content.
 ///
-/// First, the content of the package and its ancillary packages are
-/// extracted, in parallel.
+/// First, the content of the package set and its ancillary packages
+/// are extracted, in parallel.
 ///
-/// Then, after that extraction is done, the content of the package if
-/// walked and analyzed.
+/// Then, after that extraction is done, the content of the package
+/// set is walked and analyzed.
 ///
-/// @param pkg the package to extract and to analyze.
+/// @param ps the package set to extract and to analyze.
 ///
 /// @param opts the options of the current program.
 ///
 /// @return true iff the extraction and analyzing went well.
 static bool
-extract_package_and_map_its_content(const package_sptr &pkg, options &opts)
+extract_package_set_and_map_its_content(const package_set_sptr &ps,
+					options &opts)
 {
-  assert(pkg);
+  assert(ps);
 
-  pkg_extraction_task_sptr main_pkg_extraction;
+  // We are going to extract the the main package and the devel
+  // package sequentially because both cannot be extracted in
+  // parallel, as they are being extracted into the same directory.
+  vector<package_sptr> main_and_devel_pkgs_extraction;
+
+  // But then, the main-and-devel, debug package and kabi-stablelist
+  // packages are going to be extracted in parallel.
+  pkg_extraction_task_sptr main_and_devel_pkg_extraction;
   pkg_extraction_task_sptr dbg_extraction;
-  pkg_extraction_task_sptr devel_extraction;
-  pkg_extraction_task_sptr kabi_whitelist_extraction;
+  pkg_extraction_task_sptr kabi_stablelist_extraction;
 
   size_t NUM_EXTRACTIONS = 1;
 
-  main_pkg_extraction.reset(new pkg_extraction_task(pkg, opts));
+  for (auto& package : ps->packages())
+    main_and_devel_pkgs_extraction.push_back(package);
 
-  if (!pkg->debug_info_packages().empty())
+  if (ps->devel_package())
+    main_and_devel_pkgs_extraction.push_back(ps->devel_package());
+
+  main_and_devel_pkg_extraction.reset(new pkg_extraction_task
+				      (main_and_devel_pkgs_extraction,
+				       opts));
+  ++NUM_EXTRACTIONS;
+
+  if (!ps->debug_info_packages().empty())
     {
-      dbg_extraction.reset(new pkg_extraction_task(pkg->debug_info_packages(),
+      dbg_extraction.reset(new pkg_extraction_task(ps->debug_info_packages(),
 						   opts));
       ++NUM_EXTRACTIONS;
     }
 
-  if (package_sptr devel_pkg = pkg->devel_package())
+  if (package_sptr kabi_wl_pkg = ps->kabi_stablelist_package())
     {
-      devel_extraction.reset(new pkg_extraction_task(devel_pkg, opts));
-      ++NUM_EXTRACTIONS;
-    }
-
-  if (package_sptr kabi_wl_pkg = pkg->kabi_whitelist_package())
-    {
-      kabi_whitelist_extraction.reset(new pkg_extraction_task(kabi_wl_pkg,
+      kabi_stablelist_extraction.reset(new pkg_extraction_task(kabi_wl_pkg,
 							      opts));
       ++NUM_EXTRACTIONS;
     }
@@ -2690,81 +2957,80 @@ extract_package_and_map_its_content(const package_sptr &pkg, options &opts)
   abigail::workers::queue extraction_queue(num_workers);
 
   // Perform the extraction of the NUM_WORKERS packages in parallel.
+  extraction_queue.schedule_task(main_and_devel_pkg_extraction);
   extraction_queue.schedule_task(dbg_extraction);
-  extraction_queue.schedule_task(main_pkg_extraction);
-  extraction_queue.schedule_task(devel_extraction);
-  extraction_queue.schedule_task(kabi_whitelist_extraction);
+  extraction_queue.schedule_task(kabi_stablelist_extraction);
 
   // Wait for the extraction to be done.
   extraction_queue.wait_for_workers_to_complete();
 
   // Analyze and map the content of the extracted package.
   bool is_ok = false;
-  if (main_pkg_extraction->is_ok)
-    is_ok = create_maps_of_package_content(*pkg, opts);
+  if (main_and_devel_pkg_extraction->is_ok)
+    is_ok = create_maps_of_package_set_content(ps, opts);
 
   if (is_ok)
-    maybe_handle_kabi_whitelist_pkg(*pkg, opts);
+    maybe_handle_kabi_stablelist_pkg(ps, opts);
 
   return is_ok;
 }
 
-/// Extract the two packages (and their ancillary packages) and
+/// Extract the two package sets (and their ancillary packages) and
 /// analyze their content, so that we later know what files from the
-/// first package to compare against what files from the second
-/// package.
+/// first package set to compare against what files from the second
+/// package set.
 ///
-/// Note that preparing the first package and its ancillary packages
-/// happens in parallel with preparing the second package and its
-/// ancillary packages.  The function then waits for the two
+/// Note that preparing the first package set and its ancillary
+/// packages happens in parallel with preparing the second package set
+/// and its ancillary packages.  The function then waits for the two
 /// preparations to complete before returning.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param opts the options of the current program.
 ///
 /// @return true iff the preparation went well.
 static bool
-prepare_packages(package_sptr &first_package,
-		 package_sptr &second_package,
-		 options &opts)
+prepare_package_sets(const package_set_sptr &first_ps,
+		     const package_set_sptr &second_ps,
+		     options &opts)
 {
-  pkg_prepare_task_sptr first_pkg_prepare;
-  pkg_prepare_task_sptr second_pkg_prepare;
+  pkg_set_prepare_task_sptr first_ps_prepare;
+  pkg_set_prepare_task_sptr second_ps_prepare;
   size_t NUM_PREPARATIONS = 2;
 
-  first_pkg_prepare.reset(new pkg_prepare_task(first_package, opts));
-  second_pkg_prepare.reset(new pkg_prepare_task(second_package, opts));
+  first_ps_prepare.reset(new pkg_set_prepare_task(first_ps, opts));
+  second_ps_prepare.reset(new pkg_set_prepare_task(second_ps, opts));
 
   size_t num_workers = (opts.parallel
 			? std::min(opts.num_workers, NUM_PREPARATIONS)
 			: 1);
   abigail::workers::queue preparation_queue(num_workers);
 
-  preparation_queue.schedule_task(first_pkg_prepare);
-  preparation_queue.schedule_task(second_pkg_prepare);
+  preparation_queue.schedule_task(first_ps_prepare);
+  preparation_queue.schedule_task(second_ps_prepare);
 
   preparation_queue.wait_for_workers_to_complete();
 
-  return first_pkg_prepare->is_ok && second_pkg_prepare->is_ok;
+  return first_ps_prepare->is_ok && second_ps_prepare->is_ok;
 }
 
-/// Prepare one package for the sake of comparing it to its ABIXML
+/// Prepare one package set for the sake of comparing it to its ABIXML
 /// representation.
 ///
-/// The preparation entails unpacking the content of the package into
-/// a temporary directory and mapping its content.
+/// The preparation entails unpacking the content of the package set
+/// into a temporary directory and mapping its content.
 ///
-/// @param pkg the package to prepare.
+/// @param ps the package set to prepare.
 ///
 /// @param opts the options provided by the user.
 ///
 /// @return true iff the preparation succeeded.
 static bool
-prepare_package(package_sptr& pkg, options &opts)
-{return extract_package_and_map_its_content(pkg, opts);}
+prepare_package_set(const package_set_sptr& ps, options &opts)
+{return extract_package_set_and_map_its_content(ps, opts);}
 
 /// Compare the added sizes of an ELF pair (specified by a comparison
 /// task that compares two ELF files) against the added sizes of a
@@ -2844,34 +3110,35 @@ public:
 }; // end struct comparison_done_notify
 
 /// Erase the temporary directories that might have been created while
-/// handling two packages, unless the user asked to keep the temporary
-/// directories around.
+/// handling two package sets, unless the user asked to keep the
+/// temporary directories around.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param opts the options passed to the program.
 static void
-maybe_erase_temp_dirs(package& first_package, package& second_package,
+maybe_erase_temp_dirs(const package_set_sptr& first_ps,
+		      const package_set_sptr& second_ps,
 		      options& opts)
 {
   if (opts.keep_tmp_files)
     return;
 
-  erase_created_temporary_directories(first_package, second_package, opts);
+  erase_created_temporary_directories(first_ps, second_ps, opts);
   erase_created_temporary_directories_parent(opts);
 }
 
-/// Compare the ABI of two prepared packages that contain userspace
-/// binaries.
+/// Compare the ABI of two prepared package sets that contain
+/// userspace binaries.
 ///
-/// A prepared package is a package which content has been extracted
-/// and mapped.
+/// A prepared package set is a package set which content has been
+/// extracted and mapped.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param options the options the current program has been called
 /// with.
@@ -2883,39 +3150,39 @@ maybe_erase_temp_dirs(package& first_package, package& second_package,
 ///
 /// @return the status of the comparison.
 static abidiff_status
-compare_prepared_userspace_packages(package& first_package,
-				    package& second_package,
-				    abi_diff& diff, options& opts)
+compare_prepared_userspace_package_sets(const package_set_sptr& first_ps,
+					const package_set_sptr& second_ps,
+					abi_diff& diff, options& opts)
 {
   abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
   abigail::workers::queue::tasks_type compare_tasks;
-  string pkg_name = first_package.base_name();
+  string pkg_name = first_ps->base_name();
 
   // Setting debug-info path of libraries
   string debug_dir1, debug_dir2, relative_debug_path = "/usr/lib/debug/";
-  if (!first_package.debug_info_packages().empty()
-      && !second_package.debug_info_packages().empty())
+  if (!first_ps->debug_info_packages().empty()
+      && !second_ps->debug_info_packages().empty())
     {
       debug_dir1 =
-	first_package.debug_info_packages().front()->extracted_dir_path() +
+	first_ps->debug_info_packages().front()->extracted_dir_path() +
 	relative_debug_path;
       debug_dir2 =
-	second_package.debug_info_packages().front()->extracted_dir_path() +
+	second_ps->debug_info_packages().front()->extracted_dir_path() +
 	relative_debug_path;
     }
 
   for (map<string, elf_file_sptr>::iterator it =
-	 first_package.path_elf_file_sptr_map().begin();
-       it != first_package.path_elf_file_sptr_map().end();
+	 first_ps->path_elf_file_sptr_map().begin();
+       it != first_ps->path_elf_file_sptr_map().end();
        ++it)
     {
       map<string, elf_file_sptr>::iterator iter =
-	second_package.path_elf_file_sptr_map().find(it->first);
+	second_ps->path_elf_file_sptr_map().find(it->first);
 
-      if (iter != second_package.path_elf_file_sptr_map().end()
+      if (iter != second_ps->path_elf_file_sptr_map().end()
 	  && (iter->second->type == abigail::elf::ELF_TYPE_DSO
 	      || iter->second->type == abigail::elf::ELF_TYPE_EXEC
-              || iter->second->type == abigail::elf::ELF_TYPE_PI_EXEC
+	      || iter->second->type == abigail::elf::ELF_TYPE_PI_EXEC
 	      || iter->second->type == abigail::elf::ELF_TYPE_RELOCATABLE))
 	{
 	  if (iter->second->type != abigail::elf::ELF_TYPE_RELOCATABLE)
@@ -2928,17 +3195,17 @@ compare_prepared_userspace_packages(package& first_package,
 		(new compare_args(*it->second,
 				  debug_dir1,
 				  create_private_types_suppressions
-				  (first_package, opts),
+				  (first_ps, opts),
 				  *iter->second,
 				  debug_dir2,
 				  create_private_types_suppressions
-				  (second_package, opts), opts));
+				  (second_ps, opts), opts));
 	      compare_task_sptr t(new compare_task(args));
 	      compare_tasks.push_back(t);
 	    }
-	  second_package.path_elf_file_sptr_map().erase(iter);
+	  second_ps->path_elf_file_sptr_map().erase(iter);
 	}
-      else if (iter == second_package.path_elf_file_sptr_map().end())
+      else if (iter == second_ps->path_elf_file_sptr_map().end())
 	{
 	  if (opts.verbose)
 	    emit_prefix("abipkgdiff", cerr)
@@ -2956,7 +3223,9 @@ compare_prepared_userspace_packages(package& first_package,
       // Larger elfs are processed first, since it's usually safe to assume
       // their debug-info is larger as well, but the results are still
       // in a map ordered by looked up in elf.name order.
-      std::sort(compare_tasks.begin(), compare_tasks.end(), elf_size_is_greater);
+      std::sort(compare_tasks.begin(),
+		compare_tasks.end(),
+		elf_size_is_greater);
 
       // There's no reason to spawn more workers than there are ELF pairs
       // to be compared.
@@ -2988,8 +3257,8 @@ compare_prepared_userspace_packages(package& first_package,
 
   // Update the count of added binaries.
   for (map<string, elf_file_sptr>::iterator it =
-	 second_package.path_elf_file_sptr_map().begin();
-       it != second_package.path_elf_file_sptr_map().end();
+	 second_ps->path_elf_file_sptr_map().begin();
+       it != second_ps->path_elf_file_sptr_map().end();
        ++it)
     diff.added_binaries.push_back(it->second);
 
@@ -3001,7 +3270,7 @@ compare_prepared_userspace_packages(package& first_package,
 	   it != diff.removed_binaries.end(); ++it)
 	{
 	  string relative_path;
-	  first_package.convert_path_to_relative((*it)->path, relative_path);
+	  first_ps->convert_path_to_relative((*it)->path, relative_path);
 	  cout << "  [D] " << relative_path << ", ";
 	  string soname;
 	  get_soname_of_elf_file((*it)->path, soname);
@@ -3021,7 +3290,7 @@ compare_prepared_userspace_packages(package& first_package,
 	   it != diff.added_binaries.end(); ++it)
 	{
 	  string relative_path;
-	  second_package.convert_path_to_relative((*it)->path, relative_path);
+	  second_ps->convert_path_to_relative((*it)->path, relative_path);
 	  cout << "  [A] " << relative_path << ", ";
 	  string soname;
 	  get_soname_of_elf_file((*it)->path, soname);
@@ -3034,18 +3303,18 @@ compare_prepared_userspace_packages(package& first_package,
     }
 
   // Erase temporary directory tree we might have left behind.
-  maybe_erase_temp_dirs(first_package, second_package, opts);
+  maybe_erase_temp_dirs(first_ps, second_ps, opts);
 
   status = notifier.status;
 
   return status;
 }
 
-/// In the context of the unpacked content of a given package, compare
-/// the binaries inside the package against their ABIXML
+/// In the context of the unpacked content of a given package set,
+/// compare the binaries inside the package set against their ABIXML
 /// representation.  This should yield the empty set.
 ///
-/// @param pkg (unpacked) package
+/// @param ps (unpacked) package set.
 ///
 /// @param diff the representation of the changes between the binaries
 /// and their ABIXML.  This should obviously be the empty set.
@@ -3054,42 +3323,47 @@ compare_prepared_userspace_packages(package& first_package,
 ///
 /// @param opts the options provided by the user.
 static abidiff_status
-self_compare_prepared_userspace_package(package&	pkg,
-					abi_diff&	diff,
-					options&	opts)
+self_compare_prepared_userspace_package_set(const package_set_sptr&	ps,
+					    abi_diff&			diff,
+					    options&			opts)
 {
   abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
   abigail::workers::queue::tasks_type self_compare_tasks;
-  string pkg_name = pkg.base_name();
+  string pkg_name = ps->base_name();
 
   // Setting debug-info path of libraries
   string debug_dir, relative_debug_path = "/usr/lib/debug/";
-  if (!pkg.debug_info_packages().empty())
+  if (!ps->debug_info_packages().empty())
     debug_dir =
-      pkg.debug_info_packages().front()->extracted_dir_path() +
+      ps->debug_info_packages().front()->extracted_dir_path() +
       relative_debug_path;
 
-  suppressions_type supprs;
   for (map<string, elf_file_sptr>::iterator it =
-	 pkg.path_elf_file_sptr_map().begin();
-       it != pkg.path_elf_file_sptr_map().end();
+	 ps->path_elf_file_sptr_map().begin();
+       it != ps->path_elf_file_sptr_map().end();
        ++it)
     {
-      if (it != pkg.path_elf_file_sptr_map().end()
+      if (it != ps->path_elf_file_sptr_map().end()
 	  && (it->second->type == abigail::elf::ELF_TYPE_DSO
 	      || it->second->type == abigail::elf::ELF_TYPE_EXEC
-              || it->second->type == abigail::elf::ELF_TYPE_PI_EXEC
+	      || it->second->type == abigail::elf::ELF_TYPE_PI_EXEC
 	      || it->second->type == abigail::elf::ELF_TYPE_RELOCATABLE))
 	{
 	  if (it->second->type != abigail::elf::ELF_TYPE_RELOCATABLE)
 	    {
+	      if (opts.verbose)
+		emit_prefix("abipkgdiff", cerr)
+		  << "Going to self-compare file '"
+		  << it->first << "'\n";
 	      compare_args_sptr args
 		(new compare_args(*it->second,
 				  debug_dir,
-				  supprs,
+				  create_private_types_suppressions
+				  (ps, opts),
 				  *it->second,
 				  debug_dir,
-				  supprs,
+				  create_private_types_suppressions
+				  (ps, opts),
 				  opts));
 	      self_compare_task_sptr t(new self_compare_task(args));
 	      self_compare_tasks.push_back(t);
@@ -3099,7 +3373,7 @@ self_compare_prepared_userspace_package(package&	pkg,
 
   if (self_compare_tasks.empty())
     {
-      maybe_erase_temp_dirs(pkg, pkg, opts);
+      maybe_erase_temp_dirs(ps, ps, opts);
       return abigail::tools_utils::ABIDIFF_OK;
     }
 
@@ -3140,22 +3414,22 @@ self_compare_prepared_userspace_package(package&	pkg,
     }
 
   // Erase temporary directory tree we might have left behind.
-  maybe_erase_temp_dirs(pkg, pkg, opts);
+  maybe_erase_temp_dirs(ps, ps, opts);
 
   status = notifier.status;
 
   return status;
 }
 
-/// Compare the ABI of two prepared packages that contain linux kernel
-/// binaries.
+/// Compare the ABI of two prepared package sets that contain linux
+/// kernel binaries.
 ///
-/// A prepared package is a package which content has been extracted
-/// and mapped.
+/// A prepared package set is a package set which content has been
+/// extracted and mapped.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param options the options the current program has been called
 /// with.
@@ -3167,23 +3441,32 @@ self_compare_prepared_userspace_package(package&	pkg,
 ///
 /// @return the status of the comparison.
 static abidiff_status
-compare_prepared_linux_kernel_packages(package& first_package,
-				       package& second_package,
-				       options& opts)
+compare_prepared_linux_kernel_package_sets(const package_set_sptr& first_ps,
+					   const package_set_sptr& second_ps,
+					   options& opts)
 {
   abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
-  string pkg_name = first_package.base_name();
+  string pkg_name = first_ps->base_name();
+  package_sptr first_core_kernel_package, second_core_kernel_package;
+
+  if (is_kernel_package(first_ps))
+    if (package_sptr p = get_core_kernel_package(first_ps))
+      first_core_kernel_package = p;
+
+  if (is_kernel_package(second_ps))
+    if (package_sptr p = get_core_kernel_package(second_ps))
+      second_core_kernel_package = p;
 
   // Setting debug-info path of binaries
   string debug_dir1, debug_dir2, relative_debug_path = "/usr/lib/debug/";
-  if (!first_package.debug_info_packages().empty()
-      && !second_package.debug_info_packages().empty())
+  if (!first_ps->debug_info_packages().empty()
+      && !second_ps->debug_info_packages().empty())
     {
       debug_dir1 =
-	first_package.debug_info_packages().front()->extracted_dir_path() +
+	first_ps->debug_info_packages().front()->extracted_dir_path() +
 	relative_debug_path;
       debug_dir2 =
-	second_package.debug_info_packages().front()->extracted_dir_path() +
+	second_ps->debug_info_packages().front()->extracted_dir_path() +
 	relative_debug_path;
     }
 
@@ -3192,8 +3475,8 @@ compare_prepared_linux_kernel_packages(package& first_package,
   if (!get_vmlinux_path_from_kernel_dist(debug_dir1, vmlinux_path1))
     {
       emit_prefix("abipkgdiff", cerr)
-	<< "Could not find vmlinux in debuginfo package '"
-	<< first_package.path()
+	<< "Could not find vmlinux in debuginfo package of '"
+	<< first_core_kernel_package->path()
 	<< "\n";
       return abigail::tools_utils::ABIDIFF_ERROR;
     }
@@ -3201,14 +3484,14 @@ compare_prepared_linux_kernel_packages(package& first_package,
   if (!get_vmlinux_path_from_kernel_dist(debug_dir2, vmlinux_path2))
     {
       emit_prefix("abipkgdiff", cerr)
-	<< "Could not find vmlinux in debuginfo package '"
-	<< second_package.path()
+	<< "Could not find vmlinux in debuginfo package of '"
+	<< second_core_kernel_package->path()
 	<< "\n";
       return abigail::tools_utils::ABIDIFF_ERROR;
     }
 
-  string dist_root1 = first_package.extracted_dir_path();
-  string dist_root2 = second_package.extracted_dir_path();
+  string dist_root1 = first_ps->extracted_dir_path();
+  string dist_root2 = second_ps->extracted_dir_path();
 
   abigail::ir::environment env;
   if (opts.exported_interfaces_only.has_value())
@@ -3220,32 +3503,59 @@ compare_prepared_linux_kernel_packages(package& first_package,
 
   corpus::origin requested_fe_kind = corpus::DWARF_ORIGIN;
 #ifdef WITH_CTF
-    if (opts.use_ctf)
-      requested_fe_kind = corpus::CTF_ORIGIN;
+  if (opts.use_ctf)
+    requested_fe_kind = corpus::CTF_ORIGIN;
 #endif
 #ifdef WITH_BTF
-    if (opts.use_btf)
-      requested_fe_kind = corpus::BTF_ORIGIN;
+  if (opts.use_btf)
+    requested_fe_kind = corpus::BTF_ORIGIN;
 #endif
 
+  timer t;
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "Going to build first corpus group from kernel dist under "
+      << dist_root1
+      << "...\n";
+
+  t.start();
   corpus1 = build_corpus_group_from_kernel_dist_under(dist_root1,
 						      debug_dir1,
 						      vmlinux_path1,
 						      opts.suppression_paths,
-						      opts.kabi_whitelist_paths,
+						      opts.kabi_stablelist_paths,
 						      supprs, opts.verbose,
 						      env, requested_fe_kind);
+  t.stop();
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "Built first corpus group from kernel dist under "
+      << dist_root1
+      << "in: " << t << "\n";
 
   if (!corpus1)
     return abigail::tools_utils::ABIDIFF_ERROR;
 
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "Going to build second corpus group from kernel dist under "
+      << dist_root2
+      << "...\n";
+
+  t.start();
   corpus2 = build_corpus_group_from_kernel_dist_under(dist_root2,
 						      debug_dir2,
 						      vmlinux_path2,
 						      opts.suppression_paths,
-						      opts.kabi_whitelist_paths,
+						      opts.kabi_stablelist_paths,
 						      supprs, opts.verbose,
 						      env, requested_fe_kind);
+  t.stop();
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "Built second corpus group from kernel dist under "
+      << dist_root2
+      << "in: " << t << "\n";
 
   if (!corpus2)
     return abigail::tools_utils::ABIDIFF_ERROR;
@@ -3253,9 +3563,27 @@ compare_prepared_linux_kernel_packages(package& first_package,
   diff_context_sptr diff_ctxt(new diff_context);
   set_diff_context_from_opts(diff_ctxt, opts);
 
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "diffing the two kernel corpora ...\n";
+  t.start();
   corpus_diff_sptr diff = compute_diff(corpus1, corpus2, diff_ctxt);
+  t.stop();
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "diffed the two kernel corpora in: " << t << "\n";
 
-  if (diff->has_net_changes())
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "evaluating the set of net changes of the diff ...\n";
+  t.start();
+  bool has_net_changes = diff->has_net_changes();
+  t.stop();
+  if (opts.verbose)
+    emit_prefix("abipkgdiff", cerr)
+      << "evaluated set of net changes of the diff in:" << t << "\n";
+
+  if (has_net_changes)
     status |= abigail::tools_utils::ABIDIFF_ABI_CHANGE;
   if (diff->has_incompatible_changes())
     status |= abigail::tools_utils::ABIDIFF_ABI_INCOMPATIBLE_CHANGE;
@@ -3263,26 +3591,26 @@ compare_prepared_linux_kernel_packages(package& first_package,
   if (status & abigail::tools_utils::ABIDIFF_ABI_CHANGE)
     {
       cout << "== Kernel ABI changes between packages '"
-	   << first_package.path() << "' and '"
-	   << second_package.path() << "' are: ===\n";
+	   << first_core_kernel_package->base_name() << "' and '"
+	   << second_core_kernel_package->base_name() << "' are: ===\n";
       diff->report(cout);
       cout << "== End of kernel ABI changes between packages '"
-	   << first_package.path()
+	   << first_core_kernel_package->base_name()
 	   << "' and '"
-	   << second_package.path() << "' ===\n\n";
+	   << second_core_kernel_package->base_name() << "' ===\n\n";
     }
 
   return status;
 }
 
-/// Compare the ABI of two prepared packages.
+/// Compare the ABI of two prepared package sets.
 ///
-/// A prepared package is a package which content has been extracted
-/// and mapped.
+/// A prepared package set is a package set which content has been
+/// extracted and mapped.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param options the options the current program has been called
 /// with.
@@ -3294,31 +3622,31 @@ compare_prepared_linux_kernel_packages(package& first_package,
 ///
 /// @return the status of the comparison.
 static abidiff_status
-compare_prepared_package(package& first_package, package& second_package,
-			 abi_diff& diff, options& opts)
+compare_prepared_package_set(const package_set_sptr& first_ps,
+			     const package_set_sptr& second_ps,
+			     abi_diff& diff, options& opts)
 {
   abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
 
-  if (abigail::tools_utils::file_is_kernel_package(first_package.path(),
-						   first_package.type()))
+  if (is_kernel_package(first_ps))
     {
       opts.show_symbols_not_referenced_by_debug_info = false;
-      status = compare_prepared_linux_kernel_packages(first_package,
-						      second_package,
-						      opts);
+      status = compare_prepared_linux_kernel_package_sets(first_ps,
+							  second_ps,
+							  opts);
     }
   else
-    status = compare_prepared_userspace_packages(first_package,
-						 second_package,
-						 diff, opts);
+    status = compare_prepared_userspace_package_sets(first_ps,
+						     second_ps,
+						     diff, opts);
 
   return status;
 }
 
-/// Compare binaries in a package against their ABIXML
+/// Compare binaries in a package set against their ABIXML
 /// representations.
 ///
-/// @param pkg the package to consider.
+/// @param ps the package set to consider.
 ///
 /// @param diff the textual representation of the resulting
 /// comparison.
@@ -3327,22 +3655,22 @@ compare_prepared_package(package& first_package, package& second_package,
 ///
 /// @return the status of the comparison.
 static abidiff_status
-self_compare_prepared_package(package& pkg,
-			      abi_diff& diff,
-			      options& opts)
+self_compare_prepared_package_set(const package_set_sptr& ps,
+				  abi_diff& diff,
+				  options& opts)
 {
   abidiff_status status = abigail::tools_utils::ABIDIFF_OK;
 
-  status = self_compare_prepared_userspace_package(pkg, diff, opts);
+  status = self_compare_prepared_userspace_package_set(ps, diff, opts);
 
   return status;
 }
 
-/// Compare the ABI of two packages
+/// Compare the ABI of two package sets.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param options the options the current program has been called
 /// with.
@@ -3354,56 +3682,57 @@ self_compare_prepared_package(package& pkg,
 ///
 /// @return the status of the comparison.
 static abidiff_status
-compare(package_sptr& first_package, package_sptr& second_package,
+compare(const package_set_sptr& first_ps,
+	const package_set_sptr& second_ps,
 	abi_diff& diff, options& opts)
 {
-  // Prepare (extract and analyze the contents) the packages and their
-  // ancillary packages.
+  // Prepare (extract and analyze the contents) the package sets and
+  // their ancillary packages.
   //
-  // Note that the package preparations happens in parallel.
-  if (!prepare_packages(first_package, second_package, opts))
+  // Note that the package set preparations happens in parallel.
+  if (!prepare_package_sets(first_ps, second_ps, opts))
     {
-      maybe_erase_temp_dirs(*first_package, *second_package, opts);
+      maybe_erase_temp_dirs(first_ps, second_ps, opts);
       return abigail::tools_utils::ABIDIFF_ERROR;
     }
 
-  return compare_prepared_package(*first_package, *second_package, diff, opts);
+  return compare_prepared_package_set(first_ps, second_ps, diff, opts);
 }
 
-/// Compare binaries in a package against their ABIXML
+/// Compare binaries in a package set against their ABIXML
 /// representations.
 ///
-/// @param pkg the package to consider.
+/// @param ps the package set to consider.
 ///
 /// @param opts the options provided by the user
 ///
 /// @return the status of the comparison.
 static abidiff_status
-compare_to_self(package_sptr& pkg, options& opts)
+compare_to_self(const package_set_sptr& ps, options& opts)
 {
-  if (!prepare_package(pkg, opts))
+  if (!prepare_package_set(ps, opts))
     return abigail::tools_utils::ABIDIFF_ERROR;
 
   abi_diff diff;
-  return self_compare_prepared_package(*pkg, diff, opts);
+  return self_compare_prepared_package_set(ps, diff, opts);
 }
 
-/// Compare the ABI of two packages.
+/// Compare the ABI of two package sets.
 ///
-/// @param first_package the first package to consider.
+/// @param first_ps the first package set to consider.
 ///
-/// @param second_package the second package to consider.
+/// @param second_ps the second package set to consider.
 ///
 /// @param opts the options the current program has been called with.
 ///
 /// @return the status of the comparison.
 static abidiff_status
-compare(package_sptr& first_package,
-	package_sptr& second_package,
+compare(const package_set_sptr& first_ps,
+	const package_set_sptr& second_ps,
 	options& opts)
 {
   abi_diff diff;
-  return compare(first_package, second_package, diff, opts);
+  return compare(first_ps, second_ps, diff, opts);
 }
 
 /// Parse the command line of the current program.
@@ -3426,15 +3755,17 @@ parse_command_line(int argc, char* argv[], options& opts)
     {
       if (argv[i][0] != '-')
         {
-          if (opts.package1.empty())
+          if (opts.package_set_paths1.empty())
             {
-              opts.package1 = make_path_absolute(argv[i]).get();
-              opts.nonexistent_file = !file_exists(opts.package1);
+              string path = make_path_absolute(argv[i]).get();
+	      opts.package_set_paths1.insert(path);
+              opts.nonexistent_file = !file_exists(path);
             }
-          else if (opts.package2.empty())
+          else if (opts.package_set_paths2.empty())
             {
-              opts.package2 = make_path_absolute(argv[i]).get();
-              opts.nonexistent_file = !file_exists(opts.package2);
+              string path = make_path_absolute(argv[i]).get();
+	      opts.package_set_paths2.insert(path);
+              opts.nonexistent_file = !file_exists(path);
             }
           else
 	    {
@@ -3444,10 +3775,35 @@ parse_command_line(int argc, char* argv[], options& opts)
 
           if (opts.nonexistent_file)
             {
-              opts.wrong_option = argv[i];
+              opts.wrong_arg = argv[i];
               return true;
             }
         }
+      else if (!strcmp(argv[i], "--set1")
+	       || !strcmp(argv[i], "--set2"))
+	{
+	  bool is_set1 = !strcmp(argv[i], "--set1");
+	  set<string>& set =
+	    is_set1 ? opts.package_set_paths1 : opts.package_set_paths2;
+	  for (int j = i + 1; j < argc; ++j)
+	    {
+	      if (argv[j][0] == '-')
+		{
+		  i = j - 1;
+		  break;
+		}
+	      const char* p = argv[j];
+	      string pkg_path = make_path_absolute(p).get();
+	      if (!opts.nonexistent_file)
+		opts.nonexistent_file = !file_exists(pkg_path);
+	      if (opts.nonexistent_file && opts.wrong_arg.empty())
+		opts.wrong_arg = pkg_path;
+	      set.insert(pkg_path);
+	      i = j;
+	    }
+	  if (!opts.wrong_arg.empty())
+	    return false;
+	}
       else if (!strcmp(argv[i], "--debug-info-pkg1")
 	       || !strcmp(argv[i], "--d1"))
         {
@@ -3562,6 +3918,11 @@ parse_command_line(int argc, char* argv[], options& opts)
 	opts.assume_odr_for_cplusplus = false;
       else if (!strcmp(argv[i], "--verbose"))
 	opts.verbose = true;
+      else if (!strcmp(argv[i], "--verbose-diff"))
+	{
+	  opts.verbose_diff = true;
+	  opts.verbose = true;
+	}
       else if (!strcmp(argv[i], "--no-abignore"))
 	opts.abignore = false;
       else if (!strcmp(argv[i], "--no-parallel"))
@@ -3590,14 +3951,14 @@ parse_command_line(int argc, char* argv[], options& opts)
 	      return true;
 	    }
 	  if (guess_file_type(argv[j]) == abigail::tools_utils::FILE_TYPE_RPM)
-	    // The kernel abi whitelist is actually a whitelist
+	    // The kernel abi stablelist is actually a stablelist
 	    // *package*.  Take that into account.
-	    opts.kabi_whitelist_packages.push_back
+	    opts.kabi_stablelist_packages.push_back
 	      (make_path_absolute(argv[j]).get());
 	  else
-	    // We assume the kernel abi whitelist is a white list
+	    // We assume the kernel abi stablelist is a white list
 	    // file.
-	    opts.kabi_whitelist_paths.push_back(argv[j]);
+	    opts.kabi_stablelist_paths.push_back(argv[j]);
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--wp"))
@@ -3609,7 +3970,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	      opts.wrong_option = argv[i];
 	      return true;
 	    }
-	  opts.kabi_whitelist_packages.push_back
+	  opts.kabi_stablelist_packages.push_back
 	    (make_path_absolute(argv[j]).get());
 	  ++i;
 	}
@@ -3647,6 +4008,8 @@ parse_command_line(int argc, char* argv[], options& opts)
 int
 main(int argc, char* argv[])
 {
+  abigail::tools_utils::initialize();
+
   options opts(argv[0]);
 
   if (!parse_command_line(argc, argv, opts))
@@ -3655,7 +4018,7 @@ main(int argc, char* argv[])
 	emit_prefix("abipkgdiff", cerr)
 	  << "unrecognized option: " << opts.wrong_option
 	  << "\ntry the --help option for more information\n";
-      else
+      if (!opts.wrong_arg.empty())
 	emit_prefix("abipkgdiff", cerr)
 	  << "unrecognized argument: " << opts.wrong_arg
 	  << "\ntry the --help option for more information\n";
@@ -3675,7 +4038,7 @@ main(int argc, char* argv[])
   if (opts.nonexistent_file)
     {
       string input_file;
-      base_name(opts.wrong_option, input_file);
+      base_name(opts.wrong_arg, input_file);
       emit_prefix("abipkgdiff", cerr)
 	<< "The input file " << input_file << " doesn't exist\n"
 	"try the --help option for more information\n";
@@ -3683,7 +4046,7 @@ main(int argc, char* argv[])
 	      | abigail::tools_utils::ABIDIFF_ERROR);
     }
 
-  if (opts.kabi_whitelist_packages.size() > 2)
+  if (opts.kabi_stablelist_packages.size() > 2)
     {
       emit_prefix("abipkgdiff", cerr)
 	<< "no more than 2 Linux kernel white list packages can be provided\n";
@@ -3729,13 +4092,13 @@ main(int argc, char* argv[])
   if (need_just_one_input_package)
     {
       bool bail_out = false;
-      if (!opts.package2.empty())
+      if (!opts.package_set_paths2.empty())
 	{
 	  // We don't need the second package, we'll ignore it later
 	  // down below.
 	  ;
 	}
-      if (opts.package1.empty())
+      if (opts.package_set_paths1.empty())
 	{
 	  // We need at least one package to work with!
 	  emit_prefix("abipkgdiff", cerr)
@@ -3745,7 +4108,7 @@ main(int argc, char* argv[])
 		    | abigail::tools_utils::ABIDIFF_ERROR);
 	}
     }
-  else if(opts.package1.empty() || opts.package2.empty())
+  else if(opts.package_set_paths1.empty() && opts.package_set_paths2.empty())
     {
       emit_prefix("abipkgdiff", cerr)
 	<< "please enter two packages to compare" << "\n";
@@ -3753,16 +4116,18 @@ main(int argc, char* argv[])
 	      | abigail::tools_utils::ABIDIFF_ERROR);
     }
 
-  package_sptr first_package(new package(opts.package1, "package1"));
+  package_set_sptr first_package_set(new package_set(opts.package_set_paths1,
+						     "package_set1"));
 
-  package_sptr second_package(new package(opts.package2, "package2"));
-  opts.pkg1 = first_package;
-  opts.pkg2 = second_package;
+  package_set_sptr second_package_set(new package_set(opts.package_set_paths2,
+						      "package_set2"));
+  opts.pkg_set1 = first_package_set;
+  opts.pkg_set2 = second_package_set;
 
   for (vector<string>::const_iterator p = opts.debug_packages1.begin();
        p != opts.debug_packages1.end();
        ++p)
-    first_package->debug_info_packages().push_back
+    first_package_set->debug_info_packages().push_back
       (package_sptr(new package(*p,
 				"debug_package1",
 				/*pkg_kind=*/package::KIND_DEBUG_INFO)));
@@ -3770,62 +4135,58 @@ main(int argc, char* argv[])
   for (vector<string>::const_iterator p = opts.debug_packages2.begin();
        p != opts.debug_packages2.end();
        ++p)
-    second_package->debug_info_packages().push_back
+    second_package_set->debug_info_packages().push_back
       (package_sptr(new package(*p,
 				"debug_package2",
 				/*pkg_kind=*/package::KIND_DEBUG_INFO)));
 
   if (!opts.devel_package1.empty())
-    first_package->devel_package
+    first_package_set->devel_package
       (package_sptr(new package(opts.devel_package1,
-				"devel_package1",
+				"package_set1",
 				/*pkg_kind=*/package::KIND_DEVEL)));
     ;
 
   if (!opts.devel_package2.empty())
-    second_package->devel_package
+    second_package_set->devel_package
       (package_sptr(new package(opts.devel_package2,
-				"devel_package2",
+				"package_set2",
 				/*pkg_kind=*/package::KIND_DEVEL)));
 
-  if (!opts.kabi_whitelist_packages.empty())
+  if (!opts.kabi_stablelist_packages.empty())
     {
-      first_package->kabi_whitelist_package
+      first_package_set->kabi_stablelist_package
 	(package_sptr(new package
-		      (opts.kabi_whitelist_packages[0],
-		       "kabi_whitelist_package1",
-		       /*pkg_kind=*/package::KIND_KABI_WHITELISTS)));
-      if (opts.kabi_whitelist_packages.size() >= 2)
-	second_package->kabi_whitelist_package
+		      (opts.kabi_stablelist_packages[0],
+		       "kabi_stablelist_package1",
+		       /*pkg_kind=*/package::KIND_KABI_STABLELISTS)));
+      if (opts.kabi_stablelist_packages.size() >= 2)
+	second_package_set->kabi_stablelist_package
 	  (package_sptr(new package
-			(opts.kabi_whitelist_packages[1],
-			 "kabi_whitelist_package2",
-			 /*pkg_kind=*/package::KIND_KABI_WHITELISTS)));
+			(opts.kabi_stablelist_packages[1],
+			 "kabi_stablelist_package2",
+			 /*pkg_kind=*/package::KIND_KABI_STABLELISTS)));
     }
 
   string package_name;
-  switch (first_package->type())
+  switch (first_package_set->type())
     {
     case abigail::tools_utils::FILE_TYPE_RPM:
-      if (!second_package->path().empty()
-	  && second_package->type() != abigail::tools_utils::FILE_TYPE_RPM)
+      if (!second_package_set->path().empty()
+	  && second_package_set->type() != abigail::tools_utils::FILE_TYPE_RPM)
 	{
-	  base_name(opts.package2, package_name);
+	  base_name(*opts.package_set_paths2.begin(), package_name);
 	  emit_prefix("abipkgdiff", cerr)
 	    << package_name << " should be an RPM file\n";
 	  return (abigail::tools_utils::ABIDIFF_USAGE_ERROR
 		  | abigail::tools_utils::ABIDIFF_ERROR);
 	}
 
-      if (file_is_kernel_package(first_package->path(),
-				 abigail::tools_utils::FILE_TYPE_RPM)
-	  || file_is_kernel_package(second_package->path(),
-				    abigail::tools_utils::FILE_TYPE_RPM))
+      if (is_kernel_package(first_package_set)
+	  || is_kernel_package(second_package_set))
 	{
-	  if (file_is_kernel_package(first_package->path(),
-				     abigail::tools_utils::FILE_TYPE_RPM)
-	      != file_is_kernel_package(second_package->path(),
-					abigail::tools_utils::FILE_TYPE_RPM))
+	  if (is_kernel_package(first_package_set)
+	      != is_kernel_package(second_package_set))
 	    {
 	      emit_prefix("abipkgdiff", cerr)
 		<< "a Linux kernel package can only be compared to another "
@@ -3834,9 +4195,9 @@ main(int argc, char* argv[])
 		      | abigail::tools_utils::ABIDIFF_ERROR);
 	    }
 
-	  if (first_package->debug_info_packages().empty()
-	      || (!second_package->path().empty()
-		  && second_package->debug_info_packages().empty()))
+	  if (first_package_set->debug_info_packages().empty()
+	      || (!second_package_set->path().empty()
+		  && second_package_set->debug_info_packages().empty()))
 	    {
 	      emit_prefix("abipkgdiff", cerr)
 		<< "a Linux Kernel package must be accompanied with its "
@@ -3859,10 +4220,10 @@ main(int argc, char* argv[])
       break;
 
     case abigail::tools_utils::FILE_TYPE_DEB:
-      if (!second_package->path().empty()
-	  && second_package->type() != abigail::tools_utils::FILE_TYPE_DEB)
+      if (!second_package_set->package_paths().empty()
+	  && second_package_set->type() != abigail::tools_utils::FILE_TYPE_DEB)
 	{
-	  base_name(opts.package2, package_name);
+	  base_name(*opts.package_set_paths2.begin(), package_name);
 	  emit_prefix("abipkgdiff", cerr)
 	    << package_name << " should be a DEB file\n";
 	  return (abigail::tools_utils::ABIDIFF_USAGE_ERROR
@@ -3871,10 +4232,10 @@ main(int argc, char* argv[])
       break;
 
     case abigail::tools_utils::FILE_TYPE_DIR:
-      if (!second_package->path().empty()
-	  && second_package->type() != abigail::tools_utils::FILE_TYPE_DIR)
+      if (!second_package_set->package_paths().empty()
+	  && second_package_set->type() != abigail::tools_utils::FILE_TYPE_DIR)
 	{
-	  base_name(opts.package2, package_name);
+	  base_name(*opts.package_set_paths2.begin(), package_name);
 	  emit_prefix("abipkgdiff", cerr)
 	    << package_name << " should be a directory\n";
 	  return (abigail::tools_utils::ABIDIFF_USAGE_ERROR
@@ -3883,10 +4244,10 @@ main(int argc, char* argv[])
       break;
 
     case abigail::tools_utils::FILE_TYPE_TAR:
-      if (!second_package->path().empty()
-	  && second_package->type() != abigail::tools_utils::FILE_TYPE_TAR)
+      if (!second_package_set->package_paths().empty()
+	  && second_package_set->type() != abigail::tools_utils::FILE_TYPE_TAR)
 	{
-	  base_name(opts.package2, package_name);
+	  base_name(*opts.package_set_paths2.begin(), package_name);
 	  emit_prefix("abipkgdiff", cerr)
 	    << package_name << " should be a GNU tar archive\n";
 	  return (abigail::tools_utils::ABIDIFF_USAGE_ERROR
@@ -3895,17 +4256,15 @@ main(int argc, char* argv[])
       break;
 
     default:
-      base_name(opts.package1, package_name);
+      base_name(*opts.package_set_paths1.begin(), package_name);
       emit_prefix("abipkgdiff", cerr)
 	<< package_name << " should be a valid package file \n";
       return (abigail::tools_utils::ABIDIFF_USAGE_ERROR
 	      | abigail::tools_utils::ABIDIFF_ERROR);
     }
 
-  abigail::tools_utils::initialize();
-
   if (opts.self_check)
-    return compare_to_self(first_package, opts);
+    return compare_to_self(first_package_set, opts);
 
-  return compare(first_package, second_package, opts);
+  return compare(first_package_set, second_package_set, opts);
 }

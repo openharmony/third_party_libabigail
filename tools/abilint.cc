@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -81,10 +81,12 @@ struct options
   bool				read_tu;
   bool				diff;
   bool				noout;
+  bool				annotate;
+  bool				do_log;
 #ifdef WITH_CTF
   bool				use_ctf;
 #endif
-  std::shared_ptr<char>	di_root_path;
+  string			di_root_path;
   vector<string>		suppression_paths;
   string			headers_dir;
   vector<string>		header_files;
@@ -97,7 +99,9 @@ struct options
       read_from_stdin(false),
       read_tu(false),
       diff(false),
-      noout(false)
+      noout(false),
+      annotate(false),
+      do_log(false)
 #ifdef WITH_CTF
     ,
       use_ctf(false)
@@ -483,24 +487,26 @@ display_usage(const string& prog_name, ostream& out)
   emit_prefix(prog_name, out)
     << "usage: " << prog_name << " [options] [<abi-file1>]\n"
     << " where options can be:\n"
-    << "  --help  display this message\n"
-    << "  --version|-v  display program version information and exit\n"
-    << "  --debug-info-dir <path> the path under which to look for "
-    "debug info for the elf <abi-file>\n"
-    << "  --headers-dir|--hd <path> the path to headers of the elf file\n"
-    << "  --header-file|--hf <path> the path to one header of the elf file\n"
-    << "  --suppressions|--suppr <path> specify a suppression file\n"
-    << "  --diff  for xml inputs, perform a text diff between "
-    "the input and the memory model saved back to disk\n"
-    << "  --noout  do not display anything on stdout\n"
-    << "  --stdin  read abi-file content from stdin\n"
-    << "  --tu  expect a single translation unit file\n"
+    << "  --annotate  annotate the ABI artifacts emitted in the output\n"
+    << "  --verbose  show verbose messages about internal stuff\n"
 #ifdef WITH_CTF
     << "  --ctf use CTF instead of DWARF in ELF files\n"
 #endif
+    << "  --debug-info-dir <path> the path under which to look for "
+    "debug info for the elf <abi-file>\n"
+    << "  --diff  for xml inputs, perform a text diff between "
+    "the input and the memory model saved back to disk\n"
+    << "  --header-file|--hf <path> the path to one header of the elf file\n"
+    << "  --headers-dir|--hd <path> the path to headers of the elf file\n"
+    << "  --help  display this message\n"
+    << "  --noout  do not display anything on stdout\n"
 #ifdef WITH_SHOW_TYPE_USE_IN_ABILINT
     << "  --show-type-use <type-id>  show how a type is used from the abixml file\n"
 #endif
+    << "  --stdin  read abi-file content from stdin\n"
+    << "  --suppressions|--suppr <path> specify a suppression file\n"
+    << "  --tu  expect a single translation unit file\n"
+    << "  --version|-v  display program version information and exit\n"
     ;
 }
 
@@ -538,7 +544,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	    // elfutils wants the root path to the debug info to be
 	    // absolute.
 	    opts.di_root_path =
-	      abigail::tools_utils::make_path_absolute(argv[i + 1]);
+	      abigail::tools_utils::make_path_absolute(string(argv[i + 1]));
 	    ++i;
 	  }
       else if (!strcmp(argv[i], "--headers-dir")
@@ -583,6 +589,10 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  opts.diff = true;
 	else if (!strcmp(argv[i], "--noout"))
 	  opts.noout = true;
+	else if (!strcmp(argv[i], "--annotate"))
+	  opts.annotate = true;
+	else if (!strcmp(argv[i], "--verbose"))
+	  opts.do_log = true;
 #ifdef WITH_SHOW_TYPE_USE_IN_ABILINT
       else if (!strcmp(argv[i], "--show-type-use"))
 	{
@@ -675,11 +685,25 @@ set_suppressions(abigail::fe_iface& reader, const options& opts)
   reader.add_suppressions(supprs);
 }
 
+/// Set the options of the reader.
+///
+/// @param reader the reader to consider.
+///
+/// @param opts the options to use.
+static void
+set_reader_options(abigail::fe_iface& reader, const options& opts)
+{
+  set_suppressions(reader, opts);
+  reader.options().do_log = opts.do_log;
+}
+
 /// Reads a bi (binary instrumentation) file, saves it back to a
 /// temporary file and run a diff on the two versions.
 int
 main(int argc, char* argv[])
 {
+  abigail::tools_utils::initialize();
+
   options opts;
   if (!parse_command_line(argc, argv, opts))
     {
@@ -723,6 +747,7 @@ main(int argc, char* argv[])
 	    {
 	      const write_context_sptr& ctxt
 		  = create_write_context(env, cout);
+	      set_annotate(*ctxt, opts.annotate);
 	      write_translation_unit(*ctxt, *tu, 0);
 	    }
 	  return 0;
@@ -732,13 +757,14 @@ main(int argc, char* argv[])
 	  abigail::fe_iface_sptr rdr =
 	    abigail::abixml::create_reader(&cin, env);
 	  assert(rdr);
-	  set_suppressions(*rdr, opts);
+	  set_reader_options(*rdr, opts);
 	  abigail::fe_iface::status sts;
 	  corpus_sptr corp = rdr->read_corpus(sts);
 	  if (!opts.noout)
 	    {
 	      const write_context_sptr& ctxt
 		  = create_write_context(env, cout);
+	      set_annotate(*ctxt, opts.annotate);
 	      write_corpus(*ctxt, corp, /*indent=*/0);
 	    }
 	  return 0;
@@ -752,7 +778,7 @@ main(int argc, char* argv[])
       abigail::corpus_sptr corp;
       abigail::corpus_group_sptr group;
       abigail::fe_iface::status s = abigail::fe_iface::STATUS_OK;
-      char* di_root_path = 0;
+      string di_root_path;
       file_type type = guess_file_type(opts.file_path);
 
       switch (type)
@@ -766,16 +792,17 @@ main(int argc, char* argv[])
 	  {
 	    abigail::fe_iface_sptr rdr =
 	      abigail::abixml::create_reader(opts.file_path,
-							   env);
+					     env);
+	    set_reader_options(*rdr, opts);
 	    tu = abigail::abixml::read_translation_unit(*rdr);
 	  }
 	  break;
 	case abigail::tools_utils::FILE_TYPE_ELF:
 	case abigail::tools_utils::FILE_TYPE_AR:
 	  {
-	    di_root_path = opts.di_root_path.get();
-	    vector<char**> di_roots;
-	    di_roots.push_back(&di_root_path);
+	    di_root_path = opts.di_root_path;
+	    vector<string> di_roots;
+	    di_roots.push_back(di_root_path);
 	    abigail::elf_based_reader_sptr rdr;
 #ifdef WITH_CTF
             if (opts.use_ctf)
@@ -788,7 +815,7 @@ main(int argc, char* argv[])
 		abigail::dwarf::create_reader(opts.file_path,
 					      di_roots, env,
 					      /*load_all_types=*/false);
-	    set_suppressions(*rdr, opts);
+	    set_reader_options(*rdr, opts);
 	    corp = rdr->read_corpus(s);
 	  }
 	  break;
@@ -797,7 +824,7 @@ main(int argc, char* argv[])
 	    abigail::fe_iface_sptr rdr =
 	      abigail::abixml::create_reader(opts.file_path, env);
 	    assert(rdr);
-	    set_suppressions(*rdr, opts);
+	    set_reader_options(*rdr, opts);
 	    corp = rdr->read_corpus(s);
 	    break;
 	  }
@@ -806,19 +833,16 @@ main(int argc, char* argv[])
 	    abigail::fe_iface_sptr rdr =
 	      abigail::abixml::create_reader(opts.file_path, env);
 	    assert(rdr);
-	    set_suppressions(*rdr, opts);
+	    set_reader_options(*rdr, opts);
 	    group = read_corpus_group_from_input(*rdr);
 	  }
 	  break;
 	case abigail::tools_utils::FILE_TYPE_RPM:
-	  break;
 	case abigail::tools_utils::FILE_TYPE_SRPM:
-	  break;
 	case abigail::tools_utils::FILE_TYPE_DEB:
-	  break;
 	case abigail::tools_utils::FILE_TYPE_DIR:
-	  break;
 	case abigail::tools_utils::FILE_TYPE_TAR:
+	case abigail::tools_utils::FILE_TYPE_XZ:
 	  break;
 	}
 
@@ -831,7 +855,7 @@ main(int argc, char* argv[])
 	      if (s & abigail::fe_iface::STATUS_DEBUG_INFO_NOT_FOUND)
 		{
 		  cerr << "could not find the debug info";
-		  if(di_root_path == 0)
+		  if(di_root_path.empty())
 		    emit_prefix(argv[0], cerr)
 		      << " Maybe you should consider using the "
 		      "--debug-info-dir1 option to tell me about the "
@@ -879,6 +903,7 @@ main(int argc, char* argv[])
 	    {
 	      if (!opts.noout)
 		{
+		  set_annotate(*ctxt, opts.annotate);
 		  if (corp)
 		    is_ok = write_corpus(*ctxt, corp, 0);
 		  else if (group)

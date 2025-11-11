@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2016-2023 Red Hat, Inc.
+// Copyright (C) 2016-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -335,6 +335,12 @@ public:
 
   void
   set_changed_enumerators_regexp(const vector<regex::regex_t_sptr>&);
+
+  bool
+  has_strict_fam_conversion () const;
+
+  void
+  set_has_strict_fam_conversion(bool);
 
   virtual bool
   suppresses_diff(const diff* diff) const;
@@ -943,13 +949,13 @@ suppression_matches_soname_or_filename(const string& soname,
 				       const suppression_base& suppr);
 
 const char*
-get_private_types_suppr_spec_label();
+get_opaque_types_suppr_spec_label();
 
 bool
-is_private_type_suppr_spec(const type_suppression&);
+is_opaque_type_suppr_spec(const type_suppression&);
 
 bool
-is_private_type_suppr_spec(const suppression_sptr& s);
+is_opaque_type_suppr_spec(const suppression_sptr& s);
 
 bool
 suppression_can_match(const fe_iface&,

@@ -42,6 +42,7 @@ ohos_static_library("libabigail_static") {
     "abg-tools-utils.cc",
     "abg-traverse.cc",
     "abg-writer.cc",
+    "xxhash.c",
   ]
 
   include_dirs = [

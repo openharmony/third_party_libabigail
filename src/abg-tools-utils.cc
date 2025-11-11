@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 ///@file
 
@@ -35,6 +35,7 @@
 #include <libgen.h>
 #include <libxml/parser.h>
 #include <libxml/xmlversion.h>
+#include <lzma.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +44,7 @@
 #include <iterator>
 #include <memory>
 #include <sstream>
+#include <regex>
 
 #include "abg-dwarf-reader.h"
 #ifdef WITH_CTF
@@ -53,6 +55,7 @@
 #endif
 #include "abg-internal.h"
 #include "abg-regex.h"
+#include "abg-libxml-utils.h"
 
 // <headers defining libabigail's API go under here>
 ABG_BEGIN_EXPORT_DECLARATIONS
@@ -87,8 +90,7 @@ namespace tools_utils
 void
 initialize()
 {
-  LIBXML_TEST_VERSION;
-  xmlInitParser();
+  xml::initialize();
 }
 
 /// Get the value of $libdir variable of the autotools build
@@ -416,9 +418,12 @@ is_regular_file(const string& path)
   if (S_ISREG(st.st_mode))
     return true;
 
-  string symlink_target_path;
-  if (maybe_get_symlink_target_file_path(path, symlink_target_path))
-    return is_regular_file(symlink_target_path);
+  if (S_ISLNK(st.st_mode))
+    {
+      string symlink_target_path;
+      if (maybe_get_symlink_target_file_path(path, symlink_target_path))
+	return is_regular_file(symlink_target_path);
+    }
 
   return false;
 }
@@ -456,7 +461,7 @@ dir_contains_ctf_archive(const string& directory,
 /// that contains debug info.
 bool
 file_has_dwarf_debug_info(const string& elf_file_path,
-			  const vector<char**>& debug_info_root_paths)
+			  const vector<string>& debug_info_root_paths)
 {
   if (guess_file_type(elf_file_path) != FILE_TYPE_ELF)
     return false;
@@ -492,7 +497,7 @@ file_has_dwarf_debug_info(const string& elf_file_path,
 /// that contains debug info.
 bool
 file_has_ctf_debug_info(const string& elf_file_path,
-			const vector<char**>& debug_info_root_paths)
+			const vector<string>& debug_info_root_paths)
 {
   if (guess_file_type(elf_file_path) != FILE_TYPE_ELF)
     return false;
@@ -516,7 +521,7 @@ file_has_ctf_debug_info(const string& elf_file_path,
 
   // vmlinux.ctfa could be provided with --debug-info-dir
   for (const auto& path : debug_info_root_paths)
-    if (find_file_under_dir(*path, "vmlinux.ctfa", vmlinux))
+    if (!path.empty() && find_file_under_dir(path, "vmlinux.ctfa", vmlinux))
       return true;
 
   return false;
@@ -536,7 +541,7 @@ file_has_ctf_debug_info(const string& elf_file_path,
 /// that contains debug info.
 bool
 file_has_btf_debug_info(const string& elf_file_path,
-			const vector<char**>& debug_info_root_paths)
+			const vector<string>& debug_info_root_paths)
 {
     if (guess_file_type(elf_file_path) != FILE_TYPE_ELF)
     return false;
@@ -1347,6 +1352,79 @@ trim_white_space(const string& str)
   return result;
 }
 
+/// Remove white spaces from a string.
+///
+/// @param str the string to remove the white spaces from.
+///
+/// @return true iff any white space was removed from @p str.
+bool
+remove_white_spaces(string& str)
+{
+  if (str.erase(std::remove_if(str.begin(), str.end(), isspace),
+		str.end()) == str.end())
+    return false;
+  return true;
+}
+
+/// Getter of a global instance of std::regex that matches numerical
+/// litterals.
+///
+/// The regular expression is the following: "([0-9]+)([uUlL])+"
+///
+/// The purpose of this is to compile the regular expression only
+/// once, the first time this function is invoked.  Subsquent
+/// invocations return the already compiled regular expression.
+///
+/// @return a reference to a global instance of std::regex
+static std::regex&
+get_litteral_regex()
+{
+  static std::regex re("([0-9]+)([uUlL])+");
+  return re;
+}
+
+/// Normalize the numerical litteral in a string.
+///
+/// Basically, if a litteral is present as 10u or 100UL, change it
+/// into 10 or 100.
+///
+/// @param str the string to normalize.
+///
+/// @return true iff @p str was normalized.
+bool
+normalize_litterals(string& str)
+{
+  bool begin_pattern = false, middle_pattern = false, found_litteral = false;
+  for (string::iterator i = str.begin(); i < str.end(); ++i)
+    {
+      if (isdigit(*i))
+	begin_pattern = true;
+      else
+	{
+	  if (begin_pattern
+	      && (*i == 'u' || *i == 'U' || *i == 'l' || *i == 'L'))
+	    middle_pattern = true;
+	  else
+	    {
+	      if (middle_pattern)
+		{
+		  found_litteral = true;
+		  break;
+		}
+	    }
+	}
+    }
+
+  if (found_litteral)
+    {
+      std::regex& re = get_litteral_regex();
+      str = std::regex_replace(str, re, "$1");
+      return true;
+    }
+
+  return false;
+}
+
 /// Remove a string of pattern in front of a given string.
 ///
 /// For instance, consider this string:
@@ -1552,10 +1630,41 @@ operator<<(ostream& output,
     case FILE_TYPE_TAR:
       repr = "GNU tar archive type";
       break;
+    case FILE_TYPE_XZ:
+      repr = "XZ compressed file";
     }
 
   output << repr;
   return output;
+}
+
+/// The kind of compression we want a de-compression std::streambuf
+/// for.
+///
+/// This enum must be amended to add support for new compression
+/// schemes, especially whenever a new enumerator is added to the enum
+/// @ref file_type.
+enum compression_kind
+{
+  COMPRESSION_KIND_UNKNOWN,
+  /// The LZMA compression (used by the xz tool).
+  COMPRESSION_KIND_XZ
+}; //end enum compression_kind
+
+/// Test if one of the enumerators of @ref file_type designates a
+/// compression scheme.
+///
+/// This helper function needs to be updated whenever a new
+/// compression-related enumerator is added to @ref file_type.
+///
+/// @return the kind of compression designated by @p t.
+static compression_kind
+is_compressed_file_type(file_type t)
+{
+  if (t == FILE_TYPE_XZ)
+    return COMPRESSION_KIND_XZ;
+
+  return COMPRESSION_KIND_UNKNOWN;
 }
 
 /// Guess the type of the content of an input stream.
@@ -1569,11 +1678,11 @@ guess_file_type(istream& in)
   const unsigned BUF_LEN = 264;
   const unsigned NB_BYTES_TO_READ = 263;
 
-  char buf[BUF_LEN];
+  unsigned char buf[BUF_LEN];
   memset(buf, 0, BUF_LEN);
 
   std::streampos initial_pos = in.tellg();
-  in.read(buf, NB_BYTES_TO_READ);
+  in.read(reinterpret_cast<char*>(buf), NB_BYTES_TO_READ);
   in.seekg(initial_pos);
 
   if (in.gcount() < 4 || in.bad())
@@ -1585,6 +1694,17 @@ guess_file_type(istream& in)
       && buf[3] == 'F')
     return FILE_TYPE_ELF;
 
+  // XZ format.  Described at
+  // https://tukaani.org/xz/xz-file-format.txt.
+  if (in.gcount() >= 6
+      && buf[0] == 0xFD
+      && buf[1] == '7'
+      && buf[2] == 'z'
+      && buf[3] == 'X'
+      && buf[4] == 'Z'
+      && buf[5] == 0)
+    return FILE_TYPE_XZ;
+
   if (buf[0] == '!'
       && buf[1] == '<'
       && buf[2] == 'a'
@@ -1593,7 +1713,7 @@ guess_file_type(istream& in)
       && buf[5] == 'h'
       && buf[6] == '>')
     {
-      if (strstr(buf, "debian-binary"))
+      if (strstr(reinterpret_cast<char*>(buf), "debian-binary"))
 	return FILE_TYPE_DEB;
       else
 	return FILE_TYPE_AR;
@@ -1646,6 +1766,8 @@ guess_file_type(istream& in)
       && buf[11] == ' ')
     return FILE_TYPE_XML_CORPUS;
 
+  // Detect RPM format.  Documented at
+  // http://ftp.rpm.org/max-rpm/s1-rpm-file-format-rpm-file-format.html.
   if ((unsigned char) buf[0]    == 0xed
       && (unsigned char) buf[1] == 0xab
       && (unsigned char) buf[2] == 0xee
@@ -1669,13 +1791,53 @@ guess_file_type(istream& in)
   return FILE_TYPE_UNKNOWN;
 }
 
+/// The factory of an std::streambuf aimed at decompressing data
+/// coming from an input stream compressed with a particular
+/// compression scheme.
+///
+/// This function must be amended to add support for new compression
+/// schemes.
+///
+/// @param compressed_input the compressed input to create the
+/// decompressor std::streambuf for.
+///
+/// @param compr the compression scheme kind.
+///
+/// @return a pointer to the std::streambuf to use for decompression.
+/// If the compression scheme is not supported, the function returns
+/// nil.
+static shared_ptr<std::streambuf>
+get_decompressed_streambuf(std::istream& compressed_input,
+			   compression_kind compr)
+{
+  shared_ptr<std::streambuf> result;
+
+  switch(compr)
+    {
+    case COMPRESSION_KIND_UNKNOWN:
+      ABG_ASSERT_NOT_REACHED;
+      break;
+
+    case COMPRESSION_KIND_XZ:
+    shared_ptr<std::streambuf> r(new xz_decompressor_type(compressed_input));
+    result = r;
+    break;
+    };
+
+  return result;
+};// end struct compression_handler_type
+
 /// Guess the type of the content of an file.
 ///
 /// @param file_path the path to the file to consider.
 ///
+/// @param look_through_compression if true, then decompress the file
+/// and try to guess the type of the decompressed content.  Otherwise,
+/// just return that it's a compressed type.
+///
 /// @return the type of content guessed.
 file_type
-guess_file_type(const string& file_path)
+guess_file_type(const string& file_path, bool look_through_compression)
 {
   if (is_dir(file_path))
     return FILE_TYPE_DIR;
@@ -1697,9 +1859,68 @@ guess_file_type(const string& file_path)
       || string_ends_with(file_path, ".tz"))
     return FILE_TYPE_TAR;
 
-  ifstream in(file_path.c_str(), ifstream::binary);
-  file_type r = guess_file_type(in);
-  in.close();
+  file_type r = FILE_TYPE_UNKNOWN;
+  compression_kind compr_kind = COMPRESSION_KIND_UNKNOWN;
+  shared_ptr<std::streambuf> decompressor_streambuf;
+
+  if (string_ends_with(file_path, ".lzma")
+      || string_ends_with(file_path, ".lz")
+      || string_ends_with(file_path, ".xz"))
+    {
+      r = FILE_TYPE_XZ;
+      compr_kind = COMPRESSION_KIND_XZ;
+    }
+  // else if there are other compression schemes supported, recognize
+  // their file suffix here!
+
+  if (is_compressed_file_type(r) && !look_through_compression)
+    return r;
+
+  do
+    {
+      shared_ptr<ifstream> input_fstream(new ifstream(file_path.c_str(),
+						      ifstream::binary));
+      shared_ptr<istream> input_stream = input_fstream;
+
+      if (compr_kind != COMPRESSION_KIND_UNKNOWN)
+	decompressor_streambuf = get_decompressed_streambuf(*input_stream,
+							    compr_kind);
+
+      if (decompressor_streambuf)
+	input_stream.reset(new istream(decompressor_streambuf.get()));
+
+      r = guess_file_type(*input_stream);
+
+      input_fstream->close();
+
+      if (!decompressor_streambuf)
+	{
+	  // So we haven't attempted to decompress the input stream.
+	  //
+	  // Have we found out that it was compressed nonetheless?
+	  compr_kind = is_compressed_file_type(r);
+	  if (compr_kind)
+	    {
+	      if (!look_through_compression)
+		// The caller wants us to report that this file is
+		// compressed.
+		return r;
+
+	      // We found out the input file is compressed, so we do
+	      // have the means to decompress it.  However, we haven't
+	      // yet gotten the de-compressor; that might be because
+	      // we detected the compression just by looking at the
+	      // file name suffix.  Let's go back to calling
+	      // get_decompressed_streambuf again to get the
+	      // decompressor.
+	      ;
+	    }
+	  else
+	    // No the file is not compressed let's get out of here.
+	    break;
+	}
+    } while (!decompressor_streambuf && compr_kind);
+
   return r;
 }
 
@@ -1862,7 +2083,7 @@ file_is_kernel_package(const string& file_path, file_type file_type)
 bool
 rpm_contains_file(const string& rpm_path, const string& file_name)
 {
-    vector<string> query_output;
+  vector<string> query_output;
   // We don't check the return value of this command because on some
   // system, the command can issue errors but still emit a valid
   // output.  We'll rather rely on the fact that the command emits a
@@ -1957,6 +2178,31 @@ make_path_absolute(const char*p)
 /// absolute path by prefixing it with the concatenation of the result
 /// of get_current_dir_name() and the '/' character.
 ///
+///
+/// @param p the path to turn into an absolute path.
+///
+/// @return The resulting absolute path.
+string
+make_path_absolute(const string& p)
+{
+  string result;
+
+  if (!p.empty() && p[0] != '/')
+    {
+      shared_ptr<char> pwd(get_current_dir_name(),
+			   malloced_char_star_deleter());
+      result = string(pwd.get()) + "/" + p;
+    }
+  else if (!p.empty())
+    result = p;
+
+  return result;
+}
+
+/// Return a copy of the path given in argument, turning it into an
+/// absolute path by prefixing it with the concatenation of the result
+/// of get_current_dir_name() and the '/' character.
+///
 /// The result being a pointer to an allocated memory region, it must
 /// be freed by the caller.
 ///
@@ -2003,7 +2249,7 @@ handle_file_entry(const string& file_path,
 {
   if (!suppr)
     {
-      suppr.reset(new type_suppression(get_private_types_suppr_spec_label(),
+      suppr.reset(new type_suppression(get_opaque_types_suppr_spec_label(),
 				       /*type_name_regexp=*/"",
 				       /*type_name=*/""));
 
@@ -2733,6 +2979,20 @@ is_kernel_module(const FTSENT *entry)
   return false;
 }
 
+/// Test if a given file denoted by a FTSENT* is a regular file or a
+/// symlink.
+///
+/// @param entry returned by the combo fts_open/fts_read.
+///
+/// @return true iff @p entry is for a regular file or a symlink.
+static bool
+is_file(const FTSENT *entry)
+{
+  return (entry
+	  && (entry->fts_info == FTS_F
+	      || entry->fts_info == FTS_SL));
+}
+
 /// Find a vmlinux and its kernel modules in a given directory tree.
 ///
 /// @param from the directory tree to start looking from.
@@ -2822,6 +3082,50 @@ find_vmlinux_path(const string&	from,
   return found_vmlinux;
 }
 
+/// Get all the sub-directories (which contain a regular file) of a
+/// given directory.
+///
+/// @param root_dir the root directory to consider.
+///
+/// @param dirs the sub-directories of @p root_dir which contain a
+/// file.
+bool
+get_file_path_dirs_under_dir(const string& root_dir, vector<string>& dirs)
+{
+  char* paths[] = {const_cast<char*>(root_dir.c_str()), 0};
+  FTS *file_hierarchy = fts_open(paths,
+				 FTS_PHYSICAL|FTS_NOCHDIR|FTS_XDEV, 0);
+  if (!file_hierarchy)
+    return false;
+
+  string r = root_dir;
+  if (!string_ends_with(r, "/"))
+    r += "/";
+
+  bool found_file = false;
+  FTSENT *entry;
+  while ((entry = fts_read(file_hierarchy)))
+    {
+      // Skip descendents of symbolic links.
+      if (entry->fts_info == FTS_SL || entry->fts_info == FTS_SLNONE)
+	{
+	  fts_set(file_hierarchy, entry, FTS_SKIP);
+	  continue;
+	}
+
+      if (is_file(entry))
+	found_file = true;
+
+      string path = entry->fts_path;
+      dir_name(path, path);
+      dirs.push_back(path);
+    }
+
+  fts_close(file_hierarchy);
+
+  return found_file;
+}
+
 /// Get the paths of the vmlinux and kernel module binaries under
 /// given directory.
 ///
@@ -2855,7 +3159,7 @@ get_binary_paths_from_kernel_dist(const string&	dist_root,
   // under the 'debug_info_root_path' directory and its content is
   // accessible from <debug_info_root_path>/usr/lib/debug directory.
 
-  string kernel_modules_root;
+  string kernel_modules_root = dist_root;
   string debug_info_root;
   if (dir_exists(dist_root + "/lib/modules"))
     {
@@ -2989,7 +3293,7 @@ load_vmlinux_corpus(elf_based_reader_sptr rdr,
                     const string&       vmlinux,
                     vector<string>&     modules,
                     const string&       root,
-                    vector<char**>&     di_roots,
+                    vector<string>&     di_roots,
                     vector<string>&     suppr_paths,
                     vector<string>&     kabi_wl_paths,
                     suppressions_type&  supprs,
@@ -3000,6 +3304,13 @@ load_vmlinux_corpus(elf_based_reader_sptr rdr,
   abigail::fe_iface::status status = abigail::fe_iface::STATUS_OK;
   rdr->options().do_log = verbose;
 
+  if (verbose)
+    {
+      std::cerr << "Loading stable lists:'";
+      for (auto s : kabi_wl_paths)
+	std::cerr << s << ",";
+      std::cerr << "'...\n";
+    }
   t.start();
   load_generate_apply_suppressions(*rdr, suppr_paths,
                                    kabi_wl_paths, supprs);
@@ -3025,7 +3336,7 @@ load_vmlinux_corpus(elf_based_reader_sptr rdr,
 
   if (verbose)
     std::cerr << vmlinux
-     << " reading DONE:"
+     << " reading DONE in:"
      << t << "\n";
 
   if (group->is_empty())
@@ -3043,7 +3354,7 @@ load_vmlinux_corpus(elf_based_reader_sptr rdr,
          << *m << "' ("
          << cur_module_index
          << "/" << total_nb_modules
-         << ") ... " << std::flush;
+         << ") ...\n" << std::flush;
 
       rdr->initialize(*m, di_roots,
                       /*read_all_types=*/false,
@@ -3058,10 +3369,18 @@ load_vmlinux_corpus(elf_based_reader_sptr rdr,
       rdr->read_and_add_corpus_to_group(*group, status);
       t.stop();
       if (verbose)
-        std::cerr << "module '"
-         << *m
-         << "' reading DONE: "
-         << t << "\n";
+	std::cerr << "Module reading DONE in: "
+		  << t << " for '" << *m
+		  << "' (" << cur_module_index << "/" << total_nb_modules << ")"
+		  << "'\n";
+    }
+
+  if (verbose)
+    {
+      std::cerr << "Total number of functions: "
+		<< group->get_functions().size() << "\n";
+      std::cerr << "Total number of variables: "
+		<< group->get_variables().size() << "\n";
     }
 }
 
@@ -3122,7 +3441,7 @@ build_corpus_group_from_kernel_dist_under(const string&	root,
 	      << root
 	      << "' with vmlinux path: '"
 	      << vmlinux_path
-	      << "' ... " << std::flush;
+	      << "' ... \n" << std::flush;
 
   timer t;
 
@@ -3132,23 +3451,21 @@ build_corpus_group_from_kernel_dist_under(const string&	root,
   t.stop();
 
   if (verbose)
-    std::cerr << "DONE: " << t << "\n";
+    std::cerr << "Kernel tree binary paths analysis DONE in: " << t << "\n";
 
   if (got_binary_paths)
     {
-      shared_ptr<char> di_root =
-	make_path_absolute(debug_info_root.c_str());
-      char *di_root_ptr = di_root.get();
-      vector<char**> di_roots;
-      di_roots.push_back(&di_root_ptr);
+      string di_root =
+	make_path_absolute(debug_info_root);
+      vector<string> di_roots;
+      di_roots.push_back(di_root);
 
 #ifdef WITH_CTF
-      shared_ptr<char> di_root_ctf;
+      string di_root_ctf;
       if (requested_fe_kind & corpus::CTF_ORIGIN)
         {
-          di_root_ctf = make_path_absolute(root.c_str());
-          char *di_root_ctf_ptr = di_root_ctf.get();
-          di_roots.push_back(&di_root_ctf_ptr);
+          di_root_ctf = make_path_absolute(root);
+          di_roots.push_back(di_root_ctf);
         }
 #endif
 
@@ -3206,7 +3523,7 @@ build_corpus_group_from_kernel_dist_under(const string&	root,
 /// designated by @p elf_file_path.
 elf_based_reader_sptr
 create_best_elf_based_reader(const string& elf_file_path,
-			     const vector<char**>& debug_info_root_paths,
+			     const vector<string>& debug_info_root_paths,
 			     environment& env,
 			     corpus::origin requested_fe_kind,
 			     bool show_all_types,
@@ -3227,7 +3544,8 @@ create_best_elf_based_reader(const string& elf_file_path,
     {
 #ifdef WITH_BTF
       if (file_has_btf_debug_info(elf_file_path, debug_info_root_paths))
-	result = btf::create_reader(elf_file_path, debug_info_root_paths, env);
+	result = btf::create_reader(elf_file_path, debug_info_root_paths, env,
+				    show_all_types, linux_kernel_mode);
 #endif
     }
   else
@@ -3246,7 +3564,8 @@ create_best_elf_based_reader(const string& elf_file_path,
 	  && file_has_btf_debug_info(elf_file_path, debug_info_root_paths))
 	// The file has BTF debug info and no BTF, let's use the BTF
 	// front-end even if it wasn't formally requested by the user.
-	result = btf::create_reader(elf_file_path, debug_info_root_paths, env);
+	result = btf::create_reader(elf_file_path, debug_info_root_paths, env,
+				    show_all_types, linux_kernel_mode);
 #endif
     }
 
@@ -3264,6 +3583,121 @@ create_best_elf_based_reader(const string& elf_file_path,
 
   return result;
 }
+
+/// ---------------------------------------------------
+/// <xz_decompressor definition>
+///----------------------------------------------------
+
+/// The private data of the @ref xz_decompressor_type class.
+struct xz_decompressor_type::priv
+{
+  std::istream& xz_istream;
+  lzma_stream lzma;
+  // A 100k bytes buffer for xz data coming from the xz'ed istream.
+  // That buffer is going to be fed into the lzma decoding machinery.
+  char inbuf[1024 * 100] = {};
+  // A 100k bytes buffer for decompressed data coming out of the lzma
+  // machinery
+  char outbuf[1024 * 100] = {};
+
+  priv(std::istream& i)
+    : xz_istream(i),
+      lzma(LZMA_STREAM_INIT)
+  {}
+};// end xz_decompressor_type::priv
+
+/// Constructor of the @ref xz_decompressor_type class.
+///
+/// @param xz_istream the input stream containing the xz-compressed
+/// data to decompress.
+xz_decompressor_type::xz_decompressor_type(std::istream& xz_istream)
+  : priv_(new priv(xz_istream))
+{
+  // Initialize the native LZMA stream to decompress.
+  lzma_ret status = lzma_stream_decoder(&priv_->lzma,
+					UINT64_MAX,
+					LZMA_CONCATENATED);
+  ABG_ASSERT(status == LZMA_OK);
+}
+
+/// Destructor of the @ref xz_decompressor_type class.
+xz_decompressor_type::~xz_decompressor_type()
+{
+  lzma_end(&priv_->lzma);
+}
+
+/// The implementation of the virtual protected
+/// std:streambuf::underflow method.  This method is invoked by the
+/// std::streambuf facility to re-fill its internals buffers with data
+/// coming from the associated input stream and to update the gptr()
+/// and egptr() pointers by using the std::streambuf::setg method.
+///
+/// This is where the decompression using the lzma library is
+/// performed.
+std::streambuf::int_type
+xz_decompressor_type::underflow()
+{
+  if (gptr() < egptr())
+    return *gptr();
+
+  // Let's read 'nr' bytes of xz data into inbuf
+  priv_->xz_istream.read(priv_->inbuf, sizeof(priv_->inbuf));
+  size_t nr = priv_->xz_istream.gcount();
+
+  if (nr != 0)
+    {
+      // So there is fresh compressed input to be decompressed.  Let's
+      // prepare the lzma input stream machinery then.
+      priv_->lzma.avail_in = nr;
+      priv_->lzma.next_in = reinterpret_cast<uint8_t*>(priv_->inbuf);
+    }
+
+  if (priv_->lzma.avail_out || priv_->lzma.avail_in)
+    {
+      // There is still compressed data in the lzma context to
+      // decompress, so let's tell lzma where to put the decompressed
+      // data.
+      priv_->lzma.avail_out = sizeof(priv_->outbuf);
+      priv_->lzma.next_out = reinterpret_cast<uint8_t*>(priv_->outbuf);
+    }
+
+  // Let's now ask the lzma machinery to decompress the next_in buffer
+  // and put the result into the next_out buffer.
+  lzma_ret result = lzma_code(&priv_->lzma, LZMA_RUN);
+  if (result != LZMA_OK && result != LZMA_STREAM_END)
+    {
+      // TODO: list the possible error codes and tell them explicitely
+      // to the user, just like what is done in
+      // https://github.com/tukaani-project/xz/blob/master/doc/examples/02_decompress.c.
+      std::ostringstream o;
+      o << "LZMA decompression failed;"
+	<< " return code of lzma_code() is : "
+	<< result;
+      throw std::runtime_error(o.str());
+    }
+
+  // Let's get the number of bytes decompressed by the lzma
+  // machinery.  I got this from the example in the xz code base at
+  // https://github.com/tukaani-project/xz/blob/master/doc/examples/02_decompress.c.
+  size_t nr_decompressed_bytes = sizeof(priv_->outbuf) - priv_->lzma.avail_out;
+
+  // Now set the relevant index pointers of this streambuf.
+  setg(priv_->outbuf, priv_->outbuf, priv_->outbuf + nr_decompressed_bytes);
+
+  if (nr_decompressed_bytes > 0)
+    return *gptr();
+
+  // If we reached this point, then it means we there is no more
+  // decompressed bytes in the decompressed stream.  Tell the lzma
+  // machinery that we've reached the end of the data.
+  result = lzma_code(&priv_->lzma, LZMA_FINISH);
+  ABG_ASSERT(result == LZMA_OK || result == LZMA_STREAM_END);
+  return traits_type::eof();
+}
+
+/// ---------------------------------------------------
+/// </xz_decompressor definition>
+///----------------------------------------------------
 
 }//end namespace tools_utils
 

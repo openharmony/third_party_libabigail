@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 /// @file
 
@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <set>
+#include <memory>
 
 #include "abg-internal.h"
 
@@ -122,7 +123,7 @@ corpus::exported_decls_builder::exported_functions()
 /// @return the set of functions designated by the ELF symbol of @p
 /// fn, or nullptr if the function ID maps to just @p fn.
 std::unordered_set<function_decl*>*
-corpus::exported_decls_builder::fn_id_maps_to_several_fns(function_decl* fn)
+corpus::exported_decls_builder::fn_id_maps_to_several_fns(const function_decl* fn)
 {
   std::unordered_set<function_decl*> *fns_for_id =
     priv_->fn_id_is_in_id_fns_map(fn);
@@ -155,22 +156,29 @@ corpus::exported_decls_builder::exported_variables()
 /// the function to that set.
 ///
 /// @param fn the function to add the set of exported functions.
-void
+///
+/// @return true iff the function was added to the set of exported
+/// functions.
+bool
 corpus::exported_decls_builder::maybe_add_fn_to_exported_fns(function_decl* fn)
 {
   if (!fn->get_is_in_public_symbol_table())
-    return;
+    return false;
 
   const string& fn_id = priv_->get_id(*fn);
   ABG_ASSERT(!fn_id.empty());
 
   if (priv_->fn_is_in_id_fns_map(fn))
-    return;
+    return false;
 
   if (priv_->keep_wrt_id_of_fns_to_keep(fn)
       && priv_->keep_wrt_regex_of_fns_to_suppress(fn)
       && priv_->keep_wrt_regex_of_fns_to_keep(fn))
-    priv_->add_fn_to_exported(fn);
+    {
+      priv_->add_fn_to_exported(fn);
+      return true;
+    }
+  return false;
 }
 
 /// Consider at all the tunables that control wether a variable should
@@ -178,22 +186,29 @@ corpus::exported_decls_builder::maybe_add_fn_to_exported_fns(function_decl* fn)
 /// the variable to that set.
 ///
 /// @param fn the variable to add the set of exported variables.
-void
-corpus::exported_decls_builder::maybe_add_var_to_exported_vars(const var_decl* var)
+///
+/// @return true iff the variable was added to the set of exported
+/// variables.
+bool
+corpus::exported_decls_builder::maybe_add_var_to_exported_vars(const var_decl_sptr& var)
 {
   if (!var->get_is_in_public_symbol_table())
-    return;
+    return false;
 
-  const string& var_id = priv_->get_id(*var);
+  const interned_string& var_id = priv_->get_id(*var);
   ABG_ASSERT(!var_id.empty());
 
-  if (priv_->var_id_is_in_id_var_map(var_id))
-    return;
+  if (priv_->var_is_in_id_vars_map(var))
+    return false;
 
   if (priv_->keep_wrt_id_of_vars_to_keep(var)
       && priv_->keep_wrt_regex_of_vars_to_suppress(var)
       && priv_->keep_wrt_regex_of_vars_to_keep(var))
-    priv_->add_var_to_exported(var);
+    {
+      priv_->add_var_to_exported(var);
+      return true;
+    }
+  return false;
 }
 
 // </corpus::exported_decls_builder>
@@ -293,8 +308,12 @@ struct var_comp
 
     return first_name < second_name;
   }
-};
 
+  bool
+  operator()(const var_decl_sptr& first,
+	     const var_decl_sptr& second) const
+  {return operator()(first.get(), second.get());}
+};
 
 /// A comparison functor to compare elf_symbols for the purpose of
 /// sorting.
@@ -630,6 +649,34 @@ corpus::priv::get_public_types_pretty_representations()
   return pub_type_pretty_reprs_;
 }
 
+/// Lookup the function which has a given function ID.
+///
+/// Note that there can have been several functions with the same ID.
+/// This is because debug info can declare the same function in
+/// several different translation units.  Normally, all these function
+/// should be equal.  But still, this function returns all these
+/// functions.
+///
+/// @param id the ID of the function to lookup.  This ID must be
+/// either the result of invoking function::get_id() of
+/// elf_symbol::get_id_string().
+///
+/// @return the set of functions which ID is @p id, or nil if no
+/// function with that ID was found.
+std::unordered_set<function_decl*>*
+corpus::priv::lookup_functions(const interned_string& id)
+{
+  exported_decls_builder_sptr &b = exported_decls_builder;
+  if (b)
+    {
+      auto i = b->priv_->id_fns_map_.find(id);
+      if (i == b->priv_->id_fns_map_.end())
+	return 0;
+      return &i->second;
+    }
+  return nullptr;
+}
+
 /// Destructor of the @ref corpus::priv type.
 corpus::priv::~priv()
 {
@@ -682,14 +729,11 @@ corpus::add(const translation_unit_sptr& tu)
 {
   ABG_ASSERT(priv_->members.insert(tu).second);
 
-  if (!tu->get_absolute_path().empty())
-    {
-      // Update the path -> translation_unit map.
-      string_tu_map_type::const_iterator i =
-	priv_->path_tu_map.find(tu->get_absolute_path());
-      ABG_ASSERT(i == priv_->path_tu_map.end());
-      priv_->path_tu_map[tu->get_absolute_path()] = tu;
-    }
+  // Update the path -> translation_unit map.
+  string_tu_map_type::const_iterator i =
+    priv_->path_tu_map.find(tu->get_absolute_path());
+  ABG_ASSERT(i == priv_->path_tu_map.end());
+  priv_->path_tu_map[tu->get_absolute_path()] = tu;
 
   tu->set_corpus(this);
 }
@@ -1166,13 +1210,16 @@ corpus::get_undefined_var_symbol_map() const
 const elf_symbol_sptr
 corpus::lookup_function_symbol(const string& n) const
 {
-  if (get_fun_symbol_map().empty())
+  if (get_fun_symbol_map().empty() && get_undefined_fun_symbol_map().empty())
     return elf_symbol_sptr();
 
-  string_elf_symbols_map_type::const_iterator it =
-    get_fun_symbol_map().find(n);
+  string_elf_symbols_map_type::const_iterator it = get_fun_symbol_map().find(n);
   if ( it == get_fun_symbol_map().end())
-    return elf_symbol_sptr();
+    {
+      it = get_undefined_fun_symbol_map().find(n);
+      if (it == get_undefined_fun_symbol_map().end())
+	return elf_symbol_sptr();
+    }
   return it->second[0];
 }
 
@@ -1233,13 +1280,17 @@ const elf_symbol_sptr
 corpus::lookup_function_symbol(const string& symbol_name,
 			       const elf_symbol::version& version) const
 {
-  if (get_fun_symbol_map().empty())
+  if (get_fun_symbol_map().empty() && get_undefined_fun_symbol_map().empty())
     return elf_symbol_sptr();
 
   string_elf_symbols_map_type::const_iterator it =
     get_fun_symbol_map().find(symbol_name);
   if ( it == get_fun_symbol_map().end())
-    return elf_symbol_sptr();
+    {
+      it = get_undefined_fun_symbol_map().find(symbol_name);
+      if (it == get_undefined_fun_symbol_map().end())
+	return elf_symbol_sptr();
+    }
 
   return find_symbol_by_version(version, it->second);
 }
@@ -1262,13 +1313,16 @@ corpus::lookup_function_symbol(const elf_symbol& symbol) const
 const elf_symbol_sptr
 corpus::lookup_variable_symbol(const string& n) const
 {
-  if (get_var_symbol_map().empty())
+  if (get_var_symbol_map().empty() && get_undefined_var_symbol_map().empty())
     return elf_symbol_sptr();
 
-  string_elf_symbols_map_type::const_iterator it =
-    get_var_symbol_map().find(n);
+  string_elf_symbols_map_type::const_iterator it = get_var_symbol_map().find(n);
   if ( it == get_var_symbol_map().end())
-    return elf_symbol_sptr();
+    {
+      it = get_undefined_var_symbol_map().find(n);
+      if (it == get_undefined_var_symbol_map().end())
+	return elf_symbol_sptr();
+    }
   return it->second[0];
 }
 
@@ -1284,13 +1338,17 @@ const elf_symbol_sptr
 corpus::lookup_variable_symbol(const string& symbol_name,
 			       const elf_symbol::version& version) const
 {
-  if (get_var_symbol_map().empty())
+  if (get_var_symbol_map().empty() && get_undefined_var_symbol_map().empty())
     return elf_symbol_sptr();
 
   string_elf_symbols_map_type::const_iterator it =
     get_var_symbol_map().find(symbol_name);
   if ( it == get_var_symbol_map().end())
-    return elf_symbol_sptr();
+    {
+      it = get_undefined_var_symbol_map().find(symbol_name);
+      if (it == get_undefined_var_symbol_map().end())
+	return elf_symbol_sptr();
+    }
 
   return find_symbol_by_version(version, it->second);
 }
@@ -1335,16 +1393,52 @@ corpus::get_functions() const
 /// either the result of invoking function::get_id() of
 /// elf_symbol::get_id_string().
 ///
-/// @return the vector functions which ID is @p id, or nil if no
+/// @return the set of functions which ID is @p id, or nil if no
 /// function with that ID was found.
 const std::unordered_set<function_decl*>*
-corpus::lookup_functions(const string& id) const
+corpus::lookup_functions(const interned_string& id) const
+{return priv_->lookup_functions(id);}
+
+const std::unordered_set<function_decl*>*
+corpus::lookup_functions(const char* id) const
+{
+  if (!id)
+    return nullptr;
+
+  interned_string string_id = priv_->env.intern(id);
+  return lookup_functions(string_id);
+}
+
+/// Lookup the exported variables which all have a given variable ID.
+///
+/// @param id the ID of the variable to look up.
+///
+/// @return a pointer to the set of variables with ID @p id, or
+/// nullptr if no variable was found with that ID.
+const std::unordered_set<var_decl_sptr>*
+corpus::lookup_variables(const interned_string& id) const
 {
   exported_decls_builder_sptr b = get_exported_decls_builder();
-  auto i = b->priv_->id_fns_map_.find(id);
-  if (i == b->priv_->id_fns_map_.end())
-    return 0;
+  auto i = b->priv_->id_vars_map_.find(id);
+  if (i == b->priv_->id_vars_map_.end())
+    return nullptr;
   return &i->second;
+}
+
+/// Lookup the exported variables which all have a given variable ID.
+///
+/// @param id the ID of the variable to look up.
+///
+/// @return a pointer to the set of variables with ID @p id, or
+/// nullptr if no variable was found with that ID.
+const std::unordered_set<var_decl_sptr>*
+corpus::lookup_variables(const char* id) const
+{
+  if (!id)
+    return nullptr;
+
+  interned_string string_id = priv_->env.intern(id);
+  return lookup_variables(string_id);
 }
 
 /// Sort the set of functions exported by this corpus.
@@ -1356,6 +1450,14 @@ corpus::sort_functions()
 {
   func_comp fc;
   std::sort(priv_->fns.begin(), priv_->fns.end(), fc);
+
+  priv_->sorted_undefined_fns.clear();
+
+  for (auto& f : priv_->undefined_fns)
+    priv_->sorted_undefined_fns.push_back(f);
+
+  std::sort(priv_->sorted_undefined_fns.begin(),
+	    priv_->sorted_undefined_fns.end(), fc);
 }
 
 /// Return the public decl table of the global variables of the
@@ -1386,6 +1488,79 @@ corpus::sort_variables()
 {
   var_comp vc;
   std::sort(priv_->vars.begin(), priv_->vars.end(), vc);
+
+  priv_->sorted_undefined_vars.clear();
+  for (auto& f : priv_->undefined_vars)
+    priv_->sorted_undefined_vars.push_back(f);
+
+  std::sort(priv_->sorted_undefined_vars.begin(),
+	    priv_->sorted_undefined_vars.end(), vc);
+}
+
+/// Getter of the undefined functions of the corpus.
+///
+/// Undefined functions are functions which symbols are not defined.
+///
+/// @return a set of @ref function_decl* representing the functions
+/// that are undefined in the corpus.
+const corpus::functions_set&
+corpus::get_undefined_functions() const
+{return priv_->undefined_fns;}
+
+/// Getter of the undefined functions of the corpus.
+///
+/// @return a set of @ref function_decl* representing the functions
+/// that are undefined in the corpus.
+corpus::functions_set&
+corpus::get_undefined_functions()
+{return priv_->undefined_fns;}
+
+/// Getter of the sorted vector of undefined functions of the corpus.
+///
+/// @return a vector of @ref function_decl* representing the functions
+/// that are undefined in the corpus.
+const corpus::functions&
+corpus::get_sorted_undefined_functions() const
+{
+  if (priv_->sorted_undefined_fns.empty()
+      && !priv_->undefined_fns.empty())
+    // We have undefined functions but we haven't sorted them yet.
+    // Let's do the sorting now then.
+    const_cast<corpus*>(this)->sort_functions();
+
+  return priv_->sorted_undefined_fns;
+}
+
+/// Getter of the undefined variables of the corpus.
+///
+/// @return a set of @ref var_decl* representing the variables that
+/// are undefined in the corpus.
+const corpus::variables_set&
+corpus::get_undefined_variables() const
+{return priv_->undefined_vars;}
+
+/// Getter of the undefined variables of the corpus.
+///
+/// @return a set of @ref var_decl* representing the variables that
+/// are undefined in the corpus.
+corpus::variables_set&
+corpus::get_undefined_variables()
+{return priv_->undefined_vars;}
+
+/// Getter of the sorted vector of undefined variables of the corpus.
+///
+/// @return a sorted vector of @ref var_decl* representing the
+/// variables that are undefined in the corpus.
+const corpus::variables&
+corpus::get_sorted_undefined_variables() const
+{
+  if (priv_->sorted_undefined_vars.empty()
+      && !priv_->undefined_vars.empty())
+    // We have undefined variables but we haven't sorted them yet.
+    // Let's do the sorting now then.
+    const_cast<corpus*>(this)->sort_variables();
+
+  return priv_->sorted_undefined_vars;
 }
 
 /// Getter of the set of function symbols that are not referenced by
@@ -1538,11 +1713,9 @@ corpus::maybe_drop_some_exported_decls()
 {
   string sym_name, sym_version;
 
-  vector<function_decl*> fns_to_keep;
+  functions fns_to_keep;
   exported_decls_builder* b = get_exported_decls_builder().get();
-  for (vector<function_decl*>::iterator f = priv_->fns.begin();
-       f != priv_->fns.end();
-       ++f)
+  for (auto f = priv_->fns.begin(); f != priv_->fns.end(); ++f)
     {
       if (b->priv_->keep_wrt_id_of_fns_to_keep(*f)
 	  && b->priv_->keep_wrt_regex_of_fns_to_suppress(*f)
@@ -1551,10 +1724,8 @@ corpus::maybe_drop_some_exported_decls()
     }
   priv_->fns = fns_to_keep;
 
-  vector<var_decl*> vars_to_keep;
-  for (vector<var_decl*>::iterator v = priv_->vars.begin();
-       v != priv_->vars.end();
-       ++v)
+  variables vars_to_keep;
+  for (auto v = priv_->vars.begin(); v != priv_->vars.end(); ++v)
     {
       if (b->priv_->keep_wrt_id_of_vars_to_keep(*v)
 	  && b->priv_->keep_wrt_regex_of_vars_to_suppress(*v)
@@ -1658,9 +1829,9 @@ struct corpus_group::priv
   std::set<string>		corpora_paths;
   corpora_type			corpora;
   istring_function_decl_ptr_map_type fns_map;
-  vector<function_decl*>	fns;
+  corpus::functions		fns;
   istring_var_decl_ptr_map_type vars_map;
-  vector<var_decl*>		vars;
+  corpus::variables		vars;
   string_elf_symbols_map_type	var_symbol_map;
   string_elf_symbols_map_type	fun_symbol_map;
   elf_symbols			sorted_var_symbols;
@@ -2095,6 +2266,16 @@ corpus_group::get_public_types_pretty_representations()
 bool
 corpus_group::recording_types_reachable_from_public_interface_supported()
 {return !get_public_types_pretty_representations()->empty();}
+
+/// Test if a @ref corpus is a @ref corpus_group.
+///
+/// @param corpus the corpus to consider.
+///
+/// @return the @ref corpus_group is @p corpus is a corpus group, or
+/// nil.
+corpus_group_sptr
+is_corpus_group(const corpus_sptr& corpus)
+{return std::dynamic_pointer_cast<corpus_group>(corpus);}
 
 // </corpus_group stuff>
 
