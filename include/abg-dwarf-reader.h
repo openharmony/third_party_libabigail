@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -31,7 +31,7 @@ using namespace abigail::ir;
 
 elf_based_reader_sptr
 create_reader(const std::string&	elf_path,
-	      const vector<char**>& debug_info_root_paths,
+	      const vector<string>& debug_info_root_paths,
 	      environment&	environment,
 	      bool		read_all_types = false,
 	      bool		linux_kernel_mode = false);
@@ -39,13 +39,13 @@ create_reader(const std::string&	elf_path,
 void
 reset_reader(elf_based_reader&		rdr,
 	     const std::string&		elf_path,
-	     const vector<char**>&	debug_info_root_paths,
+	     const vector<string>&	debug_info_root_paths,
 	     bool			read_all_types = false,
 	     bool			linux_kernel_mode = false);
 
 corpus_sptr
 read_corpus_from_elf(const std::string&	elf_path,
-		     const vector<char**>&	debug_info_root_paths,
+		     const vector<string>&	debug_info_root_paths,
 		     environment&		environment,
 		     bool			load_all_types,
 		     fe_iface::status&		status);

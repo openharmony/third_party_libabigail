@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 ///@file
 
@@ -40,11 +40,11 @@ const char* get_anonymous_subrange_internal_name_prefix();
 bool file_exists(const string&);
 bool is_regular_file(const string&);
 bool file_has_dwarf_debug_info(const string& elf_file_path,
-			       const vector<char**>& debug_info_root_paths);
+			       const vector<string>& debug_info_root_paths);
 bool file_has_ctf_debug_info(const string& elf_file_path,
-			     const vector<char**>& debug_info_root_paths);
+			     const vector<string>& debug_info_root_paths);
 bool file_has_btf_debug_info(const string& elf_file_path,
-			     const vector<char**>& debug_info_root_paths);
+			     const vector<string>& debug_info_root_paths);
 bool is_dir(const string&);
 bool dir_exists(const string&);
 bool dir_is_empty(const string &);
@@ -78,6 +78,8 @@ void get_comma_separated_args_of_option(const string& input_str,
 bool get_dsos_provided_by_rpm(const string& rpm_path,
 			      set<string>& provided_dsos);
 string trim_white_space(const string&);
+bool remove_white_spaces(string&);
+bool normalize_litterals(string&);
 string trim_leading_string(const string& from, const string& to_trim);
 void convert_char_stars_to_char_star_stars(const vector<char*>&,
 					   vector<char**>&);
@@ -98,6 +100,9 @@ gen_suppr_spec_from_kernel_abi_whitelists
    (const vector<string>& abi_whitelist_paths);
 
 bool
+get_file_path_dirs_under_dir(const string& root_dir, vector<string>& dirs);
+
+bool
 get_vmlinux_path_from_kernel_dist(const string&	from,
 				  string&		vmlinux_path);
 
@@ -111,6 +116,9 @@ bool
 get_binary_paths_from_kernel_dist(const string&	dist_root,
 				  string&		vmlinux_path,
 				  vector<string>&	module_paths);
+
+bool
+get_file_path_dirs_under_dir(const string& root, vector<string>& dirs);
 
 string
 get_default_system_suppression_file_path();
@@ -233,7 +241,22 @@ enum file_type
   FILE_TYPE_DIR,
   /// A tar archive.  The archive can be compressed with the popular
   /// compression schemes recognized by GNU tar.
-  FILE_TYPE_TAR
+  FILE_TYPE_TAR,
+
+  // All non-tared compression scheme go under here.  When one of
+  // these is returned, the goal is to look into the uncompressed
+  // stream to get what format has been compressed, then return an
+  // enumerator for that compressed format instead.
+  //
+  // Please note that each time a new enumerator is added here, one
+  // needs to add a corresponding enumerator to the @ref
+  // compression_kind enum in abg-tools-utils.cc and update the
+  // is_compressed_file_type and get_compressed_streambuf functions
+  // accordingly.
+
+  /// The XZ (lzma) compresson scheme.
+
+  FILE_TYPE_XZ
 };
 
 /// Exit status for abidiff and abicompat tools.
@@ -322,7 +345,8 @@ operator<<(ostream& output, file_type r);
 
 file_type guess_file_type(istream& in);
 
-file_type guess_file_type(const string& file_path);
+file_type guess_file_type(const string& file_path,
+			  bool look_through_compression = true);
 
 bool
 get_rpm_name(const string& str, string& name);
@@ -348,6 +372,9 @@ file_is_kernel_debuginfo_package(const string& file_path,
 std::shared_ptr<char>
 make_path_absolute(const char*p);
 
+string
+make_path_absolute(const string& p);
+
 char*
 make_path_absolute_to_be_freed(const char*p);
 
@@ -364,11 +391,56 @@ build_corpus_group_from_kernel_dist_under(const string&	root,
 
 elf_based_reader_sptr
 create_best_elf_based_reader(const string& elf_file_path,
-			     const vector<char**>& debug_info_root_paths,
+			     const vector<string>& debug_info_root_paths,
 			     environment& env,
 			     corpus::origin requested_debug_info_kind,
 			     bool show_all_types,
 			     bool linux_kernel_mode = false);
+
+/// This is a custom std::streambuf that knows how to decompress an
+/// input stream that was compressed using xz.
+///
+/// The code was inspired by the example in the source code of the xz
+/// project at
+/// https://github.com/tukaani-project/xz/blob/master/doc/examples/02_decompress.c.
+///
+/// here is an example of how a user code would use this custom
+/// streambuf to decode an xz'ed file and emit its content to stdout.
+///
+///        ifstream input_file("/path/to/a/compressed/file.xz", ifstream::binary);
+///        xz_decompressor_type xzed_streambuf(input_file);
+///        istream input_stream(&xzed_streambuf);
+///
+///        const size_t BUFFER_SIZE = 1024 * 4;
+///        vector<char> decompressed_data(BUFFER_SIZE);
+///        input_stream.read(decompressed_data.data(), BUFFER_SIZE);
+///        size_t nb_bytes_read = input_stream.gcount();
+///        while (nb_bytes_read && !input_stream.bad())
+///          {
+///            for (auto c : decompressed_data)
+///              std::out << c;
+///            input_stream.read(decompressed_data.data(), BUFFER_SIZE);
+///            nb_bytes_read = input_stream.gcount();
+///          }
+///        input_file.close();
+///
+/// Voila.
+class xz_decompressor_type : public std::streambuf
+{
+  struct priv;
+
+  std::unique_ptr<priv> priv_;
+
+  public:
+  xz_decompressor_type(std::istream& xz_istream);
+
+  ~xz_decompressor_type();
+
+  protected:
+
+  int_type
+  underflow() override;
+}; // end class xz_decompressor_type.
 
 }// end namespace tools_utils
 

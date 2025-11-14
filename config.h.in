@@ -28,8 +28,26 @@
 /* Define to 1 if dwarf.h has the DW_FORM_strx4 enumerator */
 #undef HAVE_DW_FORM_strx4
 
+/* Define to 1 if dwarf.h has the DW_LANG_Ada2005 enumerator */
+#undef HAVE_DW_LANG_Ada2005_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Ada2012 enumerator */
+#undef HAVE_DW_LANG_Ada2012_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Assembly enumerator */
+#undef HAVE_DW_LANG_Assembly_enumerator
+
 /* Define to 1 if dwarf.h has the DW_LANG_C11 enumerator */
 #undef HAVE_DW_LANG_C11_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_C17 enumerator */
+#undef HAVE_DW_LANG_C17_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_C23 enumerator */
+#undef HAVE_DW_LANG_C23_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_CPP_for_OpenCL enumerator */
+#undef HAVE_DW_LANG_CPP_for_OpenCL_enumerator
 
 /* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_03 enumerator */
 #undef HAVE_DW_LANG_C_plus_plus_03_enumerator
@@ -40,26 +58,98 @@
 /* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_14 enumerator */
 #undef HAVE_DW_LANG_C_plus_plus_14_enumerator
 
+/* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_17 enumerator */
+#undef HAVE_DW_LANG_C_plus_plus_17_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_20 enumerator */
+#undef HAVE_DW_LANG_C_plus_plus_20_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_23 enumerator */
+#undef HAVE_DW_LANG_C_plus_plus_23_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_C_sharp enumerator */
+#undef HAVE_DW_LANG_C_sharp_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Crystal enumerator */
+#undef HAVE_DW_LANG_Crystal_enumerator
+
 /* Define to 1 if dwarf.h has the DW_LANG_D enumerator */
 #undef HAVE_DW_LANG_D_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Fortran18 enumerator */
+#undef HAVE_DW_LANG_Fortran18_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Fortran23 enumerator */
+#undef HAVE_DW_LANG_Fortran23_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_GLSL_ES enumerator */
+#undef HAVE_DW_LANG_GLSL_ES_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_GLSL enumerator */
+#undef HAVE_DW_LANG_GLSL_enumerator
 
 /* Define to 1 if dwarf.h has the DW_LANG_Go enumerator */
 #undef HAVE_DW_LANG_Go_enumerator
 
+/* Define to 1 if dwarf.h has the DW_LANG_HIP enumerator */
+#undef HAVE_DW_LANG_HIP_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_HLSL enumerator */
+#undef HAVE_DW_LANG_HLSL_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Hylo enumerator */
+#undef HAVE_DW_LANG_Hylo_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Kotlin enumerator */
+#undef HAVE_DW_LANG_Kotlin_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Metal enumerator */
+#undef HAVE_DW_LANG_Metal_enumerator
+
 /* Define to 1 if dwarf.h has the DW_LANG_Mips_Assembler enumerator */
 #undef HAVE_DW_LANG_Mips_Assembler_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Mojo enumerator */
+#undef HAVE_DW_LANG_Mojo_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Move enumerator */
+#undef HAVE_DW_LANG_Move_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_OCaml enumerator */
+#undef HAVE_DW_LANG_OCaml_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_Odin enumerator */
+#undef HAVE_DW_LANG_Odin_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_OpenCL_CPP enumerator */
+#undef HAVE_DW_LANG_OpenCL_CPP_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_P4 enumerator */
+#undef HAVE_DW_LANG_P4_enumerator
 
 /* Define to 1 if dwarf.h has the DW_LANG_Python enumerator */
 #undef HAVE_DW_LANG_Python_enumerator
 
+/* Define to 1 if dwarf.h has the DW_LANG_Ruby enumerator */
+#undef HAVE_DW_LANG_Ruby_enumerator
+
 /* Define to 1 if dwarf.h has the DW_LANG_Rust enumerator */
 #undef HAVE_DW_LANG_Rust_enumerator
+
+/* Define to 1 if dwarf.h has the DW_LANG_SYCL enumerator */
+#undef HAVE_DW_LANG_SYCL_enumerator
 
 /* Define to 1 if dwarf.h has the DW_LANG_UPC enumerator */
 #undef HAVE_DW_LANG_UPC_enumerator
 
+/* Define to 1 if dwarf.h has the DW_LANG_Zig enumerator */
+#undef HAVE_DW_LANG_Zig_enumerator
+
 /* Defined to 1 if elf.h has EM_AARCH64 macro defined */
 #undef HAVE_EM_AARCH64_MACRO
+
+/* Defined to 1 if elf.h has EM_RISCV macro defined */
+#undef HAVE_EM_RISCV_MACRO
 
 /* Defined to 1 if elf.h has EM_TILEGX macro defined */
 #undef HAVE_EM_TILEGX_MACRO
@@ -106,9 +196,6 @@
 /* Define to 1 if you have the <wchar.h> header file. */
 #undef HAVE_WCHAR_H
 
-/* Defined if libdw has the function dwarf_getalt */
-#undef LIBDW_HAS_DWARF_GETALT
-
 /* Define to the sub-directory where libtool stores uninstalled libraries. */
 #undef LT_OBJDIR
 
@@ -136,12 +223,12 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
-/* Define to 1 if all of the C90 standard headers exist (not just the ones
+/* Define to 1 if all of the C89 standard headers exist (not just the ones
    required in a freestanding environment). This macro is provided for
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
-/* Enable extensions on AIX 3, Interix.  */
+/* Enable extensions on AIX, Interix, z/OS.  */
 #ifndef _ALL_SOURCE
 # undef _ALL_SOURCE
 #endif
@@ -202,11 +289,15 @@
 #ifndef __STDC_WANT_IEC_60559_DFP_EXT__
 # undef __STDC_WANT_IEC_60559_DFP_EXT__
 #endif
+/* Enable extensions specified by C23 Annex F.  */
+#ifndef __STDC_WANT_IEC_60559_EXT__
+# undef __STDC_WANT_IEC_60559_EXT__
+#endif
 /* Enable extensions specified by ISO/IEC TS 18661-4:2015.  */
 #ifndef __STDC_WANT_IEC_60559_FUNCS_EXT__
 # undef __STDC_WANT_IEC_60559_FUNCS_EXT__
 #endif
-/* Enable extensions specified by ISO/IEC TS 18661-3:2015.  */
+/* Enable extensions specified by C23 Annex H and ISO/IEC TS 18661-3:2015.  */
 #ifndef __STDC_WANT_IEC_60559_TYPES_EXT__
 # undef __STDC_WANT_IEC_60559_TYPES_EXT__
 #endif
@@ -256,9 +347,6 @@
 /* compile the deb package support in abipkgdiff */
 #undef WITH_DEB
 
-/* compile support of debugging canonical type propagation */
-#undef WITH_DEBUG_CT_PROPAGATION
-
 /* compile support of debugging abidw --abidiff */
 #undef WITH_DEBUG_SELF_COMPARISON
 
@@ -284,5 +372,11 @@
 /* Number of bits in a file offset, on hosts where this is settable. */
 #undef _FILE_OFFSET_BITS
 
-/* Define for large files, on AIX-style hosts. */
+/* Define to 1 on platforms where this makes off_t a 64-bit type. */
 #undef _LARGE_FILES
+
+/* Number of bits in time_t, on hosts where this is settable. */
+#undef _TIME_BITS
+
+/* Define to 1 on platforms where this makes time_t a 64-bit type. */
+#undef __MINGW_USE_VC2005_COMPAT

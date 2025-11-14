@@ -29,8 +29,26 @@
 /* Define to 1 if dwarf.h has the DW_FORM_strx4 enumerator */
 #define HAVE_DW_FORM_strx4 1
 
+/* Define to 1 if dwarf.h has the DW_LANG_Ada2005 enumerator */
+#define HAVE_DW_LANG_Ada2005_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Ada2012 enumerator */
+#define HAVE_DW_LANG_Ada2012_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Assembly enumerator */
+#define HAVE_DW_LANG_Assembly_enumerator 1
+
 /* Define to 1 if dwarf.h has the DW_LANG_C11 enumerator */
 #define HAVE_DW_LANG_C11_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_C17 enumerator */
+#define HAVE_DW_LANG_C17_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_C23 enumerator */
+#define HAVE_DW_LANG_C23_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_CPP_for_OpenCL enumerator */
+#define HAVE_DW_LANG_CPP_for_OpenCL_enumerator 1
 
 /* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_03 enumerator */
 #define HAVE_DW_LANG_C_plus_plus_03_enumerator 1
@@ -41,26 +59,98 @@
 /* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_14 enumerator */
 #define HAVE_DW_LANG_C_plus_plus_14_enumerator 1
 
+/* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_17 enumerator */
+#define HAVE_DW_LANG_C_plus_plus_17_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_20 enumerator */
+#define HAVE_DW_LANG_C_plus_plus_20_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_C_plus_plus_23 enumerator */
+#define HAVE_DW_LANG_C_plus_plus_23_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_C_sharp enumerator */
+#define HAVE_DW_LANG_C_sharp_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Crystal enumerator */
+#define HAVE_DW_LANG_Crystal_enumerator 1
+
 /* Define to 1 if dwarf.h has the DW_LANG_D enumerator */
 #define HAVE_DW_LANG_D_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Fortran18 enumerator */
+#define HAVE_DW_LANG_Fortran18_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Fortran23 enumerator */
+#define HAVE_DW_LANG_Fortran23_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_GLSL_ES enumerator */
+#define HAVE_DW_LANG_GLSL_ES_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_GLSL enumerator */
+#define HAVE_DW_LANG_GLSL_enumerator 1
 
 /* Define to 1 if dwarf.h has the DW_LANG_Go enumerator */
 #define HAVE_DW_LANG_Go_enumerator 1
 
+/* Define to 1 if dwarf.h has the DW_LANG_HIP enumerator */
+#define HAVE_DW_LANG_HIP_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_HLSL enumerator */
+#define HAVE_DW_LANG_HLSL_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Hylo enumerator */
+#define HAVE_DW_LANG_Hylo_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Kotlin enumerator */
+#define HAVE_DW_LANG_Kotlin_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Metal enumerator */
+#define HAVE_DW_LANG_Metal_enumerator 1
+
 /* Define to 1 if dwarf.h has the DW_LANG_Mips_Assembler enumerator */
 #define HAVE_DW_LANG_Mips_Assembler_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Mojo enumerator */
+#define HAVE_DW_LANG_Mojo_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Move enumerator */
+#define HAVE_DW_LANG_Move_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_OCaml enumerator */
+#define HAVE_DW_LANG_OCaml_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_Odin enumerator */
+#define HAVE_DW_LANG_Odin_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_OpenCL_CPP enumerator */
+#define HAVE_DW_LANG_OpenCL_CPP_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_P4 enumerator */
+#define HAVE_DW_LANG_P4_enumerator 1
 
 /* Define to 1 if dwarf.h has the DW_LANG_Python enumerator */
 #define HAVE_DW_LANG_Python_enumerator 1
 
+/* Define to 1 if dwarf.h has the DW_LANG_Ruby enumerator */
+#define HAVE_DW_LANG_Ruby_enumerator 1
+
 /* Define to 1 if dwarf.h has the DW_LANG_Rust enumerator */
 #define HAVE_DW_LANG_Rust_enumerator 1
+
+/* Define to 1 if dwarf.h has the DW_LANG_SYCL enumerator */
+#define HAVE_DW_LANG_SYCL_enumerator 1
 
 /* Define to 1 if dwarf.h has the DW_LANG_UPC enumerator */
 #define HAVE_DW_LANG_UPC_enumerator 1
 
+/* Define to 1 if dwarf.h has the DW_LANG_Zig enumerator */
+#define HAVE_DW_LANG_Zig_enumerator 1
+
 /* Defined to 1 if elf.h has EM_AARCH64 macro defined */
 #define HAVE_EM_AARCH64_MACRO 1
+
+/* Defined to 1 if elf.h has EM_RISCV macro defined */
+#define HAVE_EM_RISCV_MACRO 1
 
 /* Defined to 1 if elf.h has EM_TILEGX macro defined */
 #define HAVE_EM_TILEGX_MACRO 1
@@ -107,9 +197,6 @@
 /* Define to 1 if you have the <wchar.h> header file. */
 #define HAVE_WCHAR_H 1
 
-/* Defined if libdw has the function dwarf_getalt */
-#define LIBDW_HAS_DWARF_GETALT 1
-
 /* Define to the sub-directory where libtool stores uninstalled libraries. */
 #define LT_OBJDIR ".libs/"
 
@@ -126,7 +213,7 @@
 #define PACKAGE_NAME "libabigail"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "libabigail 2.4"
+#define PACKAGE_STRING "libabigail 2.8"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "libabigail"
@@ -135,14 +222,14 @@
 #define PACKAGE_URL "http://sourceware.org/libabigail"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "2.4"
+#define PACKAGE_VERSION "2.8"
 
-/* Define to 1 if all of the C90 standard headers exist (not just the ones
+/* Define to 1 if all of the C89 standard headers exist (not just the ones
    required in a freestanding environment). This macro is provided for
    backward compatibility; new code need not use it. */
 #define STDC_HEADERS 1
 
-/* Enable extensions on AIX 3, Interix.  */
+/* Enable extensions on AIX, Interix, z/OS.  */
 #ifndef _ALL_SOURCE
 # define _ALL_SOURCE 1
 #endif
@@ -203,11 +290,15 @@
 #ifndef __STDC_WANT_IEC_60559_DFP_EXT__
 # define __STDC_WANT_IEC_60559_DFP_EXT__ 1
 #endif
+/* Enable extensions specified by C23 Annex F.  */
+#ifndef __STDC_WANT_IEC_60559_EXT__
+# define __STDC_WANT_IEC_60559_EXT__ 1
+#endif
 /* Enable extensions specified by ISO/IEC TS 18661-4:2015.  */
 #ifndef __STDC_WANT_IEC_60559_FUNCS_EXT__
 # define __STDC_WANT_IEC_60559_FUNCS_EXT__ 1
 #endif
-/* Enable extensions specified by ISO/IEC TS 18661-3:2015.  */
+/* Enable extensions specified by C23 Annex H and ISO/IEC TS 18661-3:2015.  */
 #ifndef __STDC_WANT_IEC_60559_TYPES_EXT__
 # define __STDC_WANT_IEC_60559_TYPES_EXT__ 1
 #endif
@@ -231,7 +322,7 @@
 
 
 /* Version number of package */
-#define VERSION "2.4"
+#define VERSION "2.8"
 
 /* The BTF_KIND_DECL_TAG enumerator is present */
 /* #undef WITH_BTF_KIND_DECL_TAG */
@@ -247,9 +338,6 @@
 
 /* compile the deb package support in abipkgdiff */
 #define WITH_DEB 1
-
-/* compile support of debugging canonical type propagation */
-/* #undef WITH_DEBUG_CT_PROPAGATION */
 
 /* compile support of debugging abidw --abidiff */
 /* #undef WITH_DEBUG_SELF_COMPARISON */
@@ -276,5 +364,11 @@
 /* Number of bits in a file offset, on hosts where this is settable. */
 /* #undef _FILE_OFFSET_BITS */
 
-/* Define for large files, on AIX-style hosts. */
+/* Define to 1 on platforms where this makes off_t a 64-bit type. */
 /* #undef _LARGE_FILES */
+
+/* Number of bits in time_t, on hosts where this is settable. */
+/* #undef _TIME_BITS */
+
+/* Define to 1 on platforms where this makes time_t a 64-bit type. */
+/* #undef __MINGW_USE_VC2005_COMPAT */

@@ -1,3 +1,315 @@
+2.8
+===
+Dodji Seketeli (30):
+      ChangeLog: Update for 2.7 release
+      NEWS: Update for 2.7 release
+      doc/website/mainpage.txt: Update to 2.7
+      configure: Bump libabigail version to 2.8
+      comparison: Emit local diff node category in tree dump
+      {default,leaf}-reporter: Add incompatible changes to leaf reporter
+      Bug 32902 - Recognize harmless type size increase
+      configure: Add --with-libxml2 option
+      tools-utils: Fix a comment
+      tools-utils: Fix XZ decompression after all compression data is read
+      libxml-utils,tools-utils: Add an I/O handler for XZ input in libxml2
+      Bug 32975 - Filter out replacing a data member with a compatible union
+      elf-reader: Fix elfutils initialization of debuginfo lookup paths
+      configure: Remove the unnecessary FOUND_DWARF_GETALT_IN_LIBDW variable
+      fedabipkgdiff: Fix getting the latest RPM version of a given Fedora distro
+      Change debuginfo root paths type from vector<char**> to vector<string>
+      Bug 30329 - Fix regression in support for absolute path to alt DWARF
+      Bug 33076 - abicompat doesn't filter out harmless diff nodes
+      test-abicompat: Fix color setting
+      Improve harmless integral type change filtering
+      Bug 33055 - classes_have_same_layout & types_are_compatible enter in endless loop
+      abg-comparison: Do not abort when a static data member is deleted
+      abg-comparison: Fix indentation
+      symtab-reader: Add missing space
+      abidw: Sort options documentation alphabetically
+      elf-reader,symtab-reader: Fix suppression of aliased symbols
+      Bug 33090 - Implement abidw --force-early-suppression
+      tests/data/test-read-dwarf/PR33090: Add missing test material
+      Bug 26021 - Upgrade the C++ standard to C++14
+      configure: Bump libabigail_so_current to 7
+
+Frank Ch. Eigler (2):
+      PR31533: abidb: drop debuginfod-client verbosity env variables
+      tests/runtestabidb2.sh.in: Take more care while doing cleanup
+
+Mark Wielaard (1):
+      tests/runtestfedabipkgdiffpy3.sh.in: Don't use which to find python3
+
+
+2.7
+===
+Dodji Seketeli (49):
+      Makefile.am: Update tag-and-all rule to do a full-check
+      big-tests: Update to commit bd0c1f8909a7b2f5018d54b82f7d6829c4849b59
+      configure.ac: Bump version number to 2.7
+      SECURITY: New security policy text
+      fedabipkgdiff.rst: Sort options documentation alphabetically
+      fedabipkgdiff: Add a new --private-dso option
+      abidiff.rst: Fix typo in the doc for --kmi-whitelist
+      configure: Support using custom builds of elfutils
+      Bug 32402 - dwarf-reader,ir: Recognize new DWARF 5 languages
+      Update copyright years for 2025
+      configure.ac: Add a missing preamble
+      abipkgdiff: Fix spacing in usage text output
+      abipkgdiff: Fix indentation
+      tools-utils: Fix indentation
+      tools-utils: Add missing comment
+      abipkgdiff: Add more verbose logging
+      abipkgdiff: Add new --verbose-diff option
+      abipkgdiff.rst: Sort options documentation items alphabetically
+      abipkgdiff: Recognize stablelist files in their package
+      configure: Fix xxhash detection code
+      configure: Add $ELF_CFLAGS and $DW_CFLAGS to DEPS_CPPFLAGS
+      Add support for reading XZ-compressed files
+      abipkgdiff: Rename whitelist into stablelist
+      configure: Disable abidb on python version < 3.9
+      Bug PR32476 - abipkgdiff: Support comparing sets of packages
+      big-tests: Update to latest commit 2afebc4
+      {ctf,dwarf}-reader.cc: Fix a virtual method name conflict in elf_base_reader
+      configure.ac: Add a new --enable-inlined-xxhash option
+      abipkgdiff: Don't use full Linux kernel pkg path in change reports
+      big-tests: Sync with libabigail hashe 229682
+      abipkgdiff: Avoid wrongly considering binaries being added/removed
+      reporter-priv: Fix a thinko in sub-range change report
+      comp-filter: Better detection of harmless/harmful enum changes
+      ir: Better handle int[5][2] changed into int[2][5]
+      comp-filter,ir: Simplify logic of has_harmless_name_change
+      ir: Recognize classes of same layout as being compatible
+      Bug 21296 - Normalize declaration names read from DWARF
+      Bug 31642 - Categorize incompatible changes on functions and variables
+      Bug 31642 - Don't forget filtered-out incompatible fns and var changes
+      Bug 28505 - Fix a case of pointer to void* change filtering
+      big-test: Update to e772c1e67aba14141dd16735ecdf19368b0cb29e
+      default.abignore: Improve default suppression for krb5 libraries
+      rhbz2355363 - abipkgdiff: Don't abort when alternate debug info is not found
+      manuals/conf.py: Update copyright years in the manuals
+      abidiff.rst: Sort option documentation bullets in lexicographic order
+      libabigail-concepts: Document the incompatible changes concept
+      abg-comp-filter: Fix declaration of has_harmful_name_change
+      abg-comp-filter: Fix some documentation thinko
+      manuals: Fix broken links
+      Bug 32794 - ir: avoid asserting in get_type_name
+      configure: Bump libabigail_so_current to 6
+      ChangeLog: Update for 2.7 release
+      NEWS: Update for 2.7 release
+
+Sam James (1):
+      configure.ac: fix typos for XXHASH_LIBS, LZMA_LIBS
+
+2.6
+===
+Claudiu Zissulescu (3):
+      ctf-reader: Optimize calling sorting function for functions and variables.
+      ctf-reader: Add time logging to CTF reader
+      abg-tools-utils: Fix memory corruption when using CTF option
+
+Dodji Seketeli (113):
+      doc/website/mainpage.txt: Update for 2.5 release
+      doc/api/libabigail.doxy: Update to newer version.
+      {ctf,btf}-reader: Document the namespace for nicer apidoc
+      configure.ac: Update version to 2.6
+      Update Copyright for year 2024
+      fedabipkgdiff: Cleanup output of ABI comparison
+      ir,writer: Fix function type naming & fn type annotation in ABIXML
+      ir: Make IR node visitor aware of non-canonicalized types
+      writer: Fix control of emitting parm names in function types
+      dwarf-reader,ir: Improve detection of method types & implicit parms
+      dwarf-reader,ir: Merge member fns of classes
+      test-read-common: Fix error message
+      Suppress patch file that was wrongly added to the repository
+      elf-reader: Avoid crashing when looking at non-existing variable symbol
+      dwarf-reader,ir: Unify type sorting & sort types before c14n
+      btf-reader: Ignore BTF nodes that ought to be ignored
+      configure: Fix detection of BTF header to enable the BTF front-end
+      {btf,dwarf,ctf,abixml}-reader: Fix size of subrange type
+      Bug 31793 - tools-utils: Avoid endless loop in is_regular_file for directories
+      tools-utils.cc: Support collecting kernel binary paths build from sources
+      abidw: make the --lt option support --btf
+      btf-reader: Fix re-use of the BTF reader for several binaries in a row
+      ctf-reader: Fix re-initialization of the CTF reader
+      ir: Cache the pretty representation used during pre-canonicalization type sorting
+      dwarf-reader: Fix reader::initialize to clear per corpus data
+      btf-reader: Add missing data members reset to reader::initialize
+      ir: Fix a potential crash in canonicalize_types
+      elf-based-reader: Clean up logic of elf_based_reader::read_and_add_corpus_to_group
+      tools-utils,btf-reader: Take modules into account for corpus group
+      corpus: Support adding translation units with empty path
+      ctf-reader: Do not set data member offsets for unions
+      ctf-reader: During re-initialization, only clear canonicalize-able types
+      ctf-reader: Fix analyzing single kernel binaries
+      reader: Fix corpus group reading
+      reader: Simplify type canonicalization invocation
+      reader: Simplify logic of get_or_read_and_add_translation_unit
+      reader: Fix building of void and void pointer types
+      reader: Fix building of variadic parameter type
+      ir: Don't strip typedefs from parms and return type when comparing fns
+      ir: Rename integral_type into real_type
+      ir,comparison,default-reporter: Consider sub-ranges in array diffs
+      abidw: Support the --abidiff option for Linux Kernel trees
+      configure: Support the optional 'big-tests' sub-directory
+      configure.ac: Fix typo triggered when --enable-big-tests is used
+      Use smart pointers for variables exported from the ABI corpus
+      ir: Fix getting the translation unit for an ABI artifact
+      ir: add_decl_to_scope shouldn't abort on nullptr scopes
+      ir: Make odr_is_relevant support support artifacts with no TU set yet
+      ir: Support canonical type adjustments for decl-only class types
+      ir: Support comparing a class_decl against a class_or_union
+      ir: Speed up enum comparison
+      ir: Fix comment for translation_unit::get_global_scope
+      reader: Avoid crashing on empty scopes in reader::push_decl_to_scope
+      reader: Fix building of reference type
+      abidw: Make generic options like --verbose work with the ABIXML front-end
+      ir: Improve legibility of set_member_function_is_virtual
+      ir: Don't cache internal name of non-canonicalized function types
+      reader: Avoid empty return type node for a function type IR
+      ir: Handle ptr to fn type member with empty void return type
+      ctf-reader: Enumerate dicts in the archive rather than using their name
+      dwarf-reader: Better support concrete instance functions DIEs
+      btf-reader: Add logging methods
+      dwarf-reader: Fix support of suppression specifications
+      ctf-reader: Make logging more obvious
+      dwarf-reader: Do not fix ELF symbols for virtual destructors
+      abipkgdiff: Make --verbose enable the library's logging
+      Implement type hashing
+      ir: Remove the now useless type propagation optimization
+      ir: decl-only classes don't equal fully defined classes under ODR
+      comp-filter: Consider lvalue-ness changes on references as harmful
+      comp-filter: Ignore ptr size when detecting void ptr to ptr change
+      Don't strip typedefs in fn names when pretty-printing and comparing
+      reader: Avoid duplicating member types
+      ir: Cache the result of scope_decl::get_sorted_member_types
+      dwarf-reader: Avoid duplicating anonymous member types
+      reader: Avoid duplicating recursive types
+      dwarf-reader: Speed-up decl-only resolution
+      ir: Fix name setting of a ptr-to-mbr-type
+      dwarf-reader: Support LLVM's lingo of declaration-ness
+      reader: Improve logging in the ABIXML reader
+      ir: Improve type logging during type canonicalization
+      tools-utils: Improve logging while reading a Linux kernel
+      dwarf-reader: Fix building of void, void* and variadic parm types
+      {dwarf,btf,ctf}-reader: Set the origin of the corpus group
+      {btf,ctf,dwarf}-reader, ir: Fix self-comparison debugging for corpus groups
+      abilint: Support --verbose option
+      big-tests: Update git sub-module
+      dwarf-reader,tools-utils: Add statistics about built/suppressed functions
+      abidw: Add a --kmi-stablelist option alongside existing --kmi-whitelist
+      dwarf-reader,ir: Fix endless loop while analyzing DWARF from Modula-2
+      abipkgdiff: Extract devel and main packages in the same directory
+      dwarf-reader,reader.cc: Fix function virtuality setting
+      dwarf-reader,ir,writer: Better support for static member variables
+      comparison: Sort anonymous types using their flat representation
+      hash,reader,writer: (De)Serialize hash values using the xxhash canonical form
+      ir: Strip typedefs from pointed-to-types during comparison
+      ir: Improve the checks done by 'abidw --debug-tc'
+      ABIXML reader: Unconditionally map a pointer XML node to its decl
+      corpus: Allow several variables with same ID to be exported
+      ir: Use definition of decl-only parm type in function type names
+      big-tests: Update to commit bd0c1f8909a7b2f5018d54b82f7d6829c4849b59
+      ir: Always use canonical types in comparison when possible
+      ir: Don't strip typedefs when comparing pointers & references
+      big-tests: Update to latest version of libabigail-tests.git
+      reader: Drop the hash values coming from older ABIXML files
+      hash: Implement full recursive hashing of artifacts
+      writer: Do not crash on ABI corpora that have no associated path
+      hash: Use the faster XXH3 hashing algorithm from xxhash
+      writer: Fix emitting of some member types within their scope
+      ir: Use canonical types in comparison when --enable-debug-type-canonicalization
+      big-tests: Update to commit cc6747bb859f6a4d7a3e2198d65618aa5d718fc1
+      configure: Bump LIBABIGAIL_SO_CURRENT version to 5
+      ChangeLog: Update ChangeLog in preparation for 2.6 release
+
+Frank Ch. Eigler (1):
+      configure,abidb: Make the libarchive python module optional for abidb
+
+Mark Wielaard (1):
+      Use XXH_INLINE_ALL=1 to inline all xxhash functions
+
+Romain Geissler (1):
+      leaf-reporter: Fix build with gcc 4.9.
+
+Ross Burton (1):
+      configure.ac: improve fts checks
+
+Sam James (1):
+      tests/runtestabidb?.sh.in: Use bash shebang
+
+2.5
+===
+Dodji Seketeli (55):
+      configure: Bump development version to 2.5
+      Bug 31045 - Don't try setting translation unit for unique types
+      suppression: Add "has_strict_flexible_array_data_member_conversion" property
+      abilint: Support --annotate
+      abilint: Alphabetically sort programs options
+      Improve type naming
+      Bug 30260 - Support pointer-to-member type
+      Bump abixml version to 2.3
+      Bump LIBABIGAIL_SO_CURRENT version to 4
+      Bug 31236 - Fix removing a member declaration from its scope
+      Bug 31279 - Acknowledge that opaque types are always decl-only
+      Remove python3-mock dependency and use unittest.mock instead
+      abidw: Fix indentation
+      ir: Fix wording of several comments
+      ir: Avoid duplicates when reading member functions
+      dwarf-reader: Avoid duplicating union members
+      dwarf-reader: Fix detection of C language DIEs
+      writer: Avoid emitting a canonical type twice
+      writer: Don't forget data members when emitting referenced types
+      ir: Introduce a missing IR kind for subrange types
+      ir: Cache internal name for several types
+      dwarf-reader,corpus: Use interned string to lookup corpus interfaces by ID.
+      dwarf-reader: Bug 31377 - Fix the IR for zero length arrays
+      PR25409-librte_bus_dpaa.so.20.0.abi: Update to 2.3
+      btr-reader: Fix wording typo
+      ir,{btf,ctf,dwarf}-reader: Rename {subrange_type,array_type_def}::is_infinite.
+      test-alt-dwarf-file.cc: Fix test result accounting
+      test-abicomat.cc: Don't show details about PASSing tests.
+      ir: Fix indentation
+      ir,corpus,comparison: Const-iffy the access to corpus interfaces
+      abicompat: Port this to the multi-front-end architecture
+      ir: Use linkage name to sort virtual function members
+      dwarf-reader, ir: Add member fns to exported corpus fns after c14n
+      dwarf-reader: Fix DIE origin handling & scope getting
+      tests/data/test-diff-pkg: Update dpkg related reference output
+      ir,dwarf-reader: Better handle inline-ness setting or detection
+      comparison: Better sort function difference report
+      ir,dwarf-reader: Peel const-qualifier from const this pointers
+      dwarf-reader: Support creating functions from DW_TAG_inlined_subroutine
+      abidw: Add a -o short option for --out-file
+      tools-utils.cc: Fix potential crash when testing for CTF debug info
+      Represent undefined corpus interfaces to analyze app compatibility
+      Factorize elf-reader::{variable,function}_symbol_is_exported into symtab
+      Add support for undefined symbols in the BTF reader
+      Emit & read undefined interfaces to & from ABIXML
+      abicompat: Fix exit code in weak mode
+      ir: Fix Emacs C++ mode header
+      comparison: Fix typo
+      suppression: Fix indentation
+      abidiff: Fix indentation of help string
+      Bug 31513 - abidiff considers data members moved to base class as harmful
+      comparison: Fix erroneous detection of deleted anonymous data members
+      Bug 31513 - Fix fallout of initial patch
+      Bug 29160 - support fn symbol aliasing a var symbol
+      Bug 31646: Fix type suppression tactics for webkit2gtk3
+      tests/runtestabidb?.sh.in: Fix git initialization
+      configure: Add option to disable abidb
+
+Frank Ch. Eigler (2):
+      abidb: Introduce a tool to manage the ABI of a Linux distribution
+      abidb: drop the TODO items from the python script
+
+Giuliano Procida (1):
+      website: doxygen: set PROJECT_NAME to libabigail
+
+Mark Wielaard (2):
+      Fix ABG_ASSERT in build_ir_node_from_die for DW_TAG_member
+      Recognize EM_RISCV in e_machine_to_string
+
+
 2.4
 ===
 Dmitry V. Levin (1):

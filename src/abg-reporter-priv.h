@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -205,6 +205,19 @@ report_mem_header(ostream& out,
 		  diff_kind k,
 		  const string& section_name,
 		  const string& indent);
+
+void
+emit_changed_fn_report(const diff_context_sptr& ctxt,
+		       const function_decl_diff_sptr& fn_diff,
+		       ostream& out, const string indent,
+		       bool indirect_changed_subtypes = false,
+		       bool emit_redundant_fn_changes = true);
+
+void
+emit_changed_var_report(const diff_context_sptr& ctxt,
+			const var_diff_sptr& var_diff,
+			ostream& out, const string indent,
+			bool emit_redundant_var_changes = true);
 
 bool
 maybe_report_diff_for_member(const decl_base_sptr&	decl1,

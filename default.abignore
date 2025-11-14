@@ -91,7 +91,26 @@
 
 [suppress_type]
   soname_regexp = libwebkit2?gtk-.*\\.so.*
-  name_regexp = (^std::.*|WebCore::.*|WebKit::.*)
+  name_regexp = ^std::.*
+  drop = true
+
+[suppress_type]
+# Transform all C++ types in the WebCore and WebKit namespaces into
+# opaque types.  These are essentially internal types of libwebkit2
+# anyway.  This greatly reduces the size of the in-memory working set.
+  label = libabigail::OPAQUE_TYPE_LABEL
+  soname_regexp = libwebkit2?gtk-.*\\.so.*
+  name_regexp = (^WebCore::.*|^WebKit::.*)
+  drop = true
+
+[suppress_type]
+# All structs that don't start with either WebKit* or _WebKit are
+# considered internal types and so are transform into opaque types.
+# This helps to reduce the size of the in-memory working set further.
+  label = libabigail::OPAQUE_TYPE_LABEL
+  soname_regexp = libwebkit2?gtk-.*\\.so.*
+  type_kind = struct
+  name_not_regexp = ^_?WebKit.*
   drop = true
 
 #######################################################
@@ -155,9 +174,14 @@
 #########################################
 [suppress_function]
   # Suppress ABI change reports about functions starting with the name
-  # krb5int_* in libraries named libkrb5<something>.so
-  soname_regexp = libkrb5.*\\.so.*
-  name_regexp = ^krb5int_.*
+  # krb5int_*, or k5_ in various libraries of the krb5-libs package
+  # because they are private functions.  Note that deleted functions
+  # are also suppressed.
+  soname_regexp = lib(krb5|k5crypto|gssrpc|kdb5|krb5support|gssapi_krb5).*\\.so.*
+  change_kind = all
+  name_regexp = (^krb5int|^k5)_.*
+  symbol_name_regexp = (^krb5int|^k5)_.*
+
 ##########################################
 # End of krb5 suppression specifications
 #########################################

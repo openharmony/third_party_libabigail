@@ -27,13 +27,19 @@ Invocation
 Options
 =======
 
-  * ``--help``
+  * ``--annotate``
 
-    Display a short help message and exits.
+    Annotate the ABIXML output with comments above most elements.  The
+    comments are made of the pretty-printed form of types, declaration
+    or even ELF symbols.  The purpose is to make the ABIXML output
+    more human-readable for debugging or documenting purposes.
 
-  * `--version | -v`
 
-    Display the version of the program and exit.
+  * ``--ctf``
+
+    Extract ABI information from CTF debug information, if present in
+    the given object.
+
 
   * ``--debug-info-dir`` <*path*>
 
@@ -50,16 +56,38 @@ Options
     information installed by your system's package manager because
     then ``abidiff`` knows where to find it.
 
+
   * ``--diff``
 
     For XML inputs, perform a text diff between the input and the
     memory model saved back to disk.  This can help to spot issues in
     the handling of the XML format by the underlying Libabigail library.
 
+
+  * ``--header-file | --hf`` <header-file-path>
+
+    Specifies where to find one of the public headers of the abi file
+    that the tool has to consider.  The tool will thus filter out
+    types that are not defined in public headers.
+
+
+  * ``--headers-dir | --hd`` <headers-directory-path-1>
+
+    Specifies where to find the public headers of the first shared
+    library that the tool has to consider.  The tool will thus filter
+    out types that are not defined in public headers.
+
+
+  * ``--help``
+
+    Display a short help message and exits.
+
+
   * ``--noout``
 
     Do not display anything on standard output.  The return code of
     the command is the only way to know if the command succeeded.
+
 
   * ``--suppressions | suppr`` <*path-to-suppression-specifications-file*>
 
@@ -70,30 +98,25 @@ Options
     taken into account.  ABI artifacts matched by the suppression
     specifications are suppressed from the output of this tool.
 
-  * ``--headers-dir | --hd`` <headers-directory-path-1>
-
-    Specifies where to find the public headers of the first shared
-    library that the tool has to consider.  The tool will thus filter
-    out types that are not defined in public headers.
-
-  * ``--header-file | --hf`` <header-file-path>
-
-    Specifies where to find one of the public headers of the abi file
-    that the tool has to consider.  The tool will thus filter out
-    types that are not defined in public headers.
 
   * ``--stdin | --``
 
     Read the input content from standard input.
 
+
   * ``--tu``
 
     Expect the input XML to represent a single translation unit.
 
-  * ``--ctf``
+  * `--verbose`
 
-    Extract ABI information from CTF debug information, if present in
-    the given object.
+    Shows verbose messages about internal stuff.  This is used to
+    debug the tool and its underlying library.
+
+  * `--version | -v`
+
+    Display the version of the program and exit.
+
 
 .. _ELF: http://en.wikipedia.org/wiki/Executable_and_Linkable_Format
 .. _DWARF: http://www.dwarfstd.org

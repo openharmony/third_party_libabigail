@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2016-2023 Red Hat, Inc.
+// Copyright (C) 2016-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -13,11 +13,13 @@
 #ifndef __ABG_IR_PRIV_H__
 #define __ABG_IR_PRIV_H__
 
-#include <string>
+#include <algorithm>
 #include <iostream>
+#include <string>
 
-#include "abg-ir.h"
+#include "abg-hash.h"
 #include "abg-corpus.h"
+#include "abg-tools-utils.h"
 
 namespace abigail
 {
@@ -26,6 +28,7 @@ namespace ir
 {
 
 using std::string;
+using std::unordered_set;
 using abg_compat::optional;
 
 /// The result of structural comparison of type ABI artifacts.
@@ -42,14 +45,14 @@ enum comparison_result
 /// This is a "utility type" used internally to canonicalize the name
 /// of fundamental integral types, so that "unsignd long" and "long
 /// unsined int" end-up having the same name.
-class integral_type
+class real_type
 {
 public:
   /// The possible base types of integral types.  We might have
   /// forgotten many of these, so do not hesitate to add new ones.
   ///
   /// If you do add new ones, please also consider updating functions
-  /// parse_base_integral_type and integral_type::to_string.
+  /// parse_base_real_type and real_type::to_string.
   enum base_type
   {
     /// The "int" base type.
@@ -67,7 +70,13 @@ public:
     /// The "char32_t" base type.
     CHAR32_T_BASE_TYPE,
     /// The "wchar_t" base type.
-    WCHAR_T_BASE_TYPE
+    WCHAR_T_BASE_TYPE,
+    SIZE_BASE_TYPE,
+    SSIZE_BASE_TYPE,
+    BIT_SIZE_BASE_TYPE,
+    SBIT_SIZE_BASE_TYPE,
+    /// The aray size type used by Clang.
+    ARRAY_SIZE_BASE_TYPE
   };
 
   /// The modifiers of the base types above.  Several modifiers can be
@@ -75,7 +84,7 @@ public:
   /// usually modelled by a bitmap of modifiers.
   ///
   /// If you add a new modifier, please consider updating functions
-  /// parse_integral_type_modifier and integral_type::to_string.
+  /// parse_real_type_modifier and real_type::to_string.
   enum modifiers_type
   {
     NO_MODIFIER = 0,
@@ -97,9 +106,9 @@ private:
 
 public:
 
-  integral_type();
-  integral_type(const string& name);
-  integral_type(base_type, modifiers_type);
+  real_type();
+  real_type(const string& name);
+  real_type(base_type, modifiers_type);
 
   base_type
   get_base_type() const;
@@ -111,32 +120,32 @@ public:
   set_modifiers(modifiers_type);
 
   bool
-  operator==(const integral_type&) const;
+  operator==(const real_type&) const;
 
   string
   to_string(bool internal=false) const;
 
   operator string() const;
-}; // end class integral_type
+}; // end class real_type
 
-integral_type::modifiers_type
-operator|(integral_type::modifiers_type l, integral_type::modifiers_type r);
+real_type::modifiers_type
+operator|(real_type::modifiers_type l, real_type::modifiers_type r);
 
-integral_type::modifiers_type
-operator&(integral_type::modifiers_type l, integral_type::modifiers_type r);
+real_type::modifiers_type
+operator&(real_type::modifiers_type l, real_type::modifiers_type r);
 
-integral_type::modifiers_type
-operator~(integral_type::modifiers_type l);
+real_type::modifiers_type
+operator~(real_type::modifiers_type l);
 
-integral_type::modifiers_type&
-operator|=(integral_type::modifiers_type& l, integral_type::modifiers_type r);
+real_type::modifiers_type&
+operator|=(real_type::modifiers_type& l, real_type::modifiers_type r);
 
-integral_type::modifiers_type&
-operator &=(integral_type::modifiers_type& l, integral_type::modifiers_type r);
+real_type::modifiers_type&
+operator &=(real_type::modifiers_type& l, real_type::modifiers_type r);
 
 bool
-parse_integral_type(const string& type_name,
-		    integral_type& type);
+parse_real_type(const string& type_name,
+		    real_type& type);
 
 /// Private type to hold private members of @ref translation_unit
 struct translation_unit::priv
@@ -172,13 +181,289 @@ struct translation_unit::priv
   {return types_;}
 }; // end translation_unit::priv
 
+// <type_or_decl_base stuff>
+
+/// The private data of @ref type_or_decl_base.
+struct type_or_decl_base::priv
+{
+  // This holds the kind of dynamic type of particular instance.
+  // Yes, this is part of the implementation of a "poor man" runtime
+  // type identification.  We are doing this because profiling shows
+  // that using dynamic_cast in some places is really to slow and is
+  // constituting a hotspot.  This poor man's implementation made
+  // things be much faster.
+  enum type_or_decl_kind	kind_;
+  // This holds the runtime type instance pointer of particular
+  // instance.  In other words, this is the "this pointer" of the
+  // dynamic type of a particular instance.
+  void*			rtti_;
+  // This holds a pointer to either the type_base sub-object (if the
+  // current instance is a type) or the decl_base sub-object (if the
+  // current instance is a decl).  This is used by the is_decl() and
+  // is_type() functions, which also show up during profiling as
+  // hotspots, due to their use of dynamic_cast.
+  void*			type_or_decl_ptr_;
+  mutable hashing::hashing_state hashing_state_;
+  bool				is_recursive_artefact_;
+  hash_t			hash_value_;
+  const environment&		env_;
+  translation_unit*		translation_unit_;
+  // The location of an artifact as seen from its input by the
+  // artifact reader.  This might be different from the source
+  // location advertised by the original emitter of the artifact
+  // emitter.
+  location			artificial_location_;
+  // Flags if the current ABI artifact is artificial (i.e, *NOT*
+  // generated from the initial source code, but rather either
+  // artificially by the compiler or by libabigail itself).
+  bool				is_artificial_;
+
+  /// Constructor of the type_or_decl_base::priv private type.
+  ///
+  /// @param e the environment in which the ABI artifact was created.
+  ///
+  /// @param k the identifier of the runtime type of the current
+  /// instance of ABI artifact.
+  priv(const environment& e,
+       enum type_or_decl_kind k = ABSTRACT_TYPE_OR_DECL)
+    : kind_(k),
+      rtti_(),
+      type_or_decl_ptr_(),
+      hashing_state_(hashing::HASHING_NOT_DONE_STATE),
+      is_recursive_artefact_(),
+      env_(e),
+      translation_unit_(),
+      is_artificial_()
+  {}
+
+  /// Getter of the kind of the IR node.
+  ///
+  /// @return the kind of the IR node.
+  enum type_or_decl_kind
+  kind() const
+  {return kind_;}
+
+  /// Setter of the kind of the IR node.
+  ///
+  /// @param k the new IR node kind.
+  void
+  kind (enum type_or_decl_kind k)
+  {kind_ |= k;}
+
+  /// Getter the hashing state of the current IR node.
+  ///
+  /// @return the hashing state of the current IR node.
+  hashing::hashing_state
+  get_hashing_state() const
+  {return hashing_state_;}
+
+  /// Getter of the property which flags the current artefact as being
+  /// recursive or not.
+  ///
+  /// @return true iff the current artefact it recursive.
+  bool
+  is_recursive_artefact() const
+  {return is_recursive_artefact_;}
+
+  /// Setter of the property which flags the current artefact as being
+  /// recursive or not.
+  ///
+  /// @param f the new value of the property.
+  void
+  is_recursive_artefact(bool f)
+  {is_recursive_artefact_ = f;}
+
+  /// Setter of the hashing state of the current IR node.
+  ///
+  /// @param s the hashing state of the current IR node.
+  void
+  set_hashing_state(hashing::hashing_state s) const
+  {hashing_state_ = s;}
+
+  /// Setter of the hashing value of the current IR node.
+  ///
+  /// An empty value is just ignored.  Also, if the IR node is NEITHER
+  /// in the hashing::HASHING_NOT_DONE_STATE nor in the
+  /// hashing::HASHING_CYCLED_TYPE_STATE, then the function does
+  /// nothing.
+  ///
+  /// @param h the new hash value.
+  void
+  set_hash_value(hash_t h)
+  {
+    hashing::hashing_state s = get_hashing_state();
+
+    ABG_ASSERT(s == hashing::HASHING_NOT_DONE_STATE
+	       || s == hashing::HASHING_CYCLED_TYPE_STATE
+	       || s == hashing::HASHING_FINISHED_STATE
+	       || s == hashing::HASHING_SUBTYPE_STATE);
+    if (h.has_value()
+	&& (s == hashing::HASHING_NOT_DONE_STATE
+	    || s == hashing::HASHING_CYCLED_TYPE_STATE))
+      {
+	hash_value_ = h;
+	set_hashing_state(hashing::HASHING_FINISHED_STATE);
+      }
+  }
+
+  /// Setter of the hashing value of the current IR node.
+  ///
+  /// Unlike set_hash_value above, this function always sets a new
+  /// hash value regardless of the hash value or of the hashing state
+  /// of the IR node.
+  ///
+  /// @param h the new hash value.
+  void
+  force_set_hash_value(hash_t h)
+  {
+    if (h.has_value())
+    {
+      hash_value_ = h;
+      set_hashing_state(hashing::HASHING_FINISHED_STATE);
+    }
+  }
+}; // end struct type_or_decl_base::priv
+
+/// Compute the hash value of an IR node and return it.
+/// 
+/// Note that if the IR node is a non-canonicalizeable type, no hash
+/// value is computed and an empty hash is returned.  Also, if the IR
+/// node already has a hash value, then this function just returns it.
+///
+/// This is a sub-routine of the internal hashing functions defined in
+/// abg-hash.cc
+///
+/// @param tod the IR node to compute the value for.
+///
+/// @return the computed hash value computed.
+template<typename T>
+hash_t
+do_hash_value(const T& tod)
+{
+  if (type_base* type = is_type(&tod))
+    if (is_non_canonicalized_type(type))
+      // Non canonicalized types are not hashed.  They must always be
+      // compared structurally.
+      return hash_t();
+
+  typename T::hash do_hash;
+  hash_t h = do_hash(tod);
+  return h;
+}
+
+/// Compute the hash value of an IR node and return it.
+/// 
+/// Note that if the IR node is a non-canonicalizeable type, no hash
+/// value is computed and an empty hash is returned.  Also, if the IR
+/// node already has a hash value, then this function just returns it.
+///
+/// This is a sub-routine of the internal hashing functions defined in
+/// abg-hash.cc
+///
+/// @param tod the IR node to compute the value for.
+///
+/// @return the computed hash value computed.
+template<typename T>
+hash_t
+do_hash_value(const T* tod)
+{
+  if (!tod)
+    return hash_t();
+  return hash_value(*tod);
+}
+
+/// Compute the hash value of an IR node and return it.
+/// 
+/// Note that if the IR node is a non-canonicalizeable type, no hash
+/// value is computed and an empty hash is returned.  Also, if the IR
+/// node already has a hash value, then this function just returns it.
+///
+/// This is a sub-routine of the internal hashing functions defined in
+/// abg-hash.cc
+///
+/// @param tod the IR node to compute the value for.
+///
+/// @return the computed hash value computed.
+template<typename T>
+hash_t
+do_hash_value(const shared_ptr<T>& tod)
+{
+  if (!tod)
+    return hash_t();
+  return do_hash_value(*tod);
+}
+
+
+/// Set the hash value of an IR node and return it.
+///
+/// If the IR node already has a hash value set, this function just
+/// returns it.  Otherwise, the function computes a new hash value and
+/// sets it to the IR node.
+///
+/// Note that if the IR node is a non-canonicalizeable type, no hash
+/// value is computed and an empty hash is returned.
+///
+/// This is a sub-routine of the type_or_decl_base::hash_value()
+/// virtual member functions.
+///
+/// @param type_or_decl the IR node to compute the value for.
+///
+/// @return the hash value computed and set to the IR node, or the
+/// hash value the IR node already had.
+template<typename T>
+hash_t
+set_or_get_cached_hash_value(const T& tod)
+{
+  hash_t h = do_hash_value(tod);
+  const_cast<T&>(tod).set_hash_value(h);
+  return h;
+}
+
+/// Set the hash value of an IR node and return it.
+///
+/// If the IR node already has a hash value set, this function just
+/// returns it.  Otherwise, the function computes a new hash value and
+/// sets it to the IR node.
+///
+/// Note that if the IR node is a non-canonicalizeable type, no hash
+/// value is computed and an empty hash is returned.
+///
+/// This is a sub-routine of the type_or_decl_base::hash_value()
+/// virtual member functions.
+///
+/// @param type_or_decl the IR node to compute the value for.
+///
+/// @return the hash value computed and set to the IR node, or the
+/// hash value the IR node already had.
+template<typename T>
+hash_t
+set_or_get_cached_hash_value(const T* artifact)
+{
+  if (!artifact)
+    return hash_t();
+  return set_or_get_cached_hash_value(*artifact);
+}
+
+// </type_or_decl_base stuff>
+
+
 // <type_base definitions>
+
+size_t
+get_canonical_type_index(const type_base& t);
+
+size_t
+get_canonical_type_index(const type_base* t);
+
+size_t
+get_canonical_type_index(const type_base_sptr& t);
 
 /// Definition of the private data of @ref type_base.
 struct type_base::priv
 {
   size_t		size_in_bits;
   size_t		alignment_in_bits;
+  size_t		canonical_type_index;
   type_base_wptr	canonical_type;
   // The data member below holds the canonical type that is managed by
   // the smart pointer referenced by the canonical_type data member
@@ -192,22 +477,12 @@ struct type_base::priv
   // representation strings here.
   interned_string	internal_cached_repr_;
   interned_string	cached_repr_;
-  // The next two data members are used while comparing types during
-  // canonicalization.  They are useful for the "canonical type
-  // propagation" (aka on-the-fly-canonicalization) optimization
-  // implementation.
-
-  // The set of canonical recursive types this type depends on.
-  unordered_set<uintptr_t> depends_on_recursive_type_;
-  bool canonical_type_propagated_;
-  bool propagated_canonical_type_confirmed_;
 
   priv()
     : size_in_bits(),
       alignment_in_bits(),
-      naked_canonical_type(),
-      canonical_type_propagated_(false),
-      propagated_canonical_type_confirmed_(false)
+      canonical_type_index(),
+      naked_canonical_type()
   {}
 
   priv(size_t s,
@@ -215,141 +490,14 @@ struct type_base::priv
        type_base_sptr c = type_base_sptr())
     : size_in_bits(s),
       alignment_in_bits(a),
+      canonical_type_index(),
       canonical_type(c),
-      naked_canonical_type(c.get()),
-      canonical_type_propagated_(false),
-      propagated_canonical_type_confirmed_(false)
+      naked_canonical_type(c.get())
   {}
-
-  /// Test if the current type depends on recursive type comparison.
-  ///
-  /// A recursive type T is a type T which has a sub-type that is T
-  /// (recursively) itself.
-  ///
-  /// So this function tests if the current type has a recursive
-  /// sub-type or is a recursive type itself.
-  ///
-  /// @return true if the current type depends on a recursive type.
-  bool
-  depends_on_recursive_type() const
-  {return !depends_on_recursive_type_.empty();}
-
-  /// Test if the current type depends on a given recursive type.
-  ///
-  /// A recursive type T is a type T which has a sub-type that is T
-  /// (recursively) itself.
-  ///
-  /// So this function tests if the current type depends on a given
-  /// recursive type.
-  ///
-  /// @param dependant the type we want to test if the current type
-  /// depends on.
-  ///
-  /// @return true if the current type depends on the recursive type
-  /// @dependant.
-  bool
-  depends_on_recursive_type(const type_base* dependant) const
-  {
-    return
-      (depends_on_recursive_type_.find(reinterpret_cast<uintptr_t>(dependant))
-       != depends_on_recursive_type_.end());
-  }
-
-  /// Set the flag that tells if the current type depends on a given
-  /// recursive type.
-  ///
-  /// A recursive type T is a type T which has asub-type that is T
-  /// (recursively) itself.
-  ///
-  /// So this function tests if the current type depends on a
-  /// recursive type.
-  ///
-  /// @param t the recursive type that current type depends on.
-  void
-  set_depends_on_recursive_type(const type_base * t)
-  {depends_on_recursive_type_.insert(reinterpret_cast<uintptr_t>(t));}
-
-  /// Unset the flag that tells if the current type depends on a given
-  /// recursive type.
-  ///
-  /// A recursive type T is a type T which has asub-type that is T
-  /// (recursively) itself.
-  ///
-  /// So this function flags the current type as not being dependant
-  /// on a given recursive type.
-  ///
-  ///
-  /// @param t the recursive type to consider.
-  void
-  set_does_not_depend_on_recursive_type(const type_base *t)
-  {depends_on_recursive_type_.erase(reinterpret_cast<uintptr_t>(t));}
-
-  /// Flag the current type as not being dependant on any recursive type.
-  void
-  set_does_not_depend_on_recursive_type()
-  {depends_on_recursive_type_.clear();}
-
-  /// Test if the type carries a canonical type that is the result of
-  /// maybe_propagate_canonical_type(), aka, "canonical type
-  /// propagation optimization".
-  ///
-  /// @return true iff the current type carries a canonical type that
-  /// is the result of canonical type propagation.
-  bool
-  canonical_type_propagated()
-  {return canonical_type_propagated_;}
-
-  /// Set the flag that says if the type carries a canonical type that
-  /// is the result of maybe_propagate_canonical_type(), aka,
-  /// "canonical type propagation optimization".
-  ///
-  /// @param f true iff the current type carries a canonical type that
-  /// is the result of canonical type propagation.
-  void
-  set_canonical_type_propagated(bool f)
-  {canonical_type_propagated_ = f;}
-
-  /// Getter of the property propagated-canonical-type-confirmed.
-  ///
-  /// If canonical_type_propagated() returns true, then this property
-  /// says if the propagated canonical type has been confirmed or not.
-  /// If it hasn't been confirmed, then it means it can still
-  /// cancelled.
-  ///
-  /// @return true iff the propagated canonical type has been
-  /// confirmed.
-  bool
-  propagated_canonical_type_confirmed() const
-  {return propagated_canonical_type_confirmed_;}
-
-  /// Setter of the property propagated-canonical-type-confirmed.
-  ///
-  /// If canonical_type_propagated() returns true, then this property
-  /// says if the propagated canonical type has been confirmed or not.
-  /// If it hasn't been confirmed, then it means it can still
-  /// cancelled.
-  ///
-  /// @param f If this is true then the propagated canonical type has
-  /// been confirmed.
-  void
-  set_propagated_canonical_type_confirmed(bool f)
-  {propagated_canonical_type_confirmed_ = f;}
-
-  /// If the current canonical type was set as the result of the
-  /// "canonical type propagation optimization", then clear it.
-  bool
-  clear_propagated_canonical_type()
-  {
-    if (canonical_type_propagated_ && !propagated_canonical_type_confirmed_)
-      {
-	canonical_type.reset();
-	naked_canonical_type = nullptr;
-	set_canonical_type_propagated(false);
-	return true;
-      }
-    return false;
-  }
 }; // end struct type_base::priv
+
+bool
+type_is_suitable_for_hash_computing(const type_base&);
 
 // <environment definitions>
 
@@ -361,7 +509,10 @@ struct uint64_t_pair_hash
   /// @param p the pair to hash.
   uint64_t
   operator()(const std::pair<uint64_t, uint64_t>& p) const
-  {return abigail::hashing::combine_hashes(p.first, p.second);}
+  {
+    return *abigail::hashing::combine_hashes(hash_t(p.first),
+					     hash_t(p.second));
+  }
 };
 
 /// A convenience typedef for a pair of uint64_t which is initially
@@ -447,28 +598,9 @@ struct environment::priv
   //  -------- -------------
   // | T_R | R_OP0 | R_OP1 | <-- this goes into right_type_comp_operands_;
   //
-  // This "stack of operands of the current type comparison, during
-  // type canonicalization" is used in the context of the @ref
-  // OnTheFlyCanonicalization optimization.  It's used to detect if a
-  // sub-type of the type being canonicalized depends on a recursive
-  // type.
   vector<const type_base*>		left_type_comp_operands_;
   vector<const type_base*>		right_type_comp_operands_;
-  // Vector of types that protentially received propagated canonical types.
-  // If the canonical type propagation is confirmed, the potential
-  // canonical types must be promoted as canonical types. Otherwise if
-  // the canonical type propagation is cancelled, the canonical types
-  // must be cleared.
-  pointer_set		types_with_non_confirmed_propagated_ct_;
-  pointer_set		recursive_types_;
-#ifdef WITH_DEBUG_CT_PROPAGATION
-  // Set of types which propagated canonical type has been cleared
-  // during the "canonical type propagation optimization" phase. Those
-  // types are tracked in this set to ensure that they are later
-  // canonicalized.  This means that at the end of the
-  // canonicalization process, this set must be empty.
-  mutable pointer_set	types_with_cleared_propagated_ct_;
-#endif
+
 #ifdef WITH_DEBUG_SELF_COMPARISON
   // This is used for debugging purposes.
   // When abidw is used with the option --debug-abidiff, some
@@ -489,8 +621,8 @@ struct environment::priv
   // read from abixml and the type-id string it corresponds to.
   unordered_map<uintptr_t, string>	pointer_type_id_map_;
 #endif
+  bool					canonicalization_started_;
   bool					canonicalization_is_done_;
-  bool					do_on_the_fly_canonicalization_;
   bool					decl_only_class_equals_definition_;
   bool					use_enum_binary_only_equality_;
   bool					allow_type_comparison_results_caching_;
@@ -517,8 +649,8 @@ struct environment::priv
 #endif
 
   priv()
-    : canonicalization_is_done_(),
-      do_on_the_fly_canonicalization_(true),
+    : canonicalization_started_(),
+      canonicalization_is_done_(),
       decl_only_class_equals_definition_(false),
       use_enum_binary_only_equality_(true),
       allow_type_comparison_results_caching_(false),
@@ -578,13 +710,7 @@ struct environment::priv
   void
   cache_type_comparison_result(T& first, T& second, bool r)
   {
-    if (allow_type_comparison_results_caching()
-	&& (r == false
-	    ||
-	    (!is_recursive_type(&first)
-	     && !is_recursive_type(&second)
-	     && !is_type(&first)->priv_->depends_on_recursive_type()
-	     && !is_type(&second)->priv_->depends_on_recursive_type())))
+    if (allow_type_comparison_results_caching())
       {
 	type_comparison_results_cache_.emplace
 	  (std::make_pair(reinterpret_cast<uint64_t>(&first),
@@ -621,8 +747,8 @@ struct environment::priv
 
     type_comparison_result_type::const_iterator it =
       type_comparison_results_cache_.find
-	 (std::make_pair(reinterpret_cast<uint64_t>(&first),
-			 reinterpret_cast<uint64_t>(&second)));
+      (std::make_pair(reinterpret_cast<uint64_t>(&first),
+		      reinterpret_cast<uint64_t>(&second)));
     if (it == type_comparison_results_cache_.end())
       return false;
 
@@ -678,456 +804,6 @@ struct environment::priv
 
     left_type_comp_operands_.pop_back();
     right_type_comp_operands_.pop_back();
-  }
-
-  /// Mark all the types that comes after a certain one as NOT being
-  /// eligible for the canonical type propagation optimization.
-  ///
-  /// @param type the type that represents the "marker type".  All
-  /// types after this one will be marked as being NON-eligible to
-  /// the canonical type propagation optimization.
-  ///
-  /// @param types the set of types to consider.  In that vector, all
-  /// types that come after @p type are going to be marked as being
-  /// non-eligible to the canonical type propagation optimization.
-  ///
-  /// @return true iff the operation was successful.
-  bool
-  mark_dependant_types(const type_base* type,
-		       vector<const type_base*>& types)
-  {
-    bool found = false;
-    for (auto t : types)
-      {
-	if (!found
-	    && (reinterpret_cast<uintptr_t>(t)
-		== reinterpret_cast<uintptr_t>(type)))
-	  {
-	    found = true;
-	    continue;
-	  }
-	else if (found)
-	  t->priv_->set_depends_on_recursive_type(type);
-      }
-    return found;
-  }
-
-  /// In the stack of the current types being compared (as part of
-  /// type canonicalization), mark all the types that comes after a
-  /// certain one as NOT being eligible to the canonical type
-  /// propagation optimization.
-  ///
-  /// For a starter, please read about the @ref
-  /// OnTheFlyCanonicalization, aka, "canonical type propagation
-  /// optimization".
-  ///
-  /// To implement that optimization, we need, among other things to
-  /// maintain stack of the types (and their sub-types) being
-  /// currently compared as part of type canonicalization.
-  ///
-  /// Note that we only consider the type that is the right-hand-side
-  /// operand of the comparison because it's that one that is being
-  /// canonicalized and thus, that is not yet canonicalized.
-  ///
-  /// The reason why a type is deemed NON-eligible to the canonical
-  /// type propagation optimization is that it "depends" on
-  /// recursively present type.  Let me explain.
-  ///
-  /// Suppose we have a type T that has sub-types named ST0 and ST1.
-  /// Suppose ST1 itself has a sub-type that is T itself.  In this
-  /// case, we say that T is a recursive type, because it has T
-  /// (itself) as one of its sub-types:
-  ///
-  ///   T
-  ///   +-- ST0
-  ///   |
-  ///   +-- ST1
-  ///        +
-  ///        |
-  ///        +-- T
-  ///
-  /// ST1 is said to "depend" on T because it has T as a sub-type.
-  /// But because T is recursive, then ST1 is said to depend on a
-  /// recursive type.  Notice however that ST0 does not depend on any
-  /// recursive type.
-  ///
-  /// When we are at the point of comparing the sub-type T of ST1
-  /// against its counterpart, the stack of the right-hand-side
-  /// operands of the type canonicalization is going to look like
-  /// this:
-  ///
-  ///    | T | ST1 |
-  ///
-  /// We don't add the type T to the stack as we detect that T was
-  /// already in there (recursive cycle).
-  ///
-  /// So, this function will basically mark ST1 as being NON-eligible
-  /// to being the target of canonical type propagation.
-  ///
-  /// @param right the right-hand-side operand of the type comparison.
-  ///
-  /// @return true iff the operation was successful.
-  bool
-  mark_dependant_types_compared_until(const type_base* right)
-  {
-    bool result = false;
-
-    result |=
-      mark_dependant_types(right,
-			   right_type_comp_operands_);
-    recursive_types_.insert(reinterpret_cast<uintptr_t>(right));
-    return result;
-  }
-
-  /// Test if a type is a recursive one.
-  ///
-  /// @param t the type to consider.
-  ///
-  /// @return true iff @p t is recursive.
-  bool
-  is_recursive_type(const type_base* t)
-  {
-    return (recursive_types_.find(reinterpret_cast<uintptr_t>(t))
-	    != recursive_types_.end());
-  }
-
-
-  /// Unflag a type as being recursive
-  ///
-  /// @param t the type to unflag
-  void
-  set_is_not_recursive(const type_base* t)
-  {recursive_types_.erase(reinterpret_cast<uintptr_t>(t));}
-
-  /// Propagate the canonical type of a type to another one.
-  ///
-  /// @param src the type to propagate the canonical type from.
-  ///
-  /// @param dest the type to propagate the canonical type of @p src
-  /// to.
-  ///
-  /// @return bool iff the canonical was propagated.
-  bool
-  propagate_ct(const type_base& src, const type_base& dest)
-  {
-    type_base_sptr canonical = src.get_canonical_type();
-    ABG_ASSERT(canonical);
-    dest.priv_->canonical_type = canonical;
-    dest.priv_->naked_canonical_type = canonical.get();
-    dest.priv_->set_canonical_type_propagated(true);
-#ifdef WITH_DEBUG_CT_PROPAGATION
-    // If dest was previously a type which propagated canonical type
-    // has been cleared, let the book-keeping system know.
-    erase_type_with_cleared_propagated_canonical_type(&dest);
-#endif
-    return true;
-  }
-
-  /// Mark a set of types that have been the target of canonical type
-  /// propagation and that depend on a recursive type as being
-  /// permanently canonicalized.
-  ///
-  /// To understand the sentence above, please read the description of
-  /// type canonicalization and especially about the "canonical type
-  /// propagation optimization" at @ref OnTheFlyCanonicalization, in
-  /// the src/abg-ir.cc file.
-  void
-  confirm_ct_propagation_for_types_dependant_on(const type_base* dependant_type)
-  {
-    pointer_set to_remove;
-    for (auto i : types_with_non_confirmed_propagated_ct_)
-      {
-	type_base *t = reinterpret_cast<type_base*>(i);
-	t->priv_->set_does_not_depend_on_recursive_type(dependant_type);
-	if (!t->priv_->depends_on_recursive_type())
-	  {
-	    to_remove.insert(i);
-	    t->priv_->set_propagated_canonical_type_confirmed(true);
-#ifdef WITH_DEBUG_SELF_COMPARISON
-	    check_abixml_canonical_type_propagation_during_self_comp(t);
-#endif
-	  }
-      }
-
-    for (auto i : to_remove)
-      types_with_non_confirmed_propagated_ct_.erase(i);
-  }
-
-  /// Mark a type that has been the target of canonical type
-  /// propagation as being permanently canonicalized.
-  ///
-  /// This function also marks the set of types that have been the
-  /// target of canonical type propagation and that depend on a
-  /// recursive type as being permanently canonicalized.
-  ///
-  /// To understand the sentence above, please read the description of
-  /// type canonicalization and especially about the "canonical type
-  /// propagation optimization" at @ref OnTheFlyCanonicalization, in
-  /// the src/abg-ir.cc file.
-  void
-  confirm_ct_propagation(const type_base*t)
-  {
-    if (!t || t->priv_->propagated_canonical_type_confirmed())
-      return;
-
-    const environment& env = t->get_environment();
-
-    env.priv_->confirm_ct_propagation_for_types_dependant_on(t);
-    t->priv_->set_does_not_depend_on_recursive_type();
-    env.priv_->remove_from_types_with_non_confirmed_propagated_ct(t);
-    env.priv_->set_is_not_recursive(t);
-    t->priv_->set_propagated_canonical_type_confirmed(true);
-#ifdef WITH_DEBUG_SELF_COMPARISON
-    check_abixml_canonical_type_propagation_during_self_comp(t);
-#endif
-  }
-
-  /// Mark all the types that have been the target of canonical type
-  /// propagation and that are not yet confirmed as being permanently
-  /// canonicalized (aka confirmed).
-  ///
-  /// To understand the sentence above, please read the description of
-  /// type canonicalization and especially about the "canonical type
-  /// propagation optimization" at @ref OnTheFlyCanonicalization, in
-  /// the src/abg-ir.cc file.
-  void
-  confirm_ct_propagation()
-  {
-    for (auto i : types_with_non_confirmed_propagated_ct_)
-      {
-	type_base *t = reinterpret_cast<type_base*>(i);
-	t->priv_->set_does_not_depend_on_recursive_type();
-	t->priv_->set_propagated_canonical_type_confirmed(true);
-#ifdef WITH_DEBUG_SELF_COMPARISON
-	    check_abixml_canonical_type_propagation_during_self_comp(t);
-#endif
-      }
-    types_with_non_confirmed_propagated_ct_.clear();
-  }
-
-#ifdef WITH_DEBUG_CT_PROPAGATION
-  /// Getter for the set of types which propagated canonical type has
-  /// been cleared during the "canonical type propagation
-  /// optimization" phase. Those types are tracked in this set to
-  /// ensure that they are later canonicalized.  This means that at
-  /// the end of the canonicalization process, this set must be empty.
-  ///
-  /// @return the set of types which propagated canonical type has
-  /// been cleared.
-  const pointer_set&
-  types_with_cleared_propagated_ct() const
-  {return types_with_cleared_propagated_ct_;}
-
-  /// Getter for the set of types which propagated canonical type has
-  /// been cleared during the "canonical type propagation
-  /// optimization" phase. Those types are tracked in this set to
-  /// ensure that they are later canonicalized.  This means that at
-  /// the end of the canonicalization process, this set must be empty.
-  ///
-  /// @return the set of types which propagated canonical type has
-  /// been cleared.
-  pointer_set&
-  types_with_cleared_propagated_ct()
-  {return types_with_cleared_propagated_ct_;}
-
-  /// Record a type which propagated canonical type has been cleared
-  /// during the "canonical type propagation optimization phase".
-  ///
-  /// @param t the type to record.
-  void
-  record_type_with_cleared_propagated_canonical_type(const type_base* t)
-  {
-    uintptr_t ptr = reinterpret_cast<uintptr_t>(t);
-    types_with_cleared_propagated_ct_.insert(ptr);
-  }
-
-  /// Erase a type (which propagated canonical type has been cleared
-  /// during the "canonical type propagation optimization phase") from
-  /// the set of types that have been recorded by the invocation of
-  /// record_type_with_cleared_propagated_canonical_type()
-  ///
-  /// @param t the type to erase from the set.
-  void
-  erase_type_with_cleared_propagated_canonical_type(const type_base* t)
-  {
-    uintptr_t ptr = reinterpret_cast<uintptr_t>(t);
-    types_with_cleared_propagated_ct_.erase(ptr);
-  }
-#endif //WITH_DEBUG_CT_PROPAGATION
-
-  /// Collect the types that depends on a given "target" type.
-  ///
-  /// Walk a set of types and if they depend directly or indirectly on
-  /// a "target" type, then collect them into a set.
-  ///
-  /// @param target the target type to consider.
-  ///
-  /// @param types the types to walk to detect those who depend on @p
-  /// target.
-  ///
-  /// @return true iff one or more type from @p types is found to
-  /// depend on @p target.
-  bool
-  collect_types_that_depends_on(const type_base *target,
-				const pointer_set& types,
-				pointer_set& collected)
-  {
-    bool result = false;
-    for (const auto i : types)
-      {
-	// First avoid infinite loop if we've already collected the
-	// current type.
-	if (collected.find(i) != collected.end())
-	  continue;
-
-	type_base *t = reinterpret_cast<type_base*>(i);
-	if (t->priv_->depends_on_recursive_type(target))
-	  {
-	    collected.insert(i);
-	    collect_types_that_depends_on(t, types, collected);
-	    result = true;
-	  }
-      }
-    return result;
-  }
-
-  /// Reset the canonical type (set it nullptr) of a set of types that
-  /// have been the target of canonical type propagation and that
-  /// depend on a given recursive type.
-  ///
-  /// Once the canonical type of a type in that set is reset, the type
-  /// is marked as being non-dependant on a recursive type anymore.
-  ///
-  /// To understand the sentences above, please read the description
-  /// of type canonicalization and especially about the "canonical
-  /// type propagation optimization" at @ref OnTheFlyCanonicalization,
-  /// in the src/abg-ir.cc file.
-  ///
-  /// @param target if a type which has been subject to the canonical
-  /// type propagation optimizationdepends on a this target type, then
-  /// cancel its canonical type.
-  void
-  cancel_ct_propagation_for_types_dependant_on(const type_base* target)
-  {
-    pointer_set to_remove;
-    collect_types_that_depends_on(target,
-				  types_with_non_confirmed_propagated_ct_,
-				  to_remove);
-
-    for (auto i : to_remove)
-      {
-	type_base *t = reinterpret_cast<type_base*>(i);
-	ABG_ASSERT(t->get_environment().priv_->is_recursive_type(t)
-		   || t->priv_->depends_on_recursive_type());
-	type_base_sptr canonical = t->priv_->canonical_type.lock();
-	if (canonical)
-	  {
-	    clear_propagated_canonical_type(t);
-	    t->priv_->set_does_not_depend_on_recursive_type();
-	  }
-      }
-
-    for (auto i : to_remove)
-      types_with_non_confirmed_propagated_ct_.erase(i);
-  }
-
-  /// Reset the canonical type (set it nullptr) of a type that has
-  /// been the target of canonical type propagation.
-  ///
-  /// This also resets the propagated canonical type of the set of
-  /// types that depends on a given recursive type.
-  ///
-  /// Once the canonical type of a type in that set is reset, the type
-  /// is marked as being non-dependant on a recursive type anymore.
-  ///
-  /// To understand the sentences above, please read the description
-  /// of type canonicalization and especially about the "canonical
-  /// type propagation optimization" at @ref OnTheFlyCanonicalization,
-  /// in the src/abg-ir.cc file.
-  ///
-  /// @param target if a type which has been subject to the canonical
-  /// type propagation optimizationdepends on a this target type, then
-  /// cancel its canonical type.
-  void
-  cancel_ct_propagation(const type_base* t)
-  {
-    if (!t)
-      return;
-
-    const environment& env = t->get_environment();
-    env.priv_->cancel_ct_propagation_for_types_dependant_on(t);
-    // This cannot carry any tentative canonical type at this
-    // point.
-    clear_propagated_canonical_type(t);
-    // Reset the marking of the type as it no longer carries a
-    // tentative canonical type that might be later canceled.
-    t->priv_->set_does_not_depend_on_recursive_type();
-    env.priv_->remove_from_types_with_non_confirmed_propagated_ct(t);
-    env.priv_->clear_type_comparison_results_cache();
-  }
-
-  /// Clear the propagated canonical type of a given type.
-  ///
-  /// This function also updates the book-keeping of the set of types
-  /// which propagated canonical types have been cleared.
-  ///
-  /// Please note that at the end of the canonicalization of all the
-  /// types in the system, all the types which propagated canonical
-  /// type has been cleared must be canonicalized.
-  ///
-  /// @param t the type to
-  void
-  clear_propagated_canonical_type(const type_base *t)
-  {
-    if (t->priv_->clear_propagated_canonical_type())
-      {
-#ifdef WITH_DEBUG_CT_PROPAGATION
-	// let the book-keeping system know that t has its propagated
-	// canonical type cleared.
-	record_type_with_cleared_propagated_canonical_type(t)
-#endif
-	  ;
-      }
-  }
-
-  /// Add a given type to the set of types that have been
-  /// non-confirmed subjects of the canonical type propagation
-  /// optimization.
-  ///
-  /// @param t the dependant type to consider.
-  void
-  add_to_types_with_non_confirmed_propagated_ct(const type_base *t)
-  {
-    uintptr_t v = reinterpret_cast<uintptr_t>(t);
-    types_with_non_confirmed_propagated_ct_.insert(v);
-  }
-
-  /// Remove a given type from the set of types that have been
-  /// non-confirmed subjects of the canonical type propagation
-  /// optimization.
-  ///
-  /// @param dependant the dependant type to consider.
-  void
-  remove_from_types_with_non_confirmed_propagated_ct(const type_base* dependant)
-  {
-    uintptr_t i = reinterpret_cast<uintptr_t>(dependant);
-    types_with_non_confirmed_propagated_ct_.erase(i);
-  }
-
-  /// Cancel the propagated canonical types of all the types which
-  /// propagated canonical type have not yet been confirmed.
-  void
-  cancel_all_non_confirmed_propagated_canonical_types()
-  {
-    vector<uintptr_t> to_erase;
-    for (auto i : types_with_non_confirmed_propagated_ct_)
-      to_erase.push_back(i);
-
-    for (auto i : to_erase)
-      {
-	type_base *t = reinterpret_cast<type_base*>(i);
-	cancel_ct_propagation(t);
-      }
   }
 
 #ifdef WITH_DEBUG_SELF_COMPARISON
@@ -1289,6 +965,466 @@ struct environment::priv
 #endif
 };// end struct environment::priv
 
+bool
+compare_using_locations(const decl_base *f,
+			const decl_base *s);
+
+/// A functor to sort decls somewhat topologically.  That is, types
+/// are sorted in a way that makes the ones that are defined "first"
+/// to come first.
+///
+/// The topological criteria is a lexicographic sort of the definition
+/// location of the type.  For types that have no location (or the
+/// same location), it's their qualified name that is used for the
+/// lexicographic sort.
+struct decl_topo_comp
+{
+  /// Test if a decl has an artificial or natural location.
+  ///
+  /// @param d the decl to consider
+  ///
+  /// @return true iff @p d has a location.
+  bool
+  has_artificial_or_natural_location(const decl_base* d)
+  {return get_artificial_or_natural_location(d).get_value();}
+
+  /// Test if a type has an artificial or natural location.
+  ///
+  /// @param t the type to consider
+  ///
+  /// @return true iff @p t has a location.
+  bool
+  has_artificial_or_natural_location(const type_base* t)
+  {
+    if (decl_base *d = is_decl(t))
+      return has_artificial_or_natural_location(d);
+    return false;
+  }
+
+  /// The "Less Than" comparison operator of this functor.
+  ///
+  /// @param f the first decl to be considered for the comparison.
+  ///
+  /// @param s the second decl to be considered for the comparison.
+  ///
+  /// @return true iff @p f is less than @p s.
+  bool
+  operator()(const decl_base *f,
+	     const decl_base *s)
+  {
+    if (!!f != !!s)
+      return f && !s;
+
+    if (!f)
+      return false;
+
+    // Unique types that are artificially created in the environment
+    // don't have locations.  They ought to be compared on the basis
+    // of their pretty representation before we start looking at IR
+    // nodes' locations down the road.
+    if (is_unique_type(is_type(f)) || is_unique_type(is_type(s)))
+      return (f->get_cached_pretty_representation(/*internal=*/false)
+	      < s->get_cached_pretty_representation(/*internal=*/false));
+
+    // If both decls come from an abixml file, keep the order they
+    // have from that abixml file.
+    if (has_artificial_or_natural_location(f)
+	&& has_artificial_or_natural_location(s)
+	&& (((!f->get_corpus() && !s->get_corpus())
+	     || (f->get_corpus() && f->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN
+		 && s->get_corpus() && s->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN))))
+      return compare_using_locations(f, s);
+
+    // If a decl has artificial location, then use that one over the
+    // natural one.
+    location fl = get_artificial_or_natural_location(f);
+    location sl = get_artificial_or_natural_location(s);
+
+    if (fl.get_value() && sl.get_value())
+      return compare_using_locations(f, s);
+    else if (!!fl != !!sl)
+      // So one of the decls doesn't have location data.
+      // The first decl is less than the second if it's the one not
+      // having location data.
+      return !fl && sl;
+
+    // We reach this point if location data is useless.
+    if (f->get_is_anonymous()
+	&& s->get_is_anonymous()
+	&& (f->get_cached_pretty_representation(/*internal=*/false)
+	    == s->get_cached_pretty_representation(/*internal=*/false)))
+      return f->get_name() < s->get_name();
+
+    return (f->get_cached_pretty_representation(/*internal=*/false)
+	    < s->get_cached_pretty_representation(/*internal=*/false));
+  }
+
+  /// The "Less Than" comparison operator of this functor.
+  ///
+  /// @param f the first decl to be considered for the comparison.
+  ///
+  /// @param s the second decl to be considered for the comparison.
+  ///
+  /// @return true iff @p f is less than @p s.
+  bool
+  operator()(const decl_base_sptr &f,
+	     const decl_base_sptr &s)
+  {return operator()(f.get(), s.get());}
+
+}; // end struct decl_topo_comp
+
+bool
+is_ptr_ref_or_qual_type(const type_base *t);
+
+/// A functor to sort types somewhat topologically.  That is, types
+/// are sorted in a way that makes the ones that are defined "first"
+/// to come first.
+///
+/// The topological criteria is a lexicographic sort of the definition
+/// location of the type.  For types that have no location, it's their
+/// qualified name that is used for the lexicographic sort.
+struct type_topo_comp
+{
+  /// Test if a decl has an artificial or natural location.
+  ///
+  /// @param d the decl to consider
+  ///
+  /// @return true iff @p d has a location.
+  bool
+  has_artificial_or_natural_location(const decl_base* d)
+  {return get_artificial_or_natural_location(d).get_value();}
+
+  /// Test if a type has an artificial or natural location.
+  ///
+  /// @param t the type to consider
+  ///
+  /// @return true iff @p t has a location.
+  bool
+  has_artificial_or_natural_location(const type_base* t)
+  {
+    if (decl_base *d = is_decl(t))
+      return has_artificial_or_natural_location(d);
+    return false;
+  }
+
+  /// The "Less Than" comparison operator of this functor.
+  ///
+  /// @param f the first type to be considered for the comparison.
+  ///
+  /// @param s the second type to be considered for the comparison.
+  ///
+  /// @return true iff @p f is less than @p s.
+  bool
+  operator()(const type_base_sptr &f,
+	     const type_base_sptr &s)
+  {return operator()(f.get(), s.get());}
+
+  /// The "Less Than" comparison operator of this functor.
+  ///
+  /// @param f the first type to be considered for the comparison.
+  ///
+  /// @param s the second type to be considered for the comparison.
+  ///
+  /// @return true iff @p f is less than @p s.
+  bool
+  operator()(const type_base *f,
+	     const type_base *s)
+  {
+    if (f == s || !f || !s)
+      return false;
+
+    // If both decls come from an abixml file, keep the order they
+    // have from that abixml file.
+    if (is_decl(f) && is_decl(s)
+	&& has_artificial_or_natural_location(f)
+	&& has_artificial_or_natural_location(s)
+	&& ((!f->get_corpus() && !s->get_corpus())
+	    || (f->get_corpus()
+		&& f->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN
+		&& s->get_corpus()
+		&& (s->get_corpus()->get_origin()
+		    == corpus::NATIVE_XML_ORIGIN))))
+      return compare_using_locations(is_decl(f), is_decl(s));
+
+    bool f_is_ptr_ref_or_qual = is_ptr_ref_or_qual_type(f);
+    bool s_is_ptr_ref_or_qual = is_ptr_ref_or_qual_type(s);
+
+    if (f_is_ptr_ref_or_qual != s_is_ptr_ref_or_qual)
+      return !f_is_ptr_ref_or_qual && s_is_ptr_ref_or_qual;
+
+    if (f_is_ptr_ref_or_qual && s_is_ptr_ref_or_qual
+	&& !has_artificial_or_natural_location(f)
+	&& !has_artificial_or_natural_location(s))
+      {
+	interned_string s1 = f->get_cached_pretty_representation(/*internal=*/false);
+	interned_string s2 = s->get_cached_pretty_representation(/*internal=*/false);
+	if (s1 == s2)
+	  {
+	    if (qualified_type_def * q = is_qualified_type(f))
+	      {
+		if (q->get_cv_quals() == qualified_type_def::CV_NONE)
+		  if (!is_qualified_type(s))
+		    // We are looking at two types that are the result of
+		    // an optimization that happens during the IR
+		    // construction.  Namely, type f is a cv-qualified
+		    // type with no qualifier (no const, no volatile, no
+		    // nothing, we call it an empty-qualified type).
+		    // These are the result of an optimization which
+		    // removes "redundant qualifiers" from some types.
+		    // For instance, consider a "const reference".  The
+		    // const there is redundant because a reference is
+		    // always const.  So as a result of the optimizaton
+		    // that type is going to be transformed into an
+		    // empty-qualified reference. If we don't make that
+		    // optimization, then we risk having spurious change
+		    // reports down the road.  But then, as a consequence
+		    // of that optimization, we need to sort the
+		    // empty-qualified type and its non-qualified variant
+		    // e.g, to ensure stability in the abixml output; both
+		    // types are logically equal, but here, we decide that
+		    // the empty-qualified one is topologically "less
+		    // than" the non-qualified counterpart.
+		    //
+		    // So here, type f is an empty-qualified type and type
+		    // s is its non-qualified variant.  We decide that f
+		    // is topologically less than s.
+		    return true;
+	      }
+	    // Now let's peel off the pointer (or reference types) and
+	    // see if the ultimate underlying types have the same
+	    // textual representation; if not, use that as sorting
+	    // criterion.
+	    type_base *peeled_f =
+	      peel_pointer_or_reference_type(f, true);
+	    type_base *peeled_s =
+	      peel_pointer_or_reference_type(s, true);
+
+	    s1 = peeled_f->get_cached_pretty_representation(/*internal=*/false);
+	    s2 = peeled_s->get_cached_pretty_representation(/*internal=*/false);
+	    if (s1 != s2)
+	      return s1 < s2;
+
+	    // The underlying type of pointer/reference have the same
+	    // textual representation; let's try to peel of typedefs
+	    // as well and we'll consider sorting the result as decls.
+	    peeled_f = peel_typedef_pointer_or_reference_type(peeled_f, true);
+	    peeled_s = peel_typedef_pointer_or_reference_type(peeled_s, true);
+
+	    s1 = peeled_f->get_cached_pretty_representation(false);
+	    s2 = peeled_s->get_cached_pretty_representation(false);
+	    if (s1 != s2)
+	      return s1 < s2;
+	  }
+      }
+
+    interned_string s1 = f->get_cached_pretty_representation(false);
+    interned_string s2 = s->get_cached_pretty_representation(false);
+
+    if (s1 != s2)
+      return s1 < s2;
+
+    if (is_typedef(f) && is_typedef(s))
+      {
+	s1 = is_typedef(f)->get_underlying_type()->get_cached_pretty_representation(false);
+	s2 = is_typedef(s)->get_underlying_type()->get_cached_pretty_representation(false);
+	if (s1 != s2)
+	  return s1 < s2;
+      }
+
+    type_base *peeled_f = peel_typedef_pointer_or_reference_type(f, true);
+    type_base *peeled_s = peel_typedef_pointer_or_reference_type(s, true);
+
+    s1 = peeled_f->get_cached_pretty_representation(false);
+    s2 = peeled_s->get_cached_pretty_representation(false);
+
+    if (s1 != s2)
+      return s1 < s2;
+
+    if (method_type* m_f = is_method_type(peeled_f))
+      if (method_type* m_s = is_method_type(peeled_s))
+      {
+	// If two method types differ from their const-ness, make the
+	// const one come first.
+	if (m_f->get_is_const() != m_s->get_is_const())
+	  return m_f->get_is_const();
+
+	// If two method types have the same name (textual
+	// representation), make the non-static one come first.
+	if (m_f->get_is_for_static_method() != m_s->get_is_for_static_method())
+	  return m_f->get_is_for_static_method() < m_s->get_is_for_static_method();
+      }
+
+    decl_base *fd = is_decl(f);
+    decl_base *sd = is_decl(s);
+
+    if (!!fd != !!sd)
+      return fd && !sd;
+
+    if (!fd
+	&& f->get_translation_unit()
+	&& s->get_translation_unit())
+      {
+	string s1 = f->get_translation_unit()->get_absolute_path();
+	string s2 = s->get_translation_unit()->get_absolute_path();
+	return s1 < s2;
+      }
+
+    // If all pretty representions are equal, sort by
+    // hash value and canonical type index.
+    hash_t h_f = peek_hash_value(*f);
+    hash_t h_s = peek_hash_value(*s);
+    if (h_f && h_s && *h_f != *h_s)
+      return *h_f < *h_s;
+
+    size_t cti_f = get_canonical_type_index(*f);
+    size_t cti_s = get_canonical_type_index(*s);
+    if (cti_f != cti_s)
+      return cti_f < cti_s;
+
+    // If the two types have no decls, how come we could not sort them
+    // until now? Let's investigate.
+    ABG_ASSERT(fd);
+
+    // From this point, fd and sd should be non-nil
+    decl_topo_comp decl_comp;
+    return decl_comp(fd, sd);
+  }
+}; //end struct type_topo_comp
+
+/// Functor used to sort types before hashing them.
+struct sort_for_hash_functor
+{
+  /// Return the rank of a given kind of IR node.
+  ///
+  /// The rank is used to sort a kind of IR node relative to another
+  /// one of a different kind.  For instance, a an IR node of
+  /// BASIC_TYPE kind has a lower rank than an IR node of ENUM_TYPE
+  /// kind.
+  ///
+  /// @param k the kind of a given IR node.
+  ///
+  /// @return the rank of the IR node.
+  size_t
+  rank(enum type_or_decl_base::type_or_decl_kind k)
+  {
+    size_t result = 0;
+
+    if (k & type_or_decl_base::BASIC_TYPE)
+      result = 1;
+    if (k & type_or_decl_base::SUBRANGE_TYPE)
+      result = 2;
+    else if (k & type_or_decl_base::ENUM_TYPE)
+      result = 3;
+    else if (k & type_or_decl_base::CLASS_TYPE)
+      result = 4;
+    else if (k & type_or_decl_base::UNION_TYPE)
+      result = 5;
+    else if (k & type_or_decl_base::FUNCTION_TYPE)
+      result = 6;
+    else if (k & type_or_decl_base::METHOD_TYPE)
+      result = 7;
+    else if (k & type_or_decl_base::TYPEDEF_TYPE)
+      result = 8;
+    else if (k & type_or_decl_base::QUALIFIED_TYPE)
+      result = 9;
+    else if (k & type_or_decl_base::POINTER_TYPE)
+      result = 10;
+    else if (k & type_or_decl_base::REFERENCE_TYPE)
+      result = 11;
+    else if (k & type_or_decl_base::POINTER_TO_MEMBER_TYPE)
+      result = 12;
+    else if (k & type_or_decl_base::ARRAY_TYPE)
+      result = 13;
+
+    return result;
+  }
+
+  /// "Less Than" operator for type IR nodes.
+  ///
+  /// This returns true iff the first operand is less than the second
+  /// one.
+  ///
+  /// IR nodes are first sorted using their rank.  Two IR node of the
+  /// same rank are then sorted using their qualified name.
+  ///
+  /// @param f the first operand to consider.
+  ///
+  /// @param s the second operand to consider.
+  bool
+  operator()(const type_base& f, const type_base& s)
+  {
+    size_t rank_f = rank(f.kind()),
+      rank_s = rank(s.kind());
+
+    // If rank_f or rank_s is zero, it probably means there is a new
+    // type IR kind that needs proper ranking.
+    ABG_ASSERT(rank_f != 0 && rank_s != 0);
+
+    bool result = false;
+    if (rank_f < rank_s)
+      result = true;
+    else if (rank_f == rank_s)
+      {
+	type_topo_comp comp;
+	result = comp(&f,&s);
+      }
+    return result;
+  }
+
+  /// "Less Than" operator for type IR nodes.
+  ///
+  /// This returns true iff the first operand is less than the second
+  /// one.
+  ///
+  /// IR nodes are first sorted using their rank.  Two IR node of the
+  /// same rank are then sorted using their qualified name.
+  ///
+  /// @param f the first operand to consider.
+  ///
+  /// @param s the second operand to consider.
+  bool
+  operator()(const type_base* f, const type_base* s)
+  {
+    return operator()(*f, *s);
+  }
+
+  /// "Less Than" operator for type IR nodes.
+  ///
+  /// This returns true iff the first operand is less than the second
+  /// one.
+  ///
+  /// IR nodes are first sorted using their rank.  Two IR node of the
+  /// same rank are then sorted using their qualified name.
+  ///
+  /// @param f the first operand to consider.
+  ///
+  /// @param s the second operand to consider.  
+  bool
+  operator()(const type_base_sptr& f, const type_base_sptr& s)
+  {
+    return operator()(f.get(), s.get());
+  }
+};//end struct sort_for_hash_functor
+
+/// Sort types before hashing (and then canonicalizing) them.
+///
+/// @param begin an iterator pointing to the beginning of the sequence
+/// of types to sort.
+///
+/// @param end an iterator pointing to the end of the sequence of
+/// types to sort.
+template <typename IteratorType>
+void
+sort_types_for_hash_computing_and_c14n(IteratorType begin,
+				       IteratorType end)
+{
+  sort_for_hash_functor comp;
+  return std::stable_sort(begin, end, comp);
+}
+
+void
+sort_types_for_hash_computing_and_c14n(vector<type_base_sptr>& types);
+
 /// Compute the canonical type for all the IR types of the system.
 ///
 /// After invoking this function, the time it takes to compare two
@@ -1315,7 +1451,7 @@ struct environment::priv
 /// @param begin an iterator pointing to the first type of the set of types
 /// to canonicalize.
 ///
-/// @param end an iterator pointing to the end (after the last type) of
+/// @param end an iterator pointing past-the-end (after the last type) of
 /// the set of types to canonicalize.
 ///
 /// @param deref a lambda function that knows how to dereference the
@@ -1325,33 +1461,129 @@ template<typename input_iterator,
 void
 canonicalize_types(const input_iterator& begin,
 		   const input_iterator& end,
-		   deref_lambda deref)
+		   deref_lambda deref,
+		   bool do_log = false,
+		   bool show_stats = false)
 {
   if (begin == end)
     return;
 
+  auto first_iter = begin;
+  auto first = deref(first_iter);
+  environment& env = const_cast<environment&>(first->get_environment());
+
+  env.canonicalization_started(true);
+
   int i;
   input_iterator t;
   // First, let's compute the canonical type of this type.
+  tools_utils::timer tmr;
+  if (do_log)
+    {
+      std::cerr << "Canonicalizing types ...\n";
+      tmr.start();
+    }
+
   for (t = begin,i = 0; t != end; ++t, ++i)
     {
-      if (deref(t)->get_environment().priv_->do_log())
+      if (do_log && show_stats)
 	std::cerr << "#" << std::dec << i << " ";
 
       canonicalize(deref(t));
     }
 
-#ifdef WITH_DEBUG_CT_PROPAGATION
-  // Then now, make sure that all types -- which propagated canonical
-  // type has been cleared -- have been canonicalized.  In other
-  // words, the set of types which have been recorded because their
-  // propagated canonical type has been cleared must be empty.
-  const environment& env = deref(begin)->get_environment();
-  pointer_set to_canonicalize =
-    env.priv_->types_with_cleared_propagated_ct();
+  env.canonicalization_is_done(true);
 
-  ABG_ASSERT(to_canonicalize.empty());
-#endif // WITH_DEBUG_CT_PROPAGATION
+  if (do_log)
+    {
+      tmr.stop();
+      std::cerr << "Canonicalizing of types DONE in: " << tmr << "\n\n";
+      tmr.start();
+    }
+}
+
+/// Hash and canonicalize a sequence of types.
+///
+/// Note that this function first sorts the types, then hashes them
+/// and then canonicalizes them.
+///
+/// Operations must be done in that order to get predictable results.
+///
+/// @param begin an iterator pointing to the first element of the
+/// sequence of types to hash and canonicalize.
+///
+/// @param begin an iterator pointing past-the-end of the sequence of
+/// types to hash and canonicalize.
+///
+/// @param deref this is a lambda that is used to dereference the
+/// types contained in the sequence referenced by iterators @p begin
+/// and @p end.
+template <typename IteratorType,
+	  typename deref_lambda>
+void
+hash_and_canonicalize_types(IteratorType	begin,
+			    IteratorType	end,
+			    deref_lambda	deref,
+			    bool do_log = false,
+			    bool show_stats = false)
+{
+  tools_utils::timer tmr;
+  if (do_log)
+    {
+      std::cerr << "sorting types before canonicalization ... \n";
+      tmr.start();
+    }
+
+  sort_types_for_hash_computing_and_c14n(begin, end);
+
+  if (do_log)
+    {
+      tmr.stop();
+      std::cerr << "sorted types for c14n in: " << tmr << "\n\n";
+
+      std::cerr << "hashing types before c14n ...\n";
+      tmr.start();
+    }
+
+  for (IteratorType t = begin; t != end; ++t)
+    if (!peek_hash_value(*deref(t)))
+      (*t)->hash_value();
+
+  if (do_log)
+    {
+      tmr.stop();
+      std::cerr << "hashed types in: " << tmr << "\n\n";
+    }
+
+  canonicalize_types(begin, end, deref, do_log, show_stats);
+}
+
+/// Sort and canonicalize a sequence of types.
+///
+/// Note that this function does NOT hash the types.  It thus assumes
+/// that the types are allready hashed.
+///
+/// Operations must be done in that order (sorting and then
+/// canonicalizing) to get predictable results.
+///
+/// @param begin an iterator pointing to the first element of the
+/// sequence of types to hash and canonicalize.
+///
+/// @param begin an iterator pointing past-the-end of the sequence of
+/// types to hash and canonicalize.
+///
+/// @param deref this is a lambda that is used to dereference the
+/// types contained in the sequence referenced by iterators @p begin
+/// and @p end.
+template <typename IteratorType,
+	  typename deref_lambda>
+void
+sort_and_canonicalize_types(IteratorType	begin,
+			    IteratorType	end,
+			    deref_lambda	deref)
+{
+  sort_types_for_hash_computing_and_c14n(begin, end);
+  canonicalize_types(begin, end, deref);
 }
 
 // <class_or_union::priv definitions>
@@ -1359,6 +1591,7 @@ struct class_or_union::priv
 {
   typedef_decl_wptr		naming_typedef_;
   data_members			data_members_;
+  data_members			static_data_members_;
   data_members			non_static_data_members_;
   member_functions		member_functions_;
   // A map that associates a linkage name to a member function.
@@ -1368,7 +1601,10 @@ struct class_or_union::priv
   string_mem_fn_ptr_map_type	signature_2_mem_fn_map_;
   member_function_templates	member_function_templates_;
   member_class_templates	member_class_templates_;
-
+  bool				is_printing_flat_representation_ = false;
+  // The set of classes which layouts are currently being compared
+  // against this one.  This is to avoid endless loops.
+  unordered_set<type_base*>	comparing_class_layouts_;
   priv()
   {}
 
@@ -1377,11 +1613,11 @@ struct class_or_union::priv
     : data_members_(data_mbrs),
       member_functions_(mbr_fns)
   {
-    for (data_members::const_iterator i = data_members_.begin();
-	 i != data_members_.end();
-	 ++i)
-      if (!get_member_is_static(*i))
-	non_static_data_members_.push_back(*i);
+    for (const auto& data_member: data_members_)
+      if (get_member_is_static(data_member))
+	static_data_members_.push_back(data_member);
+      else
+	non_static_data_members_.push_back(data_member);
   }
 
   /// Mark a pair of classes or unions as being currently compared
@@ -1529,6 +1765,36 @@ struct class_or_union::priv
       return comparison_started(*first, *second);
     return false;
   }
+
+  /// Set the 'is_printing_flat_representation_' boolean to true.
+  ///
+  /// That boolean marks the fact that the current @ref class_or_union
+  /// (and its sub-types graph) is being walked for the purpose of
+  /// printing its flat representation.  This is useful to detect
+  /// cycles in the graph and avoid endless loops.
+  void
+  set_printing_flat_representation()
+  {is_printing_flat_representation_ = true;}
+
+  /// Set the 'is_printing_flat_representation_' boolean to false.
+  ///
+  /// That boolean marks the fact that the current @ref class_or_union
+  /// (and its sub-types graph) is being walked for the purpose of
+  /// printing its flat representation.  This is useful to detect
+  /// cycles in the graph and avoid endless loops.
+  void
+  unset_printing_flat_representation()
+  {is_printing_flat_representation_ = false;}
+
+  /// Getter of the 'is_printing_flat_representation_' boolean.
+  ///
+  /// That boolean marks the fact that the current @ref class_or_union
+  /// (and its sub-types graph) is being walked for the purpose of
+  /// printing its flat representation.  This is useful to detect
+  /// cycles in the graph and avoid endless loops.
+  bool
+  is_printing_flat_representation() const
+  {return is_printing_flat_representation_;}
 }; // end struct class_or_union::priv
 
 // <function_type::priv definitions>
@@ -1541,7 +1807,7 @@ struct function_type::priv
   interned_string cached_name_;
   interned_string internal_cached_name_;
   interned_string temp_internal_cached_name_;
-
+  bool is_pretty_printing_ = false;
   priv()
   {}
 
@@ -1604,10 +1870,45 @@ struct function_type::priv
 	    ||
 	    env.priv_->right_fn_types_being_compared_.count(&second));
   }
+
+  /// Set the 'is_pretty_printing_' boolean to true.
+  ///
+  /// That boolean marks the fact that the current @ref function_type
+  /// (and its sub-types graph) is being walked for the purpose of
+  /// printing its flat representation.  This is useful to detect
+  /// cycles in the graph and avoid endless loops.
+  void
+  set_is_pretty_printing()
+  {is_pretty_printing_ = true;}
+
+  /// Set the 'is_pretty_printing_' boolean to false.
+  ///
+  /// That boolean marks the fact that the current @ref function_type
+  /// (and its sub-types graph) is being walked for the purpose of
+  /// printing its flat representation.  This is useful to detect
+  /// cycles in the graph and avoid endless loops.
+  void
+  unset_is_pretty_printing()
+  {is_pretty_printing_ = false;}
+
+  /// Getter of the 'is_pretty_printing_' boolean.
+  ///
+  /// That boolean marks the fact that the current @ref function_type
+  /// (and its sub-types graph) is being walked for the purpose of
+  /// printing its flat representation.  This is useful to detect
+  /// cycles in the graph and avoid endless loops.
+  bool
+  is_pretty_printing() const
+  {return is_pretty_printing_;}
 };// end struc function_type::priv
 
 // </function_type::priv definitions>
 
+size_t
+get_canonical_type_index(const type_base& t);
+
+bool
+type_originates_from_corpus(type_base_sptr t, corpus_sptr& c);
 } // end namespace ir
 
 } // end namespace abigail

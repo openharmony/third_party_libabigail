@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 /// @file
 ///
@@ -24,7 +24,9 @@
 #include <vector>
 
 #include "abg-tools-utils.h"
+#include "abg-ir-priv.h"
 
+#include "abg-ir-priv.h"
 #include "abg-internal.h"
 // <headers defining libabigail's API go under here>
 ABG_BEGIN_EXPORT_DECLARATIONS
@@ -195,13 +197,25 @@ nc_type_ptr_istr_map_type;
 /// A convenience typedef for a set of function type*.
 typedef std::unordered_set<function_type*> fn_type_ptr_set_type;
 
-typedef unordered_map<shared_ptr<function_tdecl>,
-		      string,
-		      function_tdecl::shared_ptr_hash> fn_tmpl_shared_ptr_map;
+struct function_tdecl_hash
+{
+  size_t operator()(const function_tdecl_sptr& f) const
+  {return reinterpret_cast<size_t>(f.get());}
+};
 
-typedef unordered_map<shared_ptr<class_tdecl>,
+typedef unordered_map<function_tdecl_sptr,
+		      string, function_tdecl_hash>
+fn_tmpl_shared_ptr_map;
+
+struct class_tdecl_hash
+{
+  size_t operator()(const class_tdecl_sptr& c) const
+  {return reinterpret_cast<size_t>(c.get());}
+};
+
+typedef unordered_map<class_tdecl_sptr,
 		      string,
-		      class_tdecl::shared_ptr_hash> class_tmpl_shared_ptr_map;
+		      class_tdecl_hash> class_tmpl_shared_ptr_map;
 
 class write_context
 {
@@ -214,6 +228,7 @@ class write_context
   bool					m_write_corpus_path;
   bool					m_write_comp_dir;
   bool					m_write_elf_needed;
+  bool					m_write_undefined_symbols;
   bool					m_write_parameter_names;
   bool					m_short_locs;
   bool					m_write_default_sizes;
@@ -252,6 +267,7 @@ public:
       m_write_corpus_path(true),
       m_write_comp_dir(true),
       m_write_elf_needed(true),
+      m_write_undefined_symbols(true),
       m_write_parameter_names(true),
       m_short_locs(false),
       m_write_default_sizes(true),
@@ -324,6 +340,20 @@ public:
   void
   set_write_elf_needed(bool f)
   {m_write_elf_needed = f;}
+
+  /// Getter of the "undefined-symbols" option.
+  ///
+  /// @return true iff undefined symbols shall be emitted.
+  bool
+  get_write_undefined_symbols() const
+  {return m_write_undefined_symbols;}
+
+  /// Setter of the "undefined-symbols" option.
+  ///
+  /// @param f true iff undefined symbols shall be emitted.
+  void
+  set_write_undefined_symbols(bool f)
+  {m_write_undefined_symbols = f;}
 
   /// Getter of the default-sizes option.
   ///
@@ -471,7 +501,7 @@ public:
   /// associated to it, create a new one and return it.  Otherwise,
   /// return the existing id for that type.
   interned_string
-  get_id_for_type(type_base* type) const
+  get_id_for_type(const type_base* type) const
   {
     type_base* c = get_exemplar_type(type);
 
@@ -601,93 +631,6 @@ public:
       return m_referenced_types_set.find(t) != m_referenced_types_set.end();
   }
 
-  /// A comparison functor to compare pointers to @ref type_base.
-  ///
-  /// What is compared is the string representation of the pointed-to
-  /// type.
-  struct type_ptr_cmp
-  {
-    type_ptr_map *map;
-    type_ptr_cmp(type_ptr_map *m)
-      : map(m)
-    {}
-
-    /// The comparison operator of the functor.
-    ///
-    /// @param l the first type to consider.
-    ///
-    /// @param r the second type to consider.
-    ///
-    /// @return true if the string representation of type @p l is
-    /// considered to be "less than" the string representation of the
-    /// type @p r.
-    ///
-    /// But when the two string representations are equal (for
-    /// instance, for typedefs that have the same string
-    /// representation), this function compares the type-ids of the
-    /// types.  This allows for a stable result.
-    bool
-    operator()(const type_base* l, const type_base* r) const
-    {
-      if (!l && r)
-	return true;
-      if (l && !r)
-	return false;
-      if (!l && !r)
-	return false;
-
-      string r1 = ir::get_pretty_representation(l, true),
-	r2 = ir::get_pretty_representation(r, true);
-
-      if (r1 == r2)
-	{
-	  // So the two operands have the same pretty representation.
-	  if (is_typedef(l) || is_typedef(r))
-	    {
-	      // There is a typedef in the comparison.
-	      // Let's strip the typedef to look at the underlying
-	      // type and consider its pretty representation instead.
-	      l = peel_typedef_type(l);
-	      r = peel_typedef_type(r);
-
-	      r1 = ir::get_pretty_representation(l, /*internal=*/false),
-		r2 = ir::get_pretty_representation(r, /*internal=*/false);
-
-	      if (r1 != r2)
-		return r1 < r2;
-	    }
-
-	  type_ptr_map::const_iterator i =
-	    map->find(const_cast<type_base*>(l));
-	  if (i != map->end())
-	    r1 = i->second;
-	  i = map->find(const_cast<type_base*>(r));
-	  if (i != map->end())
-	    r2 = i->second;
-	}
-
-      return r1 < r2;
-    }
-
-    /// The comparison operator of the functor.
-    ///
-    /// @param l the first type to consider.
-    ///
-    /// @param r the second type to consider.
-    ///
-    /// @return true if the string representation of type @p l is
-    /// considered to be "less than" the string representation of the
-    /// type @p r.
-    ///
-    /// But when the two string representations are equal (for
-    /// instance, for typedefs that have the same string
-    /// representation), this function compares the type-ids of the
-    /// types.  This allows for a stable result.
-    bool
-    operator()(const type_base_sptr& l, const type_base_sptr& r) const
-    {return operator()(l.get(), r.get());}
-  }; // end struct type_ptr_cmp
-
   /// Sort the content of a map of type pointers into a vector.
   ///
   /// The pointers are sorted by using their string representation as
@@ -706,7 +649,7 @@ public:
 	 i != types.end();
 	 ++i)
       sorted.push_back(const_cast<type_base*>(*i));
-    type_ptr_cmp comp(&m_type_id_map);
+    type_topo_comp comp;
     sort(sorted.begin(), sorted.end(), comp);
   }
 
@@ -727,7 +670,7 @@ public:
 	 i != types.end();
 	 ++i)
       sorted.push_back(type_base_sptr(i->second));
-    type_ptr_cmp comp(&m_type_id_map);
+    type_topo_comp comp;
     sort(sorted.begin(), sorted.end(), comp);
   }
 
@@ -749,7 +692,7 @@ public:
 	 i != types.end();
 	 ++i)
       sorted.push_back(*i);
-    type_ptr_cmp comp(&m_type_id_map);
+    type_topo_comp comp;
     sort(sorted.begin(), sorted.end(), comp);
   }
 
@@ -792,6 +735,20 @@ public:
   bool
   type_is_emitted(const type_base_sptr& t) const
   {return type_is_emitted(t.get());}
+
+  /// Test if a given decl has been written out to the XML output.
+  ///
+  /// @param the decl to consider.
+  ///
+  /// @return true if the decl has already been emitted, false
+  /// otherwise.
+  bool
+  decl_is_emitted(const decl_base& decl) const
+  {
+    string repr = decl.get_pretty_representation(true);
+    interned_string irepr = decl.get_environment().intern(repr);
+    return m_emitted_decls_set.find(irepr) != m_emitted_decls_set.end();
+  }
 
   /// Test if a given decl has been written out to the XML output.
   ///
@@ -850,9 +807,8 @@ public:
       return;
 
     const string& path = corp->get_path();
-    ABG_ASSERT(!path.empty());
-
-    m_emitted_corpora_set.insert(path);
+    if (!path.empty())
+      m_emitted_corpora_set.insert(path);
   }
 
   /// Get the set of types that have been emitted.
@@ -901,11 +857,18 @@ static void write_voffset(function_decl_sptr, ostream&);
 static void write_elf_symbol_type(elf_symbol::type, ostream&);
 static void write_elf_symbol_binding(elf_symbol::binding, ostream&);
 static bool write_elf_symbol_aliases(const elf_symbol&, ostream&);
-static bool write_elf_symbol_reference(const elf_symbol&, ostream&);
-static bool write_elf_symbol_reference(const elf_symbol_sptr, ostream&);
+static bool write_elf_symbol_reference(write_context&,
+				       const elf_symbol&,
+				       const corpus& abi,
+				       ostream&);
+static bool write_elf_symbol_reference(write_context&,
+				       const elf_symbol_sptr,
+				       const corpus& abi,
+				       ostream&);
 static void write_is_declaration_only(const decl_base_sptr&, ostream&);
 static void write_is_struct(const class_decl_sptr&, ostream&);
 static void write_is_anonymous(const decl_base_sptr&, ostream&);
+static void write_type_hash_and_cti(const type_base_sptr&, ostream&);
 static void write_naming_typedef(const decl_base_sptr&, write_context&);
 static bool write_decl(const decl_base_sptr&, write_context&, unsigned);
 static void write_decl_in_scope(const decl_base_sptr&,
@@ -919,6 +882,8 @@ static bool write_pointer_type_def(const pointer_type_def_sptr&,
 				   write_context&, unsigned);
 static bool write_reference_type_def(const reference_type_def_sptr&,
 				     write_context&, unsigned);
+static bool write_ptr_to_mbr_type(const ptr_to_mbr_type_sptr&,
+				  write_context&, unsigned);
 static bool write_array_type_def(const array_type_def_sptr&,
 			         write_context&, unsigned);
 static bool write_array_subrange_type(const array_type_def::subrange_sptr&,
@@ -951,6 +916,9 @@ static bool write_union_decl_opening_tag(const union_decl_sptr&, const string&,
 static bool write_union_decl(const union_decl_sptr&, const string&,
 			     write_context&, unsigned);
 static bool write_union_decl(const union_decl_sptr&, write_context&, unsigned);
+static void write_common_type_info(const type_base_sptr&, write_context&,
+				   const string& id="");
+static bool write_type(const type_base_sptr&, write_context&, unsigned);
 static bool write_type_tparameter
 (const shared_ptr<type_tparameter>, write_context&, unsigned);
 static bool write_non_type_tparameter
@@ -1145,22 +1113,10 @@ annotate(const function_type_sptr&	function_type,
   ostream& o = ctxt.get_ostream();
 
   do_indent(o, indent);
+
   o << "<!-- "
-    << xml::escape_xml_comment(get_type_name(function_type->get_return_type()))
-    << " (";
-
-  vector<shared_ptr<function_decl::parameter> >::const_iterator pi =
-    function_type->get_first_non_implicit_parm();
-
-  for (; pi != function_type->get_parameters().end(); ++pi)
-    {
-      o << xml::escape_xml_comment((*pi)->get_type_name());
-      // emit a comma after a param type, unless it's the last one
-      if (distance(pi, function_type->get_parameters().end()) > 1)
-	o << ", ";
-    }
-  o << ") -->\n";
-
+    << xml::escape_xml_comment(get_function_type_name(function_type))
+    << " -->\n";
   return true;
 }
 
@@ -1509,7 +1465,7 @@ write_size_and_alignment(const shared_ptr<type_base> decl, ostream& o,
 static void
 write_array_size_and_alignment(const shared_ptr<array_type_def> decl, ostream& o)
 {
-  if (decl->is_infinite())
+  if (decl->is_non_finite())
     o << " size-in-bits='" << "unknown" << "'";
   else {
     size_t size_in_bits = decl->get_size_in_bits();
@@ -1764,14 +1720,36 @@ write_elf_symbol_aliases(const elf_symbol& sym, ostream& out)
 /// Write an XML attribute for the reference to a symbol for the
 /// current decl.
 ///
+///
+/// @param ctxt the current write context to consider.
+///
 /// @param sym the symbol to consider.
+///
+/// @param abi the ABI corpus the symbol @p sym is supposed to belong
+/// to.  If the symbol doesn't belong to that corpus, then the
+/// reference is not be emitted.
 ///
 /// @param o the output stream to write the attribute to.
 ///
 /// @return true upon successful completion.
 static bool
-write_elf_symbol_reference(const elf_symbol& sym, ostream& o)
+write_elf_symbol_reference(write_context& ctxt,
+			   const elf_symbol& sym,
+			   const corpus& abi,
+			   ostream& o)
 {
+  elf_symbol_sptr s = abi.lookup_function_symbol(sym);
+  if (!s)
+    s = abi.lookup_variable_symbol(sym);
+
+  if (// If that symbol wasn't found in the current corpus ...
+      !s
+      // ... or we were NOT asked to represent undefined symbols and
+      // yet that symbol is undefined ...
+      || (!ctxt.get_write_undefined_symbols() && !s->is_defined()))
+    // Then do not emit this symbol reference.
+    return false;
+
   const elf_symbol* main = sym.get_main_symbol().get();
   const elf_symbol* alias = &sym;
   bool found = !alias->is_suppressed();
@@ -1802,18 +1780,27 @@ write_elf_symbol_reference(const elf_symbol& sym, ostream& o)
 /// Write an XML attribute for the reference to a symbol for the
 /// current decl.
 ///
+/// @param ctxt the write context to consider.
+/// 
 /// @param sym the symbol to consider.
+///
+/// @param abi the ABI corpus the symbol @p sym is supposed to belong
+/// to.  If the symbol doesn't belong to that corpus, then the
+/// reference is not be emitted.
 ///
 /// @param o the output stream to write the attribute to.
 ///
 /// @return true upon successful completion.
 static bool
-write_elf_symbol_reference(const elf_symbol_sptr sym, ostream& o)
+write_elf_symbol_reference(write_context& ctxt,
+			   const elf_symbol_sptr sym,
+			   const corpus& abi,
+			   ostream& o)
 {
   if (!sym)
     return false;
 
-  return write_elf_symbol_reference(*sym, o);
+  return write_elf_symbol_reference(ctxt, *sym, abi, o);
 }
 
 /// Serialize the attributes "constructor", "destructor" or "static"
@@ -1885,6 +1872,26 @@ write_is_anonymous(const decl_base_sptr& decl, ostream& o)
     o << " is-anonymous='yes'";
 }
 
+/// Emit the hash value and the canonical type index of a given type.
+///
+/// @param t the type to consider.
+///
+/// @param o the output stream to emit the hash to.
+static void
+write_type_hash_and_cti(const type_base_sptr& t, ostream& o)
+{
+  hash_t hash = t->hash_value();
+  if (hash)
+    {
+      string h;
+      ABG_ASSERT(hashing::serialize_hash(*hash, h));
+      o << " hash='" << h;
+      if (t->priv_->canonical_type_index)
+	o << "#" << t->priv_->canonical_type_index;
+      o << "'";
+    }
+}
+
 /// Serialize the "naming-typedef-id" attribute, if the current
 /// instance of @ref class_decl has a naming typedef.
 ///
@@ -1905,6 +1912,47 @@ write_naming_typedef(const decl_base_sptr& decl, write_context& ctxt)
       o << " naming-typedef-id='" << id << "'";
       ctxt.record_type_as_referenced(typedef_type);
     }
+}
+
+/// Emit several XML properties related to type IR nodes.
+///
+/// @param t the type IR node to emit the XML properties for.
+///
+/// @param ctxt the write context to use.
+///
+/// @param id the type-ID to use in the XML properties emitted.
+static void
+write_common_type_info(const type_base_sptr& t,
+		       write_context& ctxt,
+		       const string& id)
+{
+  decl_base_sptr d = is_decl(t);
+
+  ostream& o = ctxt.get_ostream();
+
+  if (!d || (d && !d->get_is_declaration_only()))
+    {
+      if (!is_qualified_type(t) && !is_array_type(t))
+	write_size_and_alignment(t, o);
+      else if (array_type_def_sptr a = is_array_type(t))
+	write_array_size_and_alignment(a, o);
+    }
+
+  if (d)
+    {
+      write_is_anonymous(d, o);
+      write_is_declaration_only(d, o);
+      write_location(d, ctxt);
+    }
+
+  write_type_hash_and_cti(t, o);
+
+  string i = id;
+  if (i.empty())
+    i = ctxt.get_id_for_type(t);
+  o << " id='" << i << "'";
+
+  ctxt.record_type_as_emitted(t);
 }
 
 /// Helper to serialize a type artifact.
@@ -1928,6 +1976,9 @@ write_type(const type_base_sptr& type, write_context& ctxt, unsigned indent)
 				ctxt, indent)
       || write_reference_type_def(dynamic_pointer_cast
 				  <reference_type_def>(type), ctxt, indent)
+      || write_ptr_to_mbr_type(dynamic_pointer_cast
+			       <ptr_to_mbr_type>(type),
+			       ctxt, indent)
       || write_array_type_def(dynamic_pointer_cast
 			      <array_type_def>(type), ctxt, indent)
       || write_enum_type_decl(dynamic_pointer_cast<enum_type_decl>(type),
@@ -1970,6 +2021,9 @@ write_decl(const decl_base_sptr& decl, write_context& ctxt, unsigned indent)
 				ctxt, indent)
       || write_reference_type_def(dynamic_pointer_cast
 				  <reference_type_def>(decl), ctxt, indent)
+      || write_ptr_to_mbr_type(dynamic_pointer_cast
+			       <ptr_to_mbr_type>(decl),
+			       ctxt, indent)
       || write_array_type_def(dynamic_pointer_cast
 			      <array_type_def>(decl), ctxt, indent)
       || write_array_subrange_type(dynamic_pointer_cast
@@ -2014,9 +2068,8 @@ write_decl_in_scope(const decl_base_sptr&	decl,
 		    unsigned			initial_indent)
 {
   type_base_sptr type = is_type(decl);
-  ABG_ASSERT(type);
-
-  if (ctxt.type_is_emitted(type))
+  if ((type && ctxt.type_is_emitted(type))
+      || (!type && ctxt.decl_is_emitted(decl)))
     return;
 
   list<scope_decl*> scopes;
@@ -2051,30 +2104,71 @@ write_decl_in_scope(const decl_base_sptr&	decl,
 	{
 	  c = is_class_type(look_through_decl_only_class(c));
 	  class_decl_sptr class_type(c, noop_deleter());
-	  write_class_decl_opening_tag(class_type, "", ctxt, indent,
-				       /*prepare_to_handle_empty=*/false);
-	  closing_tags.push("</class-decl>");
-	  closing_indents.push(indent);
+	  bool do_break = false;
+	  if (!ctxt.type_is_emitted(c))
+	    {
+	      write_type(class_type, ctxt, initial_indent);
+	      // So, we've written class_type, which is a scope of
+	      // 'decl'.  So normally, decl should have been emitted
+	      // by the emitting of class_type.
+	      //
+	      // But there can be times where 'decl' is not emitted.
+	      //
+	      // 'decl' can still be not emitted if the canonical type
+	      // of class_type (the one that is emitted) is not the
+	      // variant that contains the member type 'decl'.  In
+	      // that case, 'decl' still needs to be emitted after
+	      // emitting tags for its scope.  That is done by the
+	      // 'if' block below.
+	      do_break = true;
+	    }
 
-	  unsigned nb_ws = get_indent_to_level(ctxt, indent, 1);
-	  write_member_type_opening_tag(type, ctxt, nb_ws);
-	  indent = nb_ws;
-	  closing_tags.push("</member-type>");
-	  closing_indents.push(nb_ws);
+	  if (!do_break
+	      // if decl/type is still not emitted, then it means the
+	      // canonical type for 'class_type' above was emitted but
+	      // wasn't the variant containing the member type
+	      // 'decl/type'.  In that case, we'll need to emit the
+	      // tags for the scope of decl and then emit decl.
+	      || (type && !ctxt.type_is_emitted(type))
+	      || (!type && !ctxt.decl_is_emitted(decl)))
+	    {
+	      write_class_decl_opening_tag(class_type, "", ctxt, indent,
+					   /*prepare_to_handle_empty=*/false);
+	      closing_tags.push("</class-decl>");
+	      closing_indents.push(indent);
+
+	      unsigned nb_ws = get_indent_to_level(ctxt, indent, 1);
+	      write_member_type_opening_tag(type, ctxt, nb_ws);
+	      indent = nb_ws;
+	      closing_tags.push("</member-type>");
+	      closing_indents.push(nb_ws);
+	    }
+
+	  if (do_break)
+	    break;
 	}
       else if (union_decl *u = is_union_type(*i))
 	{
+	  u = is_union_type(look_through_decl_only(u));
 	  union_decl_sptr union_type(u, noop_deleter());
-	  write_union_decl_opening_tag(union_type, "", ctxt, indent,
-				       /*prepare_to_handle_empty=*/false);
-	  closing_tags.push("</union-decl>");
-	  closing_indents.push(indent);
+	  if (!ctxt.type_is_emitted(u))
+	    {
+	      write_type(union_type, ctxt, initial_indent);
+	      break;
+	    }
+	  else
+	    {
+	      write_union_decl_opening_tag(union_type, "", ctxt, indent,
+					   /*prepare_to_handle_empty=*/false);
+	      closing_tags.push("</union-decl>");
+	      closing_indents.push(indent);
 
-	  unsigned nb_ws = get_indent_to_level(ctxt, indent, 1);
-	  write_member_type_opening_tag(type, ctxt, nb_ws);
-	  indent = nb_ws;
-	  closing_tags.push("</member-type>");
-	  closing_indents.push(nb_ws);
+	      unsigned nb_ws = get_indent_to_level(ctxt, indent, 1);
+	      write_member_type_opening_tag(type, ctxt, nb_ws);
+	      indent = nb_ws;
+	      closing_tags.push("</member-type>");
+	      closing_indents.push(nb_ws);
+	    }
 	}
       else
 	// We should never reach this point.
@@ -2082,7 +2176,20 @@ write_decl_in_scope(const decl_base_sptr&	decl,
       indent += c.get_xml_element_indent();
     }
 
-  write_decl(decl, ctxt, indent);
+  bool do_write = false;
+  if (type_base_sptr type = is_type(decl))
+    {
+      if (!ctxt.type_is_emitted(type))
+	do_write= true;
+    }
+  else
+    {
+      if (!ctxt.decl_is_emitted(decl))
+	do_write= true;
+    }
+
+  if (do_write)
+    write_decl(decl, ctxt, indent);
 
   while (!closing_tags.empty())
     {
@@ -2217,6 +2324,18 @@ void
 set_write_elf_needed(write_context& ctxt, bool flag)
 {ctxt.set_write_elf_needed(flag);}
 
+/// Set the 'undefined-symbols' flag.
+///
+/// When this flag is set then the XML writer will emit corpus
+/// information about the undefined function and variable symbols.
+///
+/// @param ctxt the context to set this flag on to.
+///
+/// @param flag the new value of the 'undefined-symbols' flag.
+void
+set_write_undefined_symbols(write_context& ctxt, bool flag)
+{ctxt.set_write_undefined_symbols(flag);}
+
 /// Set the 'default-sizes' flag.
 ///
 /// When this flag is set then the XML writer will emit default
@@ -2268,6 +2387,8 @@ write_canonical_types_of_scope(const scope_decl	&scope,
        i != canonical_types.end();
        ++i)
     {
+      if (ctxt.type_is_emitted(*i))
+	continue;
       if (is_member_type)
 	write_member_type(*i, ctxt, indent);
       else
@@ -2502,12 +2623,42 @@ write_translation_unit(write_context&		ctxt,
 	  if (is_non_canonicalized_type(t) && !ctxt.type_is_emitted(t))
 	    write_type(t, ctxt, indent + c.get_xml_element_indent());
 	}
+      else if (is_var_decl(decl))
+	{
+	  if (!ctxt.decl_is_emitted(decl))
+	    write_decl_in_scope(decl, ctxt, indent + c.get_xml_element_indent());
+	}
       else
 	{
 	  if (!ctxt.decl_is_emitted(decl))
 	    write_decl(decl, ctxt, indent + c.get_xml_element_indent());
 	}
     }
+
+  // Write the undefined functions that belong to this translation
+  // unit
+  if (const abigail::ir::corpus* abi = tu.get_corpus())
+    for (auto undefined_function : abi->get_sorted_undefined_functions())
+      {
+	function_decl_sptr f(const_cast<function_decl*>(undefined_function),
+			     noop_deleter());
+	if (f->get_translation_unit() != &tu || ctxt.decl_is_emitted(f))
+	  continue;
+
+	write_decl(f, ctxt, indent + c.get_xml_element_indent());
+      }
+
+  // Write the undefined variables that belong to this translation
+  // unit
+  if (const abigail::ir::corpus* abi = tu.get_corpus())
+    for (auto undefined_var : abi->get_sorted_undefined_variables())
+      {
+	var_decl_sptr v = undefined_var;
+	if (v->get_translation_unit() != &tu || ctxt.decl_is_emitted(v))
+	  continue;
+
+	write_decl(v, ctxt, indent + c.get_xml_element_indent());
+      }
 
   write_referenced_types(ctxt, tu, indent, is_last);
 
@@ -2569,17 +2720,9 @@ write_type_decl(const type_decl_sptr& d, write_context& ctxt, unsigned indent)
 
   o << "<type-decl name='" << xml::escape_xml_string(d->get_name()) << "'";
 
-  write_is_anonymous(d, o);
+  write_common_type_info(d, ctxt);
 
-  write_size_and_alignment(d, o);
-
-  write_is_declaration_only(d, o);
-
-  write_location(d, ctxt);
-
-  o << " id='" << ctxt.get_id_for_type(d) << "'" <<  "/>\n";
-
-  ctxt.record_type_as_emitted(d);
+  o << "/>\n";
 
   return true;
 }
@@ -2684,15 +2827,9 @@ write_qualified_type_def(const qualified_type_def_sptr&	decl,
   if (decl->get_cv_quals() & qualified_type_def::CV_RESTRICT)
     o << " restrict='yes'";
 
-  write_location(static_pointer_cast<decl_base>(decl), ctxt);
+  write_common_type_info(decl, ctxt, id);
 
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-
-  o << " id='" << i << "'/>\n";
-
-  ctxt.record_type_as_emitted(decl);
+  o << "/>\n";
 
   return true;
 }
@@ -2757,22 +2894,9 @@ write_pointer_type_def(const pointer_type_def_sptr&	decl,
 
   ctxt.record_type_as_referenced(pointed_to_type);
 
-  write_size_and_alignment(decl, o,
-			   (ctxt.get_write_default_sizes()
-			    ? 0
-			    : decl->get_translation_unit()->get_address_size()),
-			   0);
+  write_common_type_info(decl, ctxt, id);
 
-  i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-
-  o << " id='" << i << "'";
-
-  write_location(static_pointer_cast<decl_base>(decl), ctxt);
   o << "/>\n";
-
-  ctxt.record_type_as_emitted(decl);
 
   return true;
 }
@@ -2839,22 +2963,9 @@ write_reference_type_def(const reference_type_def_sptr&	decl,
   if (function_type_sptr f = is_function_type(decl->get_pointed_to_type()))
     ctxt.record_type_as_referenced(f);
 
-  write_size_and_alignment(decl, o,
-			   (ctxt.get_write_default_sizes()
-			    ? 0
-			    : decl->get_translation_unit()->get_address_size()),
-			   0);
-
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-  o << " id='" << i << "'";
-
-  write_location(static_pointer_cast<decl_base>(decl), ctxt);
+  write_common_type_info(decl, ctxt, id);
 
   o << "/>\n";
-
-  ctxt.record_type_as_emitted(decl);
 
   return true;
 }
@@ -2873,6 +2984,65 @@ write_reference_type_def(const reference_type_def_sptr&	decl,
 			 write_context&			ctxt,
 			 unsigned				indent)
 {return write_reference_type_def(decl, "", ctxt, indent);}
+
+/// Serialize a pointer to an instance of @ref ptr_to_mbr_type.
+///
+/// @param decl a pointer to the @ref ptr_to_mbr_type to serialize.
+///
+/// @param id the ID of the type.  If it's an empty string then a new
+/// ID is generated.
+///
+/// @param ctxt the context of the serialization.
+///
+/// @param indent the number of indentation white spaces to use.
+///
+/// @return true upon succesful completion, false otherwise.
+static bool
+write_ptr_to_mbr_type(const ptr_to_mbr_type_sptr& decl,
+		      const string& id, write_context& ctxt,
+		      unsigned indent)
+{
+  if (!decl)
+    return false;
+
+  annotate(decl->get_canonical_type(), ctxt, indent);
+
+  ostream& o = ctxt.get_ostream();
+
+  do_indent(o, indent);
+
+  o << "<pointer-to-member-type";
+
+  type_base_sptr member_type = decl->get_member_type();
+  string i = ctxt.get_id_for_type(member_type);
+  o << " member-type-id='" << i << "'";
+  ctxt.record_type_as_referenced(member_type);
+
+  type_base_sptr containing_type = decl->get_containing_type();
+  i = ctxt.get_id_for_type(containing_type);
+  o << " containing-type-id='" << i << "'";
+  ctxt.record_type_as_referenced(containing_type);
+
+  write_common_type_info(decl, ctxt, id);
+
+  o << "/>\n";
+
+  return true;
+}
+
+/// Serialize a pointer to an instance of @ref ptr_to_mbr_type.
+///
+/// @param decl a pointer to the @ref ptr_to_mbr_type to serialize.
+///
+/// @param ctxt the context of the serialization.
+///
+/// @param indent the number of indentation white spaces to use.
+///
+/// @return true upon succesful completion, false otherwise.
+static bool
+write_ptr_to_mbr_type(const ptr_to_mbr_type_sptr& decl,
+		      write_context& ctxt, unsigned indent)
+{return write_ptr_to_mbr_type(decl, "", ctxt, indent);}
 
 /// Serialize an instance of @ref array_type_def::subrange_type.
 ///
@@ -2903,14 +3073,14 @@ write_array_subrange_type(const array_type_def::subrange_sptr&	decl,
     o << " name='" << decl->get_name() << "'";
 
   o << " length='";
-  if (decl->is_infinite())
+  if (decl->is_non_finite())
     o << "unknown";
   else
     o << decl->get_length();
 
   o << "'";
 
-  ABG_ASSERT(decl->is_infinite()
+  ABG_ASSERT(decl->is_non_finite()
 	     || decl->get_length() == 0
 	     || (decl->get_length() ==
 		 (uint64_t) (decl->get_upper_bound()
@@ -2927,13 +3097,9 @@ write_array_subrange_type(const array_type_def::subrange_sptr&	decl,
       ctxt.record_type_as_referenced(underlying_type);
     }
 
-  o << " id='" << ctxt.get_id_for_type(decl) << "'";
-
-  write_location(decl->get_location(), ctxt);
+  write_common_type_info(decl, ctxt);
 
   o << "/>\n";
-
-  ctxt.record_type_as_emitted(decl);
 
   return true;
 }
@@ -2978,14 +3144,7 @@ write_array_type_def(const array_type_def_sptr&	decl,
 
   ctxt.record_type_as_referenced(element_type);
 
-  write_array_size_and_alignment(decl, o);
-
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-  o << " id='" << i << "'";
-
-  write_location(static_pointer_cast<decl_base>(decl), ctxt);
+  write_common_type_info(decl, ctxt, id);
 
   if (!decl->get_dimension_count())
     o << "/>\n";
@@ -3006,8 +3165,6 @@ write_array_type_def(const array_type_def_sptr&	decl,
       do_indent(o, indent);
       o << "</array-type-def>\n";
     }
-
-  ctxt.record_type_as_emitted(decl);
 
   return true;
 }
@@ -3062,7 +3219,6 @@ write_enum_type_decl(const enum_type_decl_sptr& d,
   do_indent(o, indent);
   o << "<enum-decl name='" << xml::escape_xml_string(decl->get_name()) << "'";
 
-  write_is_anonymous(decl, o);
   write_naming_typedef(decl, ctxt);
   write_is_artificial(decl, o);
   write_is_non_reachable(is_type(decl), o);
@@ -3072,13 +3228,9 @@ write_enum_type_decl(const enum_type_decl_sptr& d,
       << xml::escape_xml_string(decl->get_linkage_name())
       << "'";
 
-  write_location(decl, ctxt);
-  write_is_declaration_only(decl, o);
+  write_common_type_info(decl, ctxt, id);
 
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-  o << " id='" << i << "'>\n";
+  o << ">\n";
 
   do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
   o << "<underlying-type type-id='"
@@ -3100,8 +3252,6 @@ write_enum_type_decl(const enum_type_decl_sptr& d,
 
   do_indent(o, indent);
   o << "</enum-decl>\n";
-
-  ctxt.record_type_as_emitted(decl);
 
   return true;
 }
@@ -3284,15 +3434,9 @@ write_typedef_decl(const typedef_decl_sptr&	decl,
   o << " type-id='" <<  type_id << "'";
   ctxt.record_type_as_referenced(underlying_type);
 
-  write_location(decl, ctxt);
+  write_common_type_info(decl, ctxt, id);
 
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-
-  o << " id='" << i << "'/>\n";
-
-  ctxt.record_type_as_emitted(decl);
+  o << "/>\n";
 
   return true;
 }
@@ -3355,13 +3499,85 @@ write_var_decl(const var_decl_sptr& decl, write_context& ctxt,
 
   write_location(decl, ctxt);
 
-  write_elf_symbol_reference(decl->get_symbol(), o);
+  if (elf_symbol_sptr sym = decl->get_symbol())
+    if (corpus* abi = decl->get_corpus())
+      write_elf_symbol_reference(ctxt, decl->get_symbol(), *abi, o);
 
   o << "/>\n";
 
   ctxt.record_decl_as_emitted(decl);
 
   return true;
+}
+
+/// Write the parameters and return part of the ABIXML description of
+/// a function_type.
+///
+/// @param fun_type the function type to consider.
+///
+/// @param skip_first_parm if true, the function skips the first
+/// parameter of the function type.  This is useful for emitting
+/// parameters of method_type IR nodes.
+///
+/// @param ctxt the write context to use.
+///
+/// @param indent the number of indentation spaces to use.
+static void
+write_fn_parm_and_return_types(const function_type_sptr& fun_type,
+			       bool skip_first_parm,
+			       write_context& ctxt,
+			       unsigned indent)
+{
+  function_type_sptr t =
+    fun_type->get_canonical_type()
+    ? is_function_type(fun_type->get_canonical_type())
+    : fun_type;
+
+  unsigned cur_indent =
+    indent + ctxt.get_config().get_xml_element_indent();
+
+  ostream &o = ctxt.get_ostream();
+
+  type_base_sptr parm_type;
+  auto pi = t->get_parameters().begin();
+  for ((skip_first_parm && pi != t->get_parameters().end()) ? ++pi: pi;
+       pi != t->get_parameters().end();
+       ++pi)
+    {
+      if ((*pi)->get_variadic_marker())
+        {
+          do_indent(o, cur_indent);
+          o << "<parameter is-variadic='yes'";
+        }
+      else
+	{
+	  parm_type = (*pi)->get_type();
+
+          annotate(*pi, ctxt, cur_indent);
+          do_indent(o, cur_indent);
+
+	  o << "<parameter type-id='"
+	    << ctxt.get_id_for_type(parm_type)
+	    << "'";
+	  ctxt.record_type_as_referenced(parm_type);
+
+	  if (ctxt.get_write_parameter_names() && !(*pi)->get_name().empty())
+	    o << " name='" << xml::escape_xml_string((*pi)->get_name()) << "'";
+	}
+      write_is_artificial(*pi, o);
+      write_location((*pi)->get_location(), ctxt);
+      o << "/>\n";
+    }
+
+  if (shared_ptr<type_base> return_type = t->get_return_type())
+    {
+      annotate(return_type , ctxt, cur_indent);
+      do_indent(o, cur_indent);
+      o << "<return type-id='"
+	<< ctxt.get_id_for_type(return_type)
+	<< "'/>\n";
+      ctxt.record_type_as_referenced(return_type);
+    }
 }
 
 /// Serialize a pointer to a function_decl.
@@ -3411,52 +3627,17 @@ write_function_decl(const function_decl_sptr& decl, write_context& ctxt,
 			    ? 0
 			    : decl->get_translation_unit()->get_address_size()),
 			   0);
-  write_elf_symbol_reference(decl->get_symbol(), o);
+  if (elf_symbol_sptr sym = decl->get_symbol())
+    if (corpus* abi = decl->get_corpus())
+      write_elf_symbol_reference(ctxt, decl->get_symbol(), *abi, o);
+
+  write_type_hash_and_cti(decl->get_type(), o);
 
   o << ">\n";
 
-  type_base_sptr parm_type;
-  vector<shared_ptr<function_decl::parameter> >::const_iterator pi =
-    decl->get_parameters().begin();
-  for ((skip_first_parm && pi != decl->get_parameters().end()) ? ++pi: pi;
-       pi != decl->get_parameters().end();
-       ++pi)
-    {
-      if ((*pi)->get_variadic_marker())
-        {
-          do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
-          o << "<parameter is-variadic='yes'";
-        }
-      else
-	{
-	  parm_type = (*pi)->get_type();
-
-          annotate(*pi, ctxt,
-		   indent + ctxt.get_config().get_xml_element_indent());
-
-          do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
-
-	  o << "<parameter type-id='"
-	    << ctxt.get_id_for_type(parm_type)
-	    << "'";
-	  ctxt.record_type_as_referenced(parm_type);
-
-	  if (ctxt.get_write_parameter_names() && !(*pi)->get_name().empty())
-	    o << " name='" << xml::escape_xml_string((*pi)->get_name()) << "'";
-	}
-      write_is_artificial(*pi, o);
-      write_location((*pi)->get_location(), ctxt);
-      o << "/>\n";
-    }
-
-  if (shared_ptr<type_base> return_type = decl->get_return_type())
-    {
-      annotate(return_type , ctxt,
-	       indent + ctxt.get_config().get_xml_element_indent());
-      do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
-      o << "<return type-id='" << ctxt.get_id_for_type(return_type) << "'/>\n";
-      ctxt.record_type_as_referenced(return_type);
-    }
+  write_fn_parm_and_return_types(decl->get_type(),
+				 skip_first_parm,
+				 ctxt, indent);
 
   do_indent(o, indent);
   o << "</function-decl>\n";
@@ -3468,7 +3649,7 @@ write_function_decl(const function_decl_sptr& decl, write_context& ctxt,
 
 /// Serialize a function_type.
 ///
-/// @param decl the pointer to function_type to serialize.
+/// @param fun_type the pointer to function_type to serialize.
 ///
 /// @param ctxt the context of the serialization.
 ///
@@ -3476,11 +3657,19 @@ write_function_decl(const function_decl_sptr& decl, write_context& ctxt,
 ///
 /// @return true upon succesful completion, false otherwise.
 static bool
-write_function_type(const function_type_sptr& fn_type,
+write_function_type(const function_type_sptr& fun_type,
 		    write_context& ctxt, unsigned indent)
 {
-  if (!fn_type)
+  if (!fun_type)
     return false;
+
+  ABG_ASSERT(fun_type->get_canonical_type()
+	     || is_non_canonicalized_type(fun_type));
+
+  function_type_sptr fn_type =
+    fun_type->get_canonical_type()
+    ? is_function_type(fun_type->get_canonical_type())
+    : fun_type;
 
   ostream &o = ctxt.get_ostream();
 
@@ -3490,11 +3679,6 @@ write_function_type(const function_type_sptr& fn_type,
 
   o << "<function-type";
 
-  write_size_and_alignment(fn_type, o,
-			   (ctxt.get_write_default_sizes()
-			    ? 0
-			    : fn_type->get_translation_unit()->get_address_size()),
-			   0);
 
   if (method_type_sptr method_type = is_method_type(fn_type))
     {
@@ -3507,58 +3691,17 @@ write_function_type(const function_type_sptr& fn_type,
 			       /*is_static=*/false, o);
     }
 
-  interned_string id = ctxt.get_id_for_type(fn_type);
+  write_common_type_info(fn_type, ctxt);
 
-  o << " id='"
-    <<  id << "'"
-    << ">\n";
+  o << ">\n";
 
-  type_base_sptr parm_type;
-  for (vector<function_decl::parameter_sptr>::const_iterator pi =
-	 fn_type->get_parameters().begin();
-       pi != fn_type->get_parameters().end();
-       ++pi)
-    {
-
-      if ((*pi)->get_variadic_marker())
-        {
-          do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
-          o << "<parameter is-variadic='yes'";
-        }
-      else
-	{
-	  parm_type = (*pi)->get_type();
-
-          annotate(*pi, ctxt, indent + ctxt.get_config().get_xml_element_indent());
-
-          do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
-	  o << "<parameter type-id='"
-	    << ctxt.get_id_for_type(parm_type)
-	    << "'";
-	  ctxt.record_type_as_referenced(parm_type);
-
-	  if (!(*pi)->get_name().empty())
-	    {
-	      string name = xml::escape_xml_string((*pi)->get_name());
-	      o << " name='" << name << "'";
-	    }
-	}
-      write_is_artificial(*pi, o);
-      o << "/>\n";
-    }
-
-  if (type_base_sptr return_type = fn_type->get_return_type())
-    {
-      annotate(return_type, ctxt, indent + ctxt.get_config().get_xml_element_indent());
-      do_indent(o, indent + ctxt.get_config().get_xml_element_indent());
-      o << "<return type-id='" << ctxt.get_id_for_type(return_type) << "'/>\n";
-      ctxt.record_type_as_referenced(return_type);
-    }
+  write_fn_parm_and_return_types(fn_type, /*skip_first_parm=*/false,
+				 ctxt, indent);
 
   do_indent(o, indent);
+
   o << "</function-type>\n";
 
-  ctxt.record_type_as_emitted(fn_type);
   return true;
 }
 
@@ -3595,11 +3738,7 @@ write_class_decl_opening_tag(const class_decl_sptr&	decl,
 
   o << "<class-decl name='" << xml::escape_xml_string(decl->get_name()) << "'";
 
-  write_size_and_alignment(decl, o);
-
   write_is_struct(decl, o);
-
-  write_is_anonymous(decl, o);
 
   write_is_artificial(decl, o);
 
@@ -3609,10 +3748,6 @@ write_class_decl_opening_tag(const class_decl_sptr&	decl,
 
   write_visibility(decl, o);
 
-  write_location(decl, ctxt);
-
-  write_is_declaration_only(decl, o);
-
   if (decl->get_earlier_declaration())
     {
       // This instance is the definition of an earlier declaration.
@@ -3621,10 +3756,7 @@ write_class_decl_opening_tag(const class_decl_sptr&	decl,
 	<< "'";
     }
 
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-  o << " id='" << i << "'";
+  write_common_type_info(decl, ctxt, id);
 
   if (prepare_to_handle_empty && decl->has_no_base_nor_member())
     o << "/>\n";
@@ -3667,11 +3799,6 @@ write_union_decl_opening_tag(const union_decl_sptr&	decl,
 
   o << "<union-decl name='" << xml::escape_xml_string(decl->get_name()) << "'";
 
-  if (!decl->get_is_declaration_only())
-    write_size_and_alignment(decl, o);
-
-  write_is_anonymous(decl, o);
-
   write_naming_typedef(decl, ctxt);
 
   write_visibility(decl, o);
@@ -3680,14 +3807,7 @@ write_union_decl_opening_tag(const union_decl_sptr&	decl,
 
   write_is_non_reachable(is_type(decl), o);
 
-  write_location(decl, ctxt);
-
-  write_is_declaration_only(decl, o);
-
-  string i = id;
-  if (i.empty())
-    i = ctxt.get_id_for_type(decl);
-  o << " id='" << i << "'";
+  write_common_type_info(decl, ctxt, id);
 
   if (prepare_to_handle_empty && decl->has_no_member())
     o << "/>\n";
@@ -3834,25 +3954,47 @@ write_class_decl(const class_decl_sptr& d,
 	if (!(*ti)->get_naked_canonical_type())
 	  write_member_type(*ti, ctxt, nb_ws);
 
-      for (class_decl::data_members::const_iterator data =
-	     decl->get_data_members().begin();
-	   data != decl->get_data_members().end();
-	   ++data)
+      // Write static data members
+      for (const auto& s_dm : decl->get_static_data_members())
 	{
 	  do_indent(o, nb_ws);
 	  o << "<data-member";
-	  write_access(get_member_access_specifier(*data), o);
+	  write_access(get_member_access_specifier(s_dm), o);
 
-	  bool is_static = get_member_is_static(*data);
+	  bool is_static = get_member_is_static(s_dm);
+	  ABG_ASSERT(is_static);
 	  write_cdtor_const_static(/*is_ctor=*/false,
 				   /*is_dtor=*/false,
 				   /*is_const=*/false,
 				   /*is_static=*/is_static,
 				   o);
-	  write_layout_offset(*data, o);
+	  write_layout_offset(s_dm, o);
 	  o << ">\n";
 
-	  write_var_decl(*data, ctxt, is_static,
+	  write_var_decl(s_dm, ctxt, is_static,
+			 get_indent_to_level(ctxt, indent, 2));
+
+	  do_indent_to_level(ctxt, indent, 1);
+	  o << "</data-member>\n";
+	}
+
+      // Write non-static data members
+      for (const auto& dm : decl->get_non_static_data_members())
+	{
+	  do_indent(o, nb_ws);
+	  o << "<data-member";
+	  write_access(get_member_access_specifier(dm), o);
+
+	  bool is_static = get_member_is_static(dm);
+	  write_cdtor_const_static(/*is_ctor=*/false,
+				   /*is_dtor=*/false,
+				   /*is_const=*/false,
+				   /*is_static=*/is_static,
+				   o);
+	  write_layout_offset(dm, o);
+	  o << ">\n";
+
+	  write_var_decl(dm, ctxt, is_static,
 			 get_indent_to_level(ctxt, indent, 2));
 
 	  do_indent_to_level(ctxt, indent, 1);
@@ -4114,8 +4256,6 @@ write_union_decl(const union_decl_sptr& d,
       o << "</union-decl>\n";
     }
 
-  ctxt.record_type_as_emitted(decl);
-
   return true;
 }
 
@@ -4179,21 +4319,23 @@ write_member_type(const type_base_sptr& t, write_context& ctxt, unsigned indent)
 
   unsigned nb_ws = get_indent_to_level(ctxt, indent, 1);
   ABG_ASSERT(write_qualified_type_def(dynamic_pointer_cast<qualified_type_def>(t),
-				  id, ctxt, nb_ws)
-	 || write_pointer_type_def(dynamic_pointer_cast<pointer_type_def>(t),
+				      id, ctxt, nb_ws)
+	     || write_pointer_type_def(dynamic_pointer_cast<pointer_type_def>(t),
 				   id, ctxt, nb_ws)
-	 || write_reference_type_def(dynamic_pointer_cast<reference_type_def>(t),
+	     || write_reference_type_def(dynamic_pointer_cast<reference_type_def>(t),
+					 id, ctxt, nb_ws)
+	     || write_ptr_to_mbr_type(dynamic_pointer_cast<ptr_to_mbr_type>(t),
+				      id, ctxt, nb_ws)
+	     || write_array_type_def(dynamic_pointer_cast<array_type_def>(t),
 				     id, ctxt, nb_ws)
-	 || write_array_type_def(dynamic_pointer_cast<array_type_def>(t),
-			         id, ctxt, nb_ws)
-	 || write_enum_type_decl(dynamic_pointer_cast<enum_type_decl>(t),
+	     || write_enum_type_decl(dynamic_pointer_cast<enum_type_decl>(t),
+				     id, ctxt, nb_ws)
+	     || write_typedef_decl(dynamic_pointer_cast<typedef_decl>(t),
+				   id, ctxt, nb_ws)
+	     || write_union_decl(dynamic_pointer_cast<union_decl>(t),
 				 id, ctxt, nb_ws)
-	 || write_typedef_decl(dynamic_pointer_cast<typedef_decl>(t),
-			       id, ctxt, nb_ws)
-	 || write_union_decl(dynamic_pointer_cast<union_decl>(t),
-			     id, ctxt, nb_ws)
-	 || write_class_decl(dynamic_pointer_cast<class_decl>(t),
-			     id, ctxt, nb_ws));
+	     || write_class_decl(dynamic_pointer_cast<class_decl>(t),
+				 id, ctxt, nb_ws));
 
   do_indent_to_level(ctxt, indent, 0);
   o << "</member-type>\n";
@@ -4614,6 +4756,35 @@ write_corpus(write_context&	ctxt,
 
       do_indent_to_level(ctxt, indent, 1);
       out << "</elf-variable-symbols>\n";
+    }
+
+  // Write the undefined function symbols database.
+  if (ctxt.get_write_undefined_symbols()
+      && !corpus->get_sorted_undefined_fun_symbols().empty())
+    {
+      do_indent_to_level(ctxt, indent, 1);
+      out << "<undefined-elf-function-symbols>\n";
+
+      write_elf_symbols_table(corpus->get_sorted_undefined_fun_symbols(), ctxt,
+			      get_indent_to_level(ctxt, indent, 2));
+
+      do_indent_to_level(ctxt, indent, 1);
+      out << "</undefined-elf-function-symbols>\n";
+    }
+
+
+  // Write the undefined variable symbols database.
+    if (ctxt.get_write_undefined_symbols()
+	&& !corpus->get_sorted_undefined_var_symbols().empty())
+    {
+      do_indent_to_level(ctxt, indent, 1);
+      out << "<undefined-elf-variable-symbols>\n";
+
+      write_elf_symbols_table(corpus->get_sorted_undefined_var_symbols(), ctxt,
+			      get_indent_to_level(ctxt, indent, 2));
+
+      do_indent_to_level(ctxt, indent, 1);
+      out << "</undefined-elf-variable-symbols>\n";
     }
 
   // Now write the translation units.

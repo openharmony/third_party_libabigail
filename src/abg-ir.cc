@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception -*- mode:
 // C++ -*-
-//
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// -*- Mode: C++ -*-
+
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 //Author: Dodji Seketeli
 
@@ -10,7 +11,6 @@
 /// Definitions for the Internal Representation artifacts of libabigail.
 
 #include <cxxabi.h>
-#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <iterator>
@@ -34,7 +34,6 @@ ABG_END_EXPORT_DECLARATIONS
 // </headers defining libabigail's API>
 
 #include "abg-corpus-priv.h"
-#include "abg-tools-utils.h"
 #include "abg-comp-filter.h"
 #include "abg-ir-priv.h"
 
@@ -213,13 +212,82 @@ static interned_string
 get_generic_anonymous_internal_type_name(const decl_base *d);
 
 static string
-get_internal_integral_type_name(const type_base*);
+get_internal_real_type_name(const type_base*);
 
 static void
 update_qualified_name(decl_base * d);
 
 static void
 update_qualified_name(decl_base_sptr d);
+
+static interned_string
+pointer_declaration_name(const type_base* ptr,
+			 const string& variable_name,
+			 bool qualified, bool internal);
+
+static interned_string
+pointer_declaration_name(const type_base_sptr& ptr,
+			 const string& variable_name,
+			 bool qualified, bool internal);
+
+static interned_string
+ptr_to_mbr_declaration_name(const ptr_to_mbr_type* ptr,
+			    const string& variable_name,
+			    bool qualified, bool internal);
+
+static interned_string
+ptr_to_mbr_declaration_name(const ptr_to_mbr_type_sptr& ptr,
+			    const string& variable_name,
+			    bool qualified, bool internal);
+
+static interned_string
+array_declaration_name(const array_type_def* array,
+		       const string& variable_name,
+		       bool qualified, bool internal);
+
+static interned_string
+array_declaration_name(const array_type_def_sptr& array,
+		       const string& variable_name,
+		       bool qualified, bool internal);
+
+static void
+stream_pretty_representation_of_fn_parms(const function_type& fn_type,
+					 ostream& o, bool qualified,
+					 bool internal);
+static string
+add_outer_pointer_to_fn_type_expr(const type_base* pointer_to_fn,
+				  const string& input, bool qualified,
+				  bool internal);
+
+static string
+add_outer_pointer_to_fn_type_expr(const type_base_sptr& pointer_to_fn,
+				  const string& input, bool qualified,
+				  bool internal);
+
+static string
+add_outer_pointer_to_array_type_expr(const type_base* pointer_to_ar,
+				     const string& input, bool qualified,
+				     bool internal);
+
+static string
+add_outer_pointer_to_array_type_expr(const type_base_sptr& pointer_to_ar,
+				     const string& input, bool qualified,
+				     bool internal);
+
+static string
+add_outer_ptr_to_mbr_type_expr(const ptr_to_mbr_type* p,
+			       const  string& input, bool qualified,
+			       bool internal);
+
+static string
+add_outer_ptr_to_mbr_type_expr(const ptr_to_mbr_type_sptr& p,
+			       const  string& input, bool qualified,
+			       bool internal);
+
+static string
+add_outer_pointer_to_ptr_to_mbr_type_expr(const type_base* p,
+					  const  string& input,
+					  bool qualified, bool internal);
 
 void
 push_composite_type_comparison_operands(const type_base& left,
@@ -229,8 +297,6 @@ void
 pop_composite_type_comparison_operands(const type_base& left,
 				       const type_base& right);
 
-bool
-mark_dependant_types_compared_until(const type_base &r);
 
 /// Push a pair of operands on the stack of operands of the current
 /// type comparison, during type canonicalization.
@@ -270,71 +336,64 @@ pop_composite_type_comparison_operands(const type_base& left,
   env.priv_->pop_composite_type_comparison_operands(&left, &right);
 }
 
-/// In the stack of the current types being compared (as part of type
-/// canonicalization), mark all the types that comes after a certain
-/// one as NOT being eligible to the canonical type propagation
-/// optimization.
+/// Getter of the canonical type index of a given type.
 ///
-/// For a starter, please read about the @ref
-/// OnTheFlyCanonicalization, aka, "canonical type propagation
-/// optimization".
+/// @param t the type to consider.
 ///
-/// To implement that optimization, we need, among other things to
-/// maintain stack of the types (and their sub-types) being
-/// currently compared as part of type canonicalization.
-///
-/// Note that we only consider the type that is the right-hand-side
-/// operand of the comparison because it's that one that is being
-/// canonicalized and thus, that is not yet canonicalized.
-///
-/// The reason why a type is deemed NON-eligible to the canonical
-/// type propagation optimization is that it "depends" on
-/// recursively present type.  Let me explain.
-///
-/// Suppose we have a type T that has sub-types named ST0 and ST1.
-/// Suppose ST1 itself has a sub-type that is T itself.  In this
-/// case, we say that T is a recursive type, because it has T
-/// (itself) as one of its sub-types:
-///
-///   T
-///   +-- ST0
-///   |
-///   +-- ST1
-///        +
-///        |
-///        +-- T
-///
-/// ST1 is said to "depend" on T because it has T as a sub-type.
-/// But because T is recursive, then ST1 is said to depend on a
-/// recursive type.  Notice however that ST0 does not depend on any
-/// recursive type.
-///
-/// When we are at the point of comparing the sub-type T of ST1
-/// against its counterpart, the stack of the right-hand-side
-/// operands of the type canonicalization is going to look like
-/// this:
-///
-///    | T | ST1 |
-///
-/// We don't add the type T to the stack as we detect that T was
-/// already in there (recursive cycle).
-///
-/// So, this function will basically mark ST1 as being NON-eligible
-/// to being the target of canonical type propagation, by marking ST1
-/// as being dependant on T.
-///
-/// @param right the right-hand-side operand of the type comparison.
-///
-/// @return true iff the operation was successful.
-bool
-mark_dependant_types_compared_until(const type_base &r)
-{
-  const environment& env = r.get_environment();
-  if (env.do_on_the_fly_canonicalization())
-    return env.priv_->mark_dependant_types_compared_until(&r);
-  return false;
-}
+/// @return the CTI of the type.
+size_t
+get_canonical_type_index(const type_base& t)
+{return t.priv_->canonical_type_index;}
 
+/// Getter of the canonical type index of a given type.
+///
+/// @param t the type to consider.
+///
+/// @return the CTI of the type.
+size_t
+get_canonical_type_index(const type_base* t)
+{return get_canonical_type_index(*t);}
+
+/// Getter of the canonical type index of a given type.
+///
+/// @param t the type to consider.
+///
+/// @return the CTI of the type.
+size_t
+get_canonical_type_index(const type_base_sptr& t)
+{return get_canonical_type_index(t.get());}
+
+/// Test if a type originates from a corpus.
+///
+/// Note that this function supports testing if a type originates from
+/// a corpus group.
+///
+/// @param t the type to consider.
+///
+/// @param c the corpus or corpus group to consider.
+///
+/// @return true iff the type @p t originates from the corpus (or
+/// group) @p c.
+bool
+type_originates_from_corpus(type_base_sptr t, corpus_sptr& c)
+{
+  bool result = false;
+  if (c && t->get_corpus())
+    {
+      corpus_group_sptr g = is_corpus_group(c);
+      if (g)
+	{
+	  if (t->get_corpus()->get_group() == g.get())
+	    result = true;
+	}
+      else
+	{
+	  if (t->get_corpus() == c.get())
+	    result = true;
+	}
+    }
+  return result;
+}
 /// @brief the location of a token represented in its simplest form.
 /// Instances of this type are to be stored in a sorted vector, so the
 /// type must have proper relational operators.
@@ -438,7 +497,7 @@ location_manager::~location_manager() = default;
 
 /// Insert the triplet representing a source locus into our internal
 /// vector of location triplet.  Return an instance of location type,
-/// built from an integral type that represents the index of the
+/// built from an real type that represents the index of the
 /// source locus triplet into our source locus table.
 ///
 /// @param file_path the file path of the source locus
@@ -497,6 +556,7 @@ struct type_maps::priv
   mutable istring_type_base_wptrs_map_type	typedef_types_;
   mutable istring_type_base_wptrs_map_type	qualified_types_;
   mutable istring_type_base_wptrs_map_type	pointer_types_;
+  mutable istring_type_base_wptrs_map_type	ptr_to_mbr_types_;
   mutable istring_type_base_wptrs_map_type	reference_types_;
   mutable istring_type_base_wptrs_map_type	array_types_;
   mutable istring_type_base_wptrs_map_type	subrange_types_;
@@ -616,6 +676,20 @@ type_maps::qualified_types() const
 istring_type_base_wptrs_map_type&
 type_maps::pointer_types()
 {return priv_->pointer_types_;}
+
+/// Getter for the map that associates the name of a pointer-to-member
+/// type to the vector of instances of @ref ptr_to_mbr_type_sptr that
+/// represents that type.
+istring_type_base_wptrs_map_type&
+type_maps::ptr_to_mbr_types()
+{return priv_->ptr_to_mbr_types_;}
+
+/// Getter for the map that associates the name of a pointer-to-member
+/// type to the vector of instances of @ref ptr_to_mbr_type_sptr that
+/// represents that type.
+const istring_type_base_wptrs_map_type&
+type_maps::ptr_to_mbr_types() const
+{return priv_->ptr_to_mbr_types_;}
 
 /// Getter for the map that associates the name of a pointer type to
 /// the vector of instances of @ref pointer_type_def_sptr that
@@ -804,6 +878,28 @@ notify_equality_failed(const type_or_decl_base *l __attribute__((unused)),
 #define ABG_RETURN_EQUAL(l, r) return ((l) == (r));
 #endif
 
+/// Get the canonical type of a given type T* as a T*.
+///
+/// Note that normally, canonical types are returned as @ref
+/// type_base* (un-typed form, kind of).  This function returns the
+/// canonical type as a T*, just like the T* it is looking at.
+///
+///
+/// @param t the type to consider.
+///
+/// @return either the canonical type of @p t or @p t itself if it
+/// doesn't have any canonical type.
+template<typename T>
+T*
+maybe_get_canonical_type(T* t)
+{
+  if (!t)
+    return nullptr;
+  if (type_base* type = t->get_naked_canonical_type())
+    return dynamic_cast<T*>(type);
+  return t;
+}
+
 /// Compare two types by comparing their canonical types if present.
 ///
 /// If the canonical types are not present (because the types have not
@@ -843,15 +939,41 @@ try_canonical_compare(const T *l, const T *r)
 	if (const type_base *rc = r->get_naked_canonical_type())
 	  ABG_RETURN_EQUAL(lc, rc);
     }
+
+  // If the two types have a non-empty hash value, then consider those
+  // hash values.  If the hashes are different then the two types are
+  // different.  If the hashes are equal then we'll compare then
+  // structurally.
+  if (hash_t l_hash = peek_hash_value(*l))
+    if (hash_t r_hash = peek_hash_value(*r))
+      if (l_hash != r_hash)
+	ABG_RETURN_FALSE;
+
+  // If a type has a canonical type, use its canonical type, always.
+  l = maybe_get_canonical_type(l);
+  r = maybe_get_canonical_type(r);
+
   return equals(*l, *r, 0);
 #else
   if (const type_base *lc = l->get_naked_canonical_type())
     if (const type_base *rc = r->get_naked_canonical_type())
       ABG_RETURN_EQUAL(lc, rc);
+
+  // If the two types have a non-empty hash value, then consider those
+  // hash values.  If the hashes are different then the two types are
+  // different.  If the hashes are equal then we'll compare then
+  // structurally.
+  if (hash_t l_hash = peek_hash_value(*l))
+    if (hash_t r_hash = peek_hash_value(*r))
+      if (l_hash != r_hash)
+	ABG_RETURN_FALSE;
+
+  // If a type has a canonical type, use its canonical type, always.
+  l = maybe_get_canonical_type(l);
+  r = maybe_get_canonical_type(r);
+
   return equals(*l, *r, 0);
 #endif
-
-
 }
 
 /// Detect if a recursive comparison cycle is detected while
@@ -910,10 +1032,7 @@ is_comparison_cycle_detected(const class_decl& l, const class_decl& r)
   do									\
     {									\
       if (is_comparison_cycle_detected(l, r))				\
-	{								\
-	  mark_dependant_types_compared_until(r);			\
-	  return true;							\
-	}								\
+	return true;							\
     }									\
   while(false)
 
@@ -994,111 +1113,20 @@ unmark_types_as_being_compared(const class_decl& l, const class_decl &r)
 /// The function does the necessary book keeping before returning the
 /// result of the comparison of two (sub) types.
 ///
-/// The book-keeping done is in the following
-/// areas:
-///
-///   * Management of the Canonical Type Propagation optimization
-///   * type comparison cycle detection
+/// The book-keeping done is essentially about type comparison cycle detection.
 ///
 ///   @param l the left-hand-side operand of the type comparison
 ///
 ///   @param r the right-hand-side operand of the type comparison
-///
-///   @param propagate_canonical_type if true, it means the function
-///   performs the @ref OnTheFlyCanonicalization, aka, "canonical type
-///   propagation optimization".
 ///
 ///   @param value the result of the comparison of @p l and @p r.
 ///
 ///   @return the value @p value.
 template<typename T>
 bool
-return_comparison_result(T& l, T& r, bool value,
-			 bool propagate_canonical_type = true)
+return_comparison_result(T& l, T& r, bool value)
 {
-  if (propagate_canonical_type && (value == true))
-    maybe_propagate_canonical_type(l, r);
-
   unmark_types_as_being_compared(l, r);
-
-  const environment& env = l.get_environment();
-  if (env.do_on_the_fly_canonicalization())
-    // We are instructed to perform the "canonical type propagation"
-    // optimization, making 'r' to possibly get the canonical type of
-    // 'l' if it has one.  This mostly means that we are currently
-    // canonicalizing the type that contain the subtype provided in
-    // the 'r' argument.
-    {
-      if (value == true
-	  && (is_type(&r)->priv_->depends_on_recursive_type()
-	      || env.priv_->is_recursive_type(&r))
-	  && is_type(&r)->priv_->canonical_type_propagated()
-	  && !is_type(&r)->priv_->propagated_canonical_type_confirmed()
-	  && !env.priv_->right_type_comp_operands_.empty())
-	{
-	  // Track the object 'r' for which the propagated canonical
-	  // type might be re-initialized if the current comparison
-	  // eventually fails.
-	  env.priv_->add_to_types_with_non_confirmed_propagated_ct(is_type(&r));
-	}
-      else if (value == true
-	       && env.priv_->right_type_comp_operands_.empty()
-	       && is_type(&r)->priv_->canonical_type_propagated()
-	       && !is_type(&r)->priv_->propagated_canonical_type_confirmed())
-	{
-	  // The type provided in the 'r' argument is the type that is
-	  // being canonicalized; 'r' is not a mere subtype being
-	  // compared, it's the whole type being canonicalized.  And
-	  // its canonicalization has just succeeded.
-	  //
-	  // Let's confirm the canonical type resulting from the
-	  // "canonical type propagation" optimization.
-	  env.priv_->confirm_ct_propagation(&r);
-	}
-      else if (value == true
-	       && is_type(&r)->priv_->canonical_type_propagated()
-	       && !is_type(&r)->priv_->propagated_canonical_type_confirmed())
-	// In any other case, we are not sure if propagated types
-	// should be confirmed yet.  So let's mark them as such.
-	env.priv_->add_to_types_with_non_confirmed_propagated_ct(is_type(&r));
-      else if (value == false)
-	{
-	  // The comparison of the current sub-type failed.  So all
-	  // the with non-confirmed propagated types (those in
-	  // env.prix_->types_with_non_confirmed_propagated_ct_)
-	  // should see their tentatively propagated canonical type
-	  // cancelled.
-	  env.priv_->cancel_all_non_confirmed_propagated_canonical_types();
-	}
-    }
-
-  // If we reached this point with value == true and the stack of
-  // types being compared is empty, then it means that the type pair
-  // that was at the bottom of the stack is now fully compared.
-  //
-  // It follows that all types that were target of canonical type
-  // propagation can now see their tentative canonical type be
-  // confirmed for real.
-  if (value == true
-      && env.priv_->right_type_comp_operands_.empty()
-      && !env.priv_->types_with_non_confirmed_propagated_ct_.empty())
-    // So the comparison is completely done and there are some
-    // types for which their propagated canonical type is sitll
-    // considered not confirmed.  As the comparison did yield true, we
-    // shall now confirm the propagation for all those types.
-    env.priv_->confirm_ct_propagation();
-
-#ifdef WITH_DEBUG_SELF_COMPARISON
-  if (value == false && env.priv_->right_type_comp_operands_.empty())
-    {
-      for (const auto i : env.priv_->types_with_non_confirmed_propagated_ct_)
-	{
-	  type_base *t = reinterpret_cast<type_base*>(i);
-	  env.priv_->check_abixml_canonical_type_propagation_during_self_comp(t);
-	}
-    }
-#endif
-
   ABG_RETURN(value);
 }
 
@@ -1195,11 +1223,11 @@ translation_unit::get_global_scope() const
   return const_cast<translation_unit*>(this)->get_global_scope();
 }
 
-/// Getter of the the global scope of the translation unit.
+/// Getter of the global scope of the translation unit.
 ///
 /// @return the global scope of the current translation unit.  If
-/// there is not global scope allocated yet, this function creates one
-/// and returns it.
+/// there is not allocated yet, this function creates one and returns
+/// it.
 scope_decl_sptr&
 translation_unit::get_global_scope()
 {
@@ -1525,48 +1553,108 @@ translation_unit_language_to_string(translation_unit::language l)
       return "LANG_C99";
     case translation_unit::LANG_C11:
       return "LANG_C11";
+    case translation_unit::LANG_C17:
+      return "LANG_C17";
+    case translation_unit::LANG_C23:
+      return "LANG_C23";
     case translation_unit::LANG_C:
       return "LANG_C";
+    case translation_unit::LANG_C_plus_plus_03:
+      return "LANG_C_plus_plus_03";
     case translation_unit::LANG_C_plus_plus_11:
       return "LANG_C_plus_plus_11";
     case translation_unit::LANG_C_plus_plus_14:
       return "LANG_C_plus_plus_14";
+    case translation_unit::LANG_C_plus_plus_17:
+      return "LANG_C_plus_plus_17";
+    case translation_unit::LANG_C_plus_plus_20:
+      return "LANG_C_plus_plus_20";
+    case translation_unit::LANG_C_plus_plus_23:
+      return "LANG_C_plus_plus_23";
     case translation_unit::LANG_C_plus_plus:
       return "LANG_C_plus_plus";
+    case translation_unit::LANG_OCaml:
+      return "LANG_OCaml";
+    case translation_unit::LANG_Zig:
+      return "LANG_Zig";
     case translation_unit::LANG_ObjC:
       return "LANG_ObjC";
     case translation_unit::LANG_ObjC_plus_plus:
       return "LANG_ObjC_plus_plus";
+    case translation_unit::LANG_D:
+      return "LANG_D";
+    case translation_unit::LANG_Go:
+      return "LANG_Go";
+    case translation_unit::LANG_Rust:
+      return "LANG_Rust";
     case translation_unit::LANG_Fortran77:
       return "LANG_Fortran77";
     case translation_unit::LANG_Fortran90:
       return "LANG_Fortran90";
     case translation_unit::LANG_Fortran95:
       return "LANG_Fortran95";
+    case translation_unit::LANG_Fortran18:
+      return "LANG_Fortran18";
+    case translation_unit::LANG_Fortran23:
+      return "LANG_Fortran23";
     case translation_unit::LANG_Ada83:
       return "LANG_Ada83";
     case translation_unit::LANG_Ada95:
       return "LANG_Ada95";
+    case translation_unit::LANG_Ada2005:
+      return "LANG_Ada2005";
+    case translation_unit::LANG_Ada2012:
+      return "LANG_Ada2012";
     case translation_unit::LANG_Pascal83:
       return "LANG_Pascal83";
     case translation_unit::LANG_Modula2:
       return "LANG_Modula2";
     case translation_unit::LANG_Java:
       return "LANG_Java";
+    case translation_unit::LANG_Kotlin:
+      return "LANG_Kotlin";
+    case translation_unit::LANG_C_sharp:
+      return "LANG_C_sharp";
+    case translation_unit::LANG_Python:
+      return "LANG_Python";
+    case translation_unit::LANG_Ruby:
+      return "LANG_Ruby";
     case translation_unit::LANG_PLI:
       return "LANG_PLI";
     case translation_unit::LANG_UPC:
       return "LANG_UPC";
-    case translation_unit::LANG_D:
-      return "LANG_D";
-    case translation_unit::LANG_Python:
-      return "LANG_Python";
-    case translation_unit::LANG_Go:
-      return "LANG_Go";
     case translation_unit::LANG_Mips_Assembler:
       return "LANG_Mips_Assembler";
-    default:
-      return "LANG_UNKNOWN";
+    case translation_unit::LANG_Assembly:
+      return "LANG_Assembly";
+    case translation_unit::LANG_Crystal:
+      return "LANG_Crystal";
+    case translation_unit::LANG_HIP:
+      return "LANG_HIP";
+    case translation_unit::LANG_Mojo:
+      return "LANG_Mojo";
+    case translation_unit::LANG_GLSL:
+      return "LANG_GLSL";
+    case translation_unit::LANG_GLSL_ES:
+      return "LANG_GLSL_ES";
+    case translation_unit::LANG_HLSL:
+      return "LANG_HLSL";
+    case translation_unit::LANG_OpenCL_CPP:
+      return "LANG_OpenCL_CPP";
+    case translation_unit::LANG_CPP_for_OpenCL:
+      return "LANG_CPP_for_OpenCL";
+    case translation_unit::LANG_SYCL:
+      return "LANG_SYCL";
+    case translation_unit::LANG_Odin:
+      return "LANG_Odin";
+    case translation_unit::LANG_P4:
+      return "LANG_P4";
+    case translation_unit::LANG_Metal:
+      return "LANG_Metal";
+    case translation_unit::LANG_Move:
+      return "LANG_Move";
+    case translation_unit::LANG_Hylo:
+      return "LANG_Hylo";
     }
 
   return "LANG_UNKNOWN";
@@ -1591,46 +1679,106 @@ string_to_translation_unit_language(const string& l)
     return translation_unit::LANG_C99;
   else if (l == "LANG_C11")
     return translation_unit::LANG_C11;
+  else if (l == "LANG_C17")
+    return translation_unit::LANG_C17;
+  else if (l == "LANG_C23")
+    return translation_unit::LANG_C23;
   else if (l == "LANG_C")
     return translation_unit::LANG_C;
+  else if (l == "LANG_C_plus_plus_03")
+    return translation_unit::LANG_C_plus_plus_03;
   else if (l == "LANG_C_plus_plus_11")
     return translation_unit::LANG_C_plus_plus_11;
   else if (l == "LANG_C_plus_plus_14")
     return translation_unit::LANG_C_plus_plus_14;
+  else if (l == "LANG_C_plus_plus_17")
+    return translation_unit::LANG_C_plus_plus_17;
+  else if (l == "LANG_C_plus_plus_20")
+    return translation_unit::LANG_C_plus_plus_20;
+  else if (l == "LANG_C_plus_plus_23")
+    return translation_unit::LANG_C_plus_plus_23;
   else if (l == "LANG_C_plus_plus")
     return translation_unit::LANG_C_plus_plus;
+  else if (l == "LANG_OCaml")
+    return translation_unit::LANG_OCaml;
   else if (l == "LANG_ObjC")
     return translation_unit::LANG_ObjC;
   else if (l == "LANG_ObjC_plus_plus")
     return translation_unit::LANG_ObjC_plus_plus;
+  else if (l == "LANG_Zig")
+    return translation_unit::LANG_Zig;
+  else if (l == "LANG_Metal")
+    return translation_unit::LANG_Metal;
   else if (l == "LANG_Fortran77")
     return translation_unit::LANG_Fortran77;
   else if (l == "LANG_Fortran90")
     return translation_unit::LANG_Fortran90;
-    else if (l == "LANG_Fortran95")
+  else if (l == "LANG_Fortran95")
     return translation_unit::LANG_Fortran95;
+  else if (l == "LANG_Fortran18")
+    return translation_unit::LANG_Fortran23;
   else if (l == "LANG_Ada83")
     return translation_unit::LANG_Ada83;
   else if (l == "LANG_Ada95")
     return translation_unit::LANG_Ada95;
+  else if (l == "LANG_Ada2005")
+    return translation_unit::LANG_Ada2005;
+  else if (l == "LANG_Ada2012")
+    return translation_unit::LANG_Ada2012;
   else if (l == "LANG_Pascal83")
     return translation_unit::LANG_Pascal83;
   else if (l == "LANG_Modula2")
     return translation_unit::LANG_Modula2;
   else if (l == "LANG_Java")
     return translation_unit::LANG_Java;
+  else if (l == "LANG_Kotlin")
+    return translation_unit::LANG_Kotlin;
   else if (l == "LANG_PLI")
     return translation_unit::LANG_PLI;
   else if (l == "LANG_UPC")
     return translation_unit::LANG_UPC;
   else if (l == "LANG_D")
     return translation_unit::LANG_D;
-  else if (l == "LANG_Python")
-    return translation_unit::LANG_Python;
   else if (l == "LANG_Go")
     return translation_unit::LANG_Go;
+  else if (l == "LANG_Rust")
+    return translation_unit::LANG_Rust;
+  else if (l == "LANG_Python")
+    return translation_unit::LANG_Python;
+  else if (l == "LANG_Ruby")
+    return translation_unit::LANG_Ruby;
   else if (l == "LANG_Mips_Assembler")
     return translation_unit::LANG_Mips_Assembler;
+  else if (l == "LANG_Assembly")
+    return translation_unit::LANG_Assembly;
+  else if (l == "LANG_Crystal")
+    return translation_unit::LANG_Crystal;
+  else if (l == "LANG_HIP")
+    return translation_unit::LANG_HIP;
+  else if (l == "LANG_C_sharp")
+    return translation_unit::LANG_C_sharp;
+  else if (l == "LANG_Mojo")
+    return translation_unit::LANG_Mojo;
+  else if (l == "LANG_GLSL")
+    return translation_unit::LANG_GLSL;
+  else if (l == "LANG_GLSL_ES")
+    return translation_unit::LANG_GLSL_ES;
+  else if (l == "LANG_HLSL")
+    return translation_unit::LANG_HLSL;
+  else if (l == "LANG_OpenCL_CPP")
+    return translation_unit::LANG_OpenCL_CPP;
+  else if (l == "LANG_CPP_for_OpenCL")
+    return translation_unit::LANG_CPP_for_OpenCL;
+  else if (l == "LANG_SYCL")
+    return translation_unit::LANG_SYCL;
+  else if (l == "LANG_Odin")
+    return translation_unit::LANG_Odin;
+  else if (l == "LANG_P4")
+    return translation_unit::LANG_P4;
+  else if (l == "LANG_Move")
+    return translation_unit::LANG_Move;
+  else if (l == "LANG_Hylo")
+    return translation_unit::LANG_Hylo;
 
   return translation_unit::LANG_UNKNOWN;
 }
@@ -1646,6 +1794,8 @@ is_c_language(translation_unit::language l)
   return (l == translation_unit::LANG_C89
 	  || l == translation_unit::LANG_C99
 	  || l == translation_unit::LANG_C11
+	  || l == translation_unit::LANG_C17
+	  || l == translation_unit::LANG_C23
 	  || l == translation_unit::LANG_C);
 }
 
@@ -1660,6 +1810,8 @@ is_cplus_plus_language(translation_unit::language l)
   return (l == translation_unit::LANG_C_plus_plus_03
 	  || l == translation_unit::LANG_C_plus_plus_11
 	  || l == translation_unit::LANG_C_plus_plus_14
+	  || l == translation_unit::LANG_C_plus_plus_20
+	  || l == translation_unit::LANG_C_plus_plus_23
 	  || l == translation_unit::LANG_C_plus_plus);
 }
 
@@ -1681,7 +1833,9 @@ bool
 is_ada_language(translation_unit::language l)
 {
   return (l == translation_unit::LANG_Ada83
-	 || l == translation_unit::LANG_Ada95);
+	  || l == translation_unit::LANG_Ada95
+	  || l == translation_unit::LANG_Ada2005
+	  || l == translation_unit::LANG_Ada2012);
 }
 
 /// A deep comparison operator for pointers to translation units.
@@ -1933,10 +2087,20 @@ elf_symbol::create(const environment& e,
 /// are not taken into account.  Only the name, type, and version of
 /// the symbols are compared.
 ///
+/// @parm l the first ELF symbol to take into consideration in the
+/// comparison.
+///
+/// @param r the second ELF symbol to take into consideration in the
+/// comparison.
+///
+/// @param k a pointer to a bitfield that gives information about the
+/// kind of changes there are between @p l and @p r.  This one is set
+/// iff it's non-null and if the function returns false.
+///
 /// @return true iff the two symbols are textually equal.
 static bool
-textually_equals(const elf_symbol&l,
-		 const elf_symbol&r)
+textually_equals(const elf_symbol&l, const elf_symbol&r,
+		 change_kind* k = nullptr)
 {
   bool equals = (l.get_name() == r.get_name()
 		 && l.get_type() == r.get_type()
@@ -1947,12 +2111,21 @@ textually_equals(const elf_symbol&l,
 		 && l.get_crc() == r.get_crc()
 		 && l.get_namespace() == r.get_namespace());
 
+  if (!equals)
+    if (k)
+      *k |= LOCAL_NON_TYPE_CHANGE_KIND;
+
   if (equals && l.is_variable())
     // These are variable symbols.  Let's compare their symbol size.
     // The symbol size in this case is the size taken by the storage
     // of the variable.  If that size changes, then it's an ABI
     // change.
-    equals = l.get_size() == r.get_size();
+    if (l.get_size() != r.get_size())
+      {
+	equals = false;
+	if (k)
+	  *k| LOCAL_TYPE_CHANGE_KIND;
+      }
 
   return equals;
 }
@@ -2124,7 +2297,13 @@ elf_symbol::is_function() const
 /// variable symbol, false otherwise.
 bool
 elf_symbol::is_variable() const
-{return get_type() == OBJECT_TYPE || get_type() == TLS_TYPE;}
+{
+    return (get_type() == OBJECT_TYPE
+	    || get_type() == TLS_TYPE
+	    // It appears that undefined variables have NOTYPE type.
+	    || (get_type() == NOTYPE_TYPE
+		&& !is_defined()));
+}
 
 /// Getter of the 'is-in-ksymtab' property.
 ///
@@ -3213,7 +3392,7 @@ environment::get_canonical_types_map() const
 
 /// Helper to detect if a type is either a reference, a pointer, or a
 /// qualified type.
-static bool
+bool
 is_ptr_ref_or_qual_type(const type_base *t)
 {
   if (is_pointer_type(t)
@@ -3230,7 +3409,7 @@ is_ptr_ref_or_qual_type(const type_base *t)
 /// @param s the second decl to compare.
 ///
 /// @return true if @p f compares less than @p s.
-static bool
+bool
 compare_using_locations(const decl_base *f,
 			const decl_base *s)
 {
@@ -3259,260 +3438,6 @@ compare_using_locations(const decl_base *f,
   return (get_pretty_representation(f, /*internal=*/false)
 	  < get_pretty_representation(s, /*internal=*/false));
 }
-
-/// A functor to sort decls somewhat topologically.  That is, types
-/// are sorted in a way that makes the ones that are defined "first"
-/// to come first.
-///
-/// The topological criteria is a lexicographic sort of the definition
-/// location of the type.  For types that have no location (or the
-/// same location), it's their qualified name that is used for the
-/// lexicographic sort.
-struct decl_topo_comp
-{
-
-  /// The "Less Than" comparison operator of this functor.
-  ///
-  /// @param f the first decl to be considered for the comparison.
-  ///
-  /// @param s the second decl to be considered for the comparison.
-  ///
-  /// @return true iff @p f is less than @p s.
-  bool
-  operator()(const decl_base *f,
-	     const decl_base *s)
-  {
-    if (!!f != !!s)
-      return f && !s;
-
-    if (!f)
-      return false;
-
-    // Unique types that are artificially created in the environment
-    // don't have locations.  They ought to be compared on the basis
-    // of their pretty representation before we start looking at IR
-    // nodes' locations down the road.
-    if (is_unique_type(is_type(f)) || is_unique_type(is_type(s)))
-      return (get_pretty_representation(f, /*internal=*/false)
-	      < get_pretty_representation(s, /*internal=*/false));
-
-    // If both decls come from an abixml file, keep the order they
-    // have from that abixml file.
-    if ((!f->get_corpus() && !s->get_corpus())
-	|| (f->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN
-	    && s->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN))
-      return compare_using_locations(f, s);
-
-    // If a decl has artificial location, then use that one over the
-    // natural one.
-    location fl = get_artificial_or_natural_location(f);
-    location sl = get_artificial_or_natural_location(s);
-
-    if (fl.get_value() && sl.get_value())
-      return compare_using_locations(f, s);
-    else if (!!fl != !!sl)
-      // So one of the decls doesn't have location data.
-      // The first decl is less than the second if it's the one not
-      // having location data.
-      return !fl && sl;
-
-    // We reach this point if location data is useless.
-    if (f->get_is_anonymous()
-	&& s->get_is_anonymous()
-	&& (get_pretty_representation(f, /*internal=*/false)
-	    == get_pretty_representation(s, /*internal=*/false)))
-      return f->get_name() < s->get_name();
-
-    return (get_pretty_representation(f, /*internal=*/false)
-	    < get_pretty_representation(s, /*internal=*/false));
-  }
-
-  /// The "Less Than" comparison operator of this functor.
-  ///
-  /// @param f the first decl to be considered for the comparison.
-  ///
-  /// @param s the second decl to be considered for the comparison.
-  ///
-  /// @return true iff @p f is less than @p s.
-  bool
-  operator()(const decl_base_sptr &f,
-	     const decl_base_sptr &s)
-  {return operator()(f.get(), s.get());}
-
-}; // end struct decl_topo_comp
-
-/// A functor to sort types somewhat topologically.  That is, types
-/// are sorted in a way that makes the ones that are defined "first"
-/// to come first.
-///
-/// The topological criteria is a lexicographic sort of the definition
-/// location of the type.  For types that have no location, it's their
-/// qualified name that is used for the lexicographic sort.
-struct type_topo_comp
-{
-  /// Test if a decl has an artificial or natural location.
-  ///
-  /// @param d the decl to consider
-  ///
-  /// @return true iff @p d has a location.
-  bool
-  has_artificial_or_natural_location(const decl_base* d)
-  {return get_artificial_or_natural_location(d);}
-
-  /// Test if a type has an artificial or natural location.
-  ///
-  /// @param t the type to consider
-  ///
-  /// @return true iff @p t has a location.
-  bool
-  has_artificial_or_natural_location(const type_base* t)
-  {
-    if (decl_base *d = is_decl(t))
-      return has_artificial_or_natural_location(d);
-    return false;
-  }
-
-  /// The "Less Than" comparison operator of this functor.
-  ///
-  /// @param f the first type to be considered for the comparison.
-  ///
-  /// @param s the second type to be considered for the comparison.
-  ///
-  /// @return true iff @p f is less than @p s.
-  bool
-  operator()(const type_base_sptr &f,
-	     const type_base_sptr &s)
-  {return operator()(f.get(), s.get());}
-
-  /// The "Less Than" comparison operator of this functor.
-  ///
-  /// @param f the first type to be considered for the comparison.
-  ///
-  /// @param s the second type to be considered for the comparison.
-  ///
-  /// @return true iff @p f is less than @p s.
-  bool
-  operator()(const type_base *f,
-	     const type_base *s)
-  {
-    // If both decls come from an abixml file, keep the order they
-    // have from that abixml file.
-    if ((!f->get_corpus() && !s->get_corpus())
-	|| (f->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN
-	    && s->get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN))
-      return compare_using_locations(is_decl(f), is_decl(s));
-
-    bool f_is_ptr_ref_or_qual = is_ptr_ref_or_qual_type(f);
-    bool s_is_ptr_ref_or_qual = is_ptr_ref_or_qual_type(s);
-
-    if (f_is_ptr_ref_or_qual != s_is_ptr_ref_or_qual)
-      return !f_is_ptr_ref_or_qual && s_is_ptr_ref_or_qual;
-
-    if (f_is_ptr_ref_or_qual && s_is_ptr_ref_or_qual
-	&& !has_artificial_or_natural_location(f)
-	&& !has_artificial_or_natural_location(s))
-      {
-	string s1 = get_pretty_representation(f, /*internal=*/false);
-	string s2 = get_pretty_representation(s, /*internal=*/false);
-	if (s1 == s2)
-	  {
-	    if (qualified_type_def * q = is_qualified_type(f))
-	      {
-		if (q->get_cv_quals() == qualified_type_def::CV_NONE)
-		  if (!is_qualified_type(s))
-		    // We are looking at two types that are the result of
-		    // an optimization that happens during the IR
-		    // construction.  Namely, type f is a cv-qualified
-		    // type with no qualifier (no const, no volatile, no
-		    // nothing, we call it an empty-qualified type).
-		    // These are the result of an optimization which
-		    // removes "redundant qualifiers" from some types.
-		    // For instance, consider a "const reference".  The
-		    // const there is redundant because a reference is
-		    // always const.  So as a result of the optimizaton
-		    // that type is going to be transformed into an
-		    // empty-qualified reference. If we don't make that
-		    // optimization, then we risk having spurious change
-		    // reports down the road.  But then, as a consequence
-		    // of that optimization, we need to sort the
-		    // empty-qualified type and its non-qualified variant
-		    // e.g, to ensure stability in the abixml output; both
-		    // types are logically equal, but here, we decide that
-		    // the empty-qualified one is topologically "less
-		    // than" the non-qualified counterpart.
-		    //
-		    // So here, type f is an empty-qualified type and type
-		    // s is its non-qualified variant.  We decide that f
-		    // is topologically less than s.
-		    return true;
-	      }
-	    // Now let's peel off the pointer (or reference types) and
-	    // see if the ultimate underlying types have the same
-	    // textual representation; if not, use that as sorting
-	    // criterion.
-	    type_base *peeled_f =
-	      peel_pointer_or_reference_type(f, true);
-	    type_base *peeled_s =
-	      peel_pointer_or_reference_type(s, true);
-
-	    s1 = get_pretty_representation(peeled_f, /*internal=*/false);
-	    s2 = get_pretty_representation(peeled_s, /*internal=*/false);
-	    if (s1 != s2)
-	      return s1 < s2;
-
-	    // The underlying type of pointer/reference have the same
-	    // textual representation; let's try to peel of typedefs
-	    // as well and we'll consider sorting the result as decls.
-	    peeled_f = peel_typedef_pointer_or_reference_type(peeled_f, true);
-	    peeled_s = peel_typedef_pointer_or_reference_type(peeled_s, true);
-
-	    s1 = get_pretty_representation(peeled_f, false);
-	    s2 = get_pretty_representation(peeled_s, false);
-	    if (s1 != s2)
-	      return s1 < s2;
-	  }
-      }
-
-    string s1 = get_pretty_representation(f, false);
-    string s2 = get_pretty_representation(s, false);
-
-    if (s1 != s2)
-      return s1 < s2;
-
-    if (is_typedef(f) && is_typedef(s))
-      {
-	s1 = get_pretty_representation(is_typedef(f)->get_underlying_type(),
-				       false);
-	s2 = get_pretty_representation(is_typedef(s)->get_underlying_type(),
-				       false);
-	if (s1 != s2)
-	  return s1 < s2;
-      }
-
-    type_base *peeled_f = peel_typedef_pointer_or_reference_type(f, true);
-    type_base *peeled_s = peel_typedef_pointer_or_reference_type(s, true);
-
-    s1 = get_pretty_representation(peeled_f, false);
-    s2 = get_pretty_representation(peeled_s, false);
-
-    if (s1 != s2)
-      return s1 < s2;
-
-    decl_base *fd = is_decl(f);
-    decl_base *sd = is_decl(s);
-
-    if (!!fd != !!sd)
-      return fd && !sd;
-
-    // If the two types have no decls, how come we could not sort them
-    // until now? Let's investigate.
-    ABG_ASSERT(fd);
-
-    // From this point, fd and sd should be non-nil
-    decl_topo_comp decl_comp;
-    return decl_comp(fd, sd);
-  }
-}; //end struct type_topo_comp
 
 /// Sort types in a hopefully stable manner.
 ///
@@ -3618,25 +3543,29 @@ environment::canonicalization_is_done() const
 /// @param f the new value of the flag.
 void
 environment::canonicalization_is_done(bool f)
-{priv_->canonicalization_is_done_ = f;}
+{
+  priv_->canonicalization_is_done_ = f;
+  if (priv_->canonicalization_is_done_)
+    canonicalization_started(false);
+}
 
-/// Getter for the "on-the-fly-canonicalization" flag.
+/// Getter of a flag saying if the canonicalization process has
+/// started or not.
 ///
-/// @return true iff @ref OnTheFlyCanonicalization
-/// "on-the-fly-canonicalization" is to be performed during
-/// comparison.
+/// @return the flag saying if the canonicalization process has
+/// started or not.
 bool
-environment::do_on_the_fly_canonicalization() const
-{return priv_->do_on_the_fly_canonicalization_;}
+environment::canonicalization_started() const
+{return priv_->canonicalization_started_;}
 
-/// Setter for the "on-the-fly-canonicalization" flag.
+/// Setter of a flag saying if the canonicalization process has
+/// started or not.
 ///
-/// @param f If this is true then @ref OnTheFlyCanonicalization
-/// "on-the-fly-canonicalization" is to be performed during
-/// comparison.
+/// @param f the new value of the flag saying if the canonicalization
+/// process has started or not.
 void
-environment::do_on_the_fly_canonicalization(bool f)
-{priv_->do_on_the_fly_canonicalization_ = f;}
+environment::canonicalization_started(bool f)
+{priv_->canonicalization_started_ = f;}
 
 /// Getter of the "decl-only-class-equals-definition" flag.
 ///
@@ -3942,8 +3871,8 @@ environment::debug_die_canonicalization_is_on() const
 /// @return a pointer to the vector of canonical types having the
 /// representation @p name, or nullptr if no type with that
 /// representation exists.
-vector<type_base_sptr>*
-environment::get_canonical_types(const char* name)
+const vector<type_base_sptr>*
+environment::get_canonical_types(const char* name) const
 {
   auto ti = get_canonical_types_map().find(name);
   if (ti == get_canonical_types_map().end())
@@ -3968,7 +3897,7 @@ environment::get_canonical_types(const char* name)
 type_base*
 environment::get_canonical_type(const char* name, unsigned index)
 {
-  vector<type_base_sptr> *types = get_canonical_types(name);
+  const vector<type_base_sptr> *types = get_canonical_types(name);
   if (!types ||index >= types->size())
     return nullptr;
   return (*types)[index].get();
@@ -4095,65 +4024,6 @@ environment::get_canonical_type_from_type_id(const char* type_id) const
 // </environment stuff>
 
 // <type_or_decl_base stuff>
-
-/// The private data of @ref type_or_decl_base.
-struct type_or_decl_base::priv
-{
-  // This holds the kind of dynamic type of particular instance.
-  // Yes, this is part of the implementation of a "poor man" runtime
-  // type identification.  We are doing this because profiling shows
-  // that using dynamic_cast in some places is really to slow and is
-  // constituting a hotspot.  This poor man's implementation made
-  // things be much faster.
-  enum type_or_decl_kind	kind_;
-  // This holds the runtime type instance pointer of particular
-  // instance.  In other words, this is the "this pointer" of the
-  // dynamic type of a particular instance.
-  void*			rtti_;
-  // This holds a pointer to either the type_base sub-object (if the
-  // current instance is a type) or the decl_base sub-object (if the
-  // current instance is a decl).  This is used by the is_decl() and
-  // is_type() functions, which also show up during profiling as
-  // hotspots, due to their use of dynamic_cast.
-  void*			type_or_decl_ptr_;
-  bool				hashing_started_;
-  const environment&		env_;
-  translation_unit*		translation_unit_;
-  // The location of an artifact as seen from its input by the
-  // artifact reader.  This might be different from the source
-  // location advertised by the original emitter of the artifact
-  // emitter.
-  location			artificial_location_;
-  // Flags if the current ABI artifact is artificial (i.e, *NOT*
-  // generated from the initial source code, but rather either
-  // artificially by the compiler or by libabigail itself).
-  bool				is_artificial_;
-
-  /// Constructor of the type_or_decl_base::priv private type.
-  ///
-  /// @param e the environment in which the ABI artifact was created.
-  ///
-  /// @param k the identifier of the runtime type of the current
-  /// instance of ABI artifact.
-  priv(const environment& e,
-       enum type_or_decl_kind k = ABSTRACT_TYPE_OR_DECL)
-    : kind_(k),
-      rtti_(),
-      type_or_decl_ptr_(),
-      hashing_started_(),
-      env_(e),
-      translation_unit_(),
-      is_artificial_()
-  {}
-
-  enum type_or_decl_kind
-  kind() const
-  {return kind_;}
-
-  void
-  kind (enum type_or_decl_kind k)
-  {kind_ |= k;}
-}; // end struct type_or_decl_base::priv
 
 /// bitwise "OR" operator for the type_or_decl_base::type_or_decl_kind
 /// bitmap type.
@@ -4310,19 +4180,20 @@ void*
 type_or_decl_base::type_or_decl_base_pointer()
 {return priv_->type_or_decl_ptr_;}
 
-/// Getter for the 'hashing_started' property.
+/// Return the hash value of the current IR node.
 ///
-/// @return the 'hashing_started' property.
-bool
-type_or_decl_base::hashing_started() const
-{return priv_->hashing_started_;}
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+type_or_decl_base::hash_value() const
+{return priv_->hash_value_;}
 
-/// Setter for the 'hashing_started' property.
-///
-/// @param b the value to set the 'hashing_property' to.
 void
-type_or_decl_base::hashing_started(bool b) const
-{priv_->hashing_started_ = b;}
+type_or_decl_base::set_hash_value(hash_t h) const
+{priv_->set_hash_value(h);}
 
 /// Getter of the environment of the current ABI artifact.
 ///
@@ -4384,7 +4255,7 @@ type_or_decl_base::has_artificial_location() const
 corpus*
 type_or_decl_base::get_corpus()
 {
-  translation_unit* tu = get_translation_unit();
+  translation_unit* tu = abigail::ir::get_translation_unit(this);
   if (!tu)
     return 0;
   return tu->get_corpus();
@@ -4522,6 +4393,8 @@ struct decl_base::priv
   interned_string	qualified_name_;
   interned_string	temporary_internal_qualified_name_;
   interned_string	internal_qualified_name_;
+  interned_string	internal_cached_repr_;
+  interned_string	cached_repr_;
   // Unline qualified_name_, scoped_name_ contains the name of the
   // decl and the name of its scope; not the qualified name of the
   // scope.
@@ -4694,28 +4567,6 @@ decl_base::get_context_rel()
 void
 decl_base::set_context_rel(context_rel *c)
 {priv_->context_ = c;}
-
-/// Get the hash of a decl.  If the hash hasn't been computed yet,
-/// compute it ans store its value; otherwise, just return the hash.
-///
-/// @return the hash of the decl.
-size_t
-decl_base::get_hash() const
-{
-  size_t result = 0;
-
-  if (const type_base* t = dynamic_cast<const type_base*>(this))
-    {
-      type_base::dynamic_hash hash;
-      result = hash(t);
-    }
-  else
-    // If we reach this point, it mean we are missing a virtual
-    // overload for decl_base::get_hash.  Add it!
-    abort();
-
-  return result;
-}
 
 /// Test if the decl is defined in a ELF symbol table as a public
 /// symbol.
@@ -5019,6 +4870,48 @@ decl_base::get_pretty_representation(bool internal,
   return get_name();
 }
 
+/// Get the pretty representation of the current decl.
+///
+/// The pretty representation is retrieved from a cache.  If the cache
+/// is empty, this function computes the pretty representation, put it
+/// in the cache and returns it.
+///
+/// Please note that if this function is called too early in the life
+/// cycle of the decl (before it is fully constructed), then the
+/// pretty representation that is cached is going to represent a
+/// non-complete (and thus wrong) representation of the decl.  Thus
+/// this function must be called only once the decl is fully
+/// constructed.
+///
+/// @param internal if true, then the pretty representation is to be
+/// used for purpuses that are internal to the libabigail library
+/// itself.  If you don't know what this means, then you probably
+/// should set this parameter to "false".
+///
+/// @return a reference to a cached @ref interned_string holding the
+/// pretty representation of the current decl.
+const interned_string&
+decl_base::get_cached_pretty_representation(bool internal) const
+{
+    if (internal)
+    {
+      if (priv_->internal_cached_repr_.empty())
+	{
+	  string r = ir::get_pretty_representation(this, internal);
+	  priv_->internal_cached_repr_ = get_environment().intern(r);
+	}
+      return priv_->internal_cached_repr_;
+    }
+
+  if (priv_->cached_repr_.empty())
+    {
+      string r = ir::get_pretty_representation(this, internal);
+      priv_->cached_repr_ = get_environment().intern(r);
+    }
+
+  return priv_->cached_repr_;
+}
+
 /// Return the qualified name of the decl.
 ///
 /// This is the fully qualified name of the decl.  It's made of the
@@ -5222,37 +5115,6 @@ maybe_compare_as_member_decls(const decl_base& l,
   ABG_RETURN(result);
 }
 
-/// Get the name of a decl for the purpose of comparing two decl
-/// names.
-///
-/// This is a sub-routine of the 'equal' overload for decl_base.
-///
-/// This function takes into account the fact that all anonymous names
-/// shall have the same name for the purpose of comparison.
-///
-/// For decls that are part of an anonymous scope, only the
-/// non-qualified name should be taken into account.
-static interned_string
-get_decl_name_for_comparison(const decl_base &d)
-{
-  if (has_generic_anonymous_internal_type_name(&d)
-      && d.get_is_anonymous())
-    {
-      // The decl is anonymous.   It should have the same name ass the
-      // other anymous types of the same kind.
-      string r;
-      r += get_generic_anonymous_internal_type_name(&d);
-      return d.get_environment().intern(r);
-    }
-
-  interned_string n = (is_anonymous_or_typedef_named(d)
-		       || d.get_has_anonymous_parent()
-		       || is_typedef(&d))
-    ? d.get_name()
-    : d.get_qualified_name(/*internal=*/true);
-  return n;
-}
-
 /// Compares two instances of @ref decl_base.
 ///
 /// If the two intances are different, set a bitfield to give some
@@ -5302,37 +5164,25 @@ equals(const decl_base& l, const decl_base& r, change_kind* k)
 	}
     }
 
-  // This is the qualified name of the decls that we want to compare.
-  // We want to use the "internal" version of the qualified name as
-  // that one is stable even for anonymous decls.
-  interned_string ln = get_decl_name_for_comparison(l);
-  interned_string rn = get_decl_name_for_comparison(r);
+    if (r.get_is_anonymous() && l.get_is_anonymous())
+      // We are looking at too anonymous types (or two members of
+      // anonymous types) with one not yet been added to the IR.  That
+      // means we want to compare just the object part of the
+      // anonymous type and not their qualified names.  This is used
+      // when looking up an anonymous type inside a class type.
+      ABG_RETURN(result);
 
-  /// If both of the current decls have an anonymous scope then let's
-  /// compare their name component by component by properly handling
-  /// anonymous scopes. That's the slow path.
-  ///
-  /// Otherwise, let's just compare their name, the obvious way.
-  /// That's the fast path because in that case the names are
-  /// interned_string and comparing them is much faster.
-  bool decls_are_same = (ln == rn);
-  if (!decls_are_same
-      && l.get_is_anonymous()
-      && !l.get_has_anonymous_parent()
-      && r.get_is_anonymous()
-      && !r.get_has_anonymous_parent())
-    // Both decls are anonymous and their scope are *NOT* anonymous.
-    // So we consider the decls to have equivalent names (both
-    // anonymous, remember).  We are still in the fast path here.
-    decls_are_same = true;
+    // This is the name of the decls that we want to compare.
+    interned_string ln = l.get_name(), rn = r.get_name();
 
-  if (!decls_are_same
-      && l.get_has_anonymous_parent()
-      && r.get_has_anonymous_parent())
-    // This is the slow path as we are comparing the decl qualified
-    // names component by component, properly handling anonymous
-    // scopes.
-    decls_are_same = tools_utils::decl_names_equal(ln, rn);
+    /// If both of the current decls have an anonymous scope then let's
+    /// compare their name component by component by properly handling
+    /// anonymous scopes. That's the slow path.
+    ///
+    /// Otherwise, let's just compare their name, the obvious way.
+    /// That's the fast path because in that case the names are
+    /// interned_string and comparing them is much faster.
+    bool decls_are_same = (ln == rn);
 
   if (!decls_are_same)
     {
@@ -5591,9 +5441,9 @@ is_member_decl(const decl_base& d)
 ///
 /// @return the a pointer to the @ref scope_decl sub-object of @p d,
 /// if d is a @ref scope_decl.
-scope_decl*
-is_scope_decl(decl_base* d)
-{return dynamic_cast<scope_decl*>(d);}
+const scope_decl*
+is_scope_decl(const decl_base* d)
+{return dynamic_cast<const scope_decl*>(d);}
 
 /// Test if a declaration is a @ref scope_decl.
 ///
@@ -5944,6 +5794,74 @@ get_last_data_member(const class_or_union* klass)
 var_decl_sptr
 get_last_data_member(const class_or_union_sptr &klass)
 {return get_last_data_member(klass.get());}
+
+/// Collect all the non-anonymous data members of a class or union type.
+///
+/// If the class contains any anonymous data member, this function
+/// looks through it to collect the non-anonymous data members that it
+/// contains.  The function also looks through the base classes of the
+/// current type.
+///
+/// @param cou the class or union type to consider.
+///
+/// @param dms output parameter.  This is populated by the function
+/// with a map containing the non-anonymous data members that were
+/// collected.  The key of the map is the name of the data member.
+/// This is set iff the function returns true.
+///
+/// @return true iff at least one non-anonymous data member was
+/// collected.
+bool
+collect_non_anonymous_data_members(const class_or_union* cou,
+				   string_decl_base_sptr_map& dms)
+{
+  if (!cou)
+    return false;
+
+  bool result = false;
+  class_decl* klass = is_class_type(cou);
+  if (klass)
+    // First look into base classes for data members.
+    for (class_decl::base_spec_sptr base : klass->get_base_specifiers())
+      result |= collect_non_anonymous_data_members(base->get_base_class().get(), dms);
+
+  // Then look into our data members
+  for (var_decl_sptr member : cou->get_non_static_data_members())
+    {
+      if (is_anonymous_data_member(member))
+	{
+	  class_or_union_sptr cl = anonymous_data_member_to_class_or_union(member);
+	  ABG_ASSERT(cl);
+	  result |= collect_non_anonymous_data_members(cl.get(), dms);
+	}
+      else
+	{
+	  dms[member->get_name()] = member;
+	  result = true;
+	}
+    }
+  return true;
+}
+
+/// Collect all the non-anonymous data members of a class or union type.
+///
+/// If the class contains any anonymous data member, this function
+/// looks through it to collect the non-anonymous data members that it
+/// contains.  The function also also looks through the base classes
+/// of the current type.
+///
+/// @param cou the class or union type to consider.
+///
+/// @param dms output parameter.  This is populated by the function
+/// with a map containing the non-anonymous data members that were
+/// collected.  The key of the map is the name of the data member.
+/// This is set iff the function returns true.
+///
+/// @return true iff at least one non-anonymous data member was
+/// collected.
+bool
+collect_non_anonymous_data_members(const class_or_union_sptr &cou, string_decl_base_sptr_map& dms)
+{return collect_non_anonymous_data_members(cou.get(), dms);}
 
 /// Test if a decl is an anonymous data member.
 ///
@@ -6689,7 +6607,7 @@ get_member_function_vtable_offset(const function_decl_sptr& f)
 /// @param s the new vtable offset.  Please note that a vtable offset
 /// of value -1 means that the virtual member function does not (yet)
 /// have any vtable offset associated to it.
-void
+static void
 set_member_function_vtable_offset(function_decl& f, ssize_t s)
 {
   ABG_ASSERT(is_member_function(f));
@@ -6710,7 +6628,7 @@ set_member_function_vtable_offset(function_decl& f, ssize_t s)
 /// @param s the new vtable offset.  Please note that a vtable offset
 /// of value -1 means that the virtual member function does not (yet)
 /// have any vtable offset associated to it.
-void
+static void
 set_member_function_vtable_offset(const function_decl_sptr& f, ssize_t s)
 {return set_member_function_vtable_offset(*f, s);}
 
@@ -6757,7 +6675,7 @@ get_member_function_is_virtual(const function_decl* mem_fn)
 /// @param f the member function to consider.
 ///
 /// @param is_virtual set to true if the function is virtual.
-void
+static void
 set_member_function_is_virtual(function_decl& f, bool is_virtual)
 {
   ABG_ASSERT(is_member_function(f));
@@ -6776,15 +6694,64 @@ set_member_function_is_virtual(function_decl& f, bool is_virtual)
 /// @param f the member function to consider.
 ///
 /// @param is_virtual set to true if the function is virtual.
-void
+static void
 set_member_function_is_virtual(const function_decl_sptr& fn, bool is_virtual)
 {
   if (fn)
     {
       set_member_function_is_virtual(*fn, is_virtual);
-      fixup_virtual_member_function
-	(dynamic_pointer_cast<method_decl>(fn));
+      fixup_virtual_member_function(is_method_decl(fn));
     }
+}
+
+/// Set the virtual-ness of a member fcuntion
+///
+/// @param fn the member function to consider.
+///
+/// @param is_virtual whether the function is virtual.
+///
+/// @param voffset the virtual offset of the virtual function.
+void
+set_member_function_virtuality(function_decl&	fn,
+			       bool		is_virtual,
+			       ssize_t		voffset)
+{
+  // Setting the offset must come first because the second function
+  // does assume the voffset is set, in case of virtuality
+  set_member_function_vtable_offset(fn, voffset);
+  set_member_function_is_virtual(fn, is_virtual);
+}
+
+/// Set the virtual-ness of a member fcuntion
+///
+/// @param fn the member function to consider.
+///
+/// @param is_virtual whether the function is virtual.
+///
+/// @param voffset the virtual offset of the virtual function.
+void
+set_member_function_virtuality(function_decl*	fn,
+			       bool		is_virtual,
+			       ssize_t		voffset)
+{
+  if (fn)
+    set_member_function_virtuality(*fn, is_virtual, voffset);
+}
+
+/// Set the virtual-ness of a member fcuntion
+///
+/// @param fn the member function to consider.
+///
+/// @param is_virtual whether the function is virtual.
+///
+/// @param voffset the virtual offset of the virtual function.
+void
+set_member_function_virtuality(const function_decl_sptr&	fn,
+			       bool				is_virtual,
+			       ssize_t				voffset)
+{
+  set_member_function_vtable_offset(fn, voffset);
+  set_member_function_is_virtual(fn, is_virtual);
 }
 
 /// Recursively returns the the underlying type of a typedef.  The
@@ -7325,6 +7292,55 @@ peel_qualified_type(const type_base_sptr& type)
   return peel_qualified_type(t->get_underlying_type());
 }
 
+/// Test if a given qualified type is const.
+///
+/// @pram t the qualified type to consider.
+///
+/// @return true iff @p t is a const qualified type.
+bool
+is_const_qualified_type(const qualified_type_def_sptr& t)
+{
+  if (!t)
+    return false;
+
+  if (t->get_cv_quals() == qualified_type_def::CV_CONST)
+    return true;
+
+  return false;
+}
+
+/// Test if a given type is const-qualified.
+///
+/// @pram t the type to consider.
+///
+/// @return true iff @p t is a const qualified type.
+bool
+is_const_qualified_type(const type_base_sptr& t)
+{
+  qualified_type_def_sptr q = is_qualified_type(t);
+  if (!q)
+    return false;
+  return is_const_qualified_type(q);
+}
+
+/// If a qualified type is const, then return its underlying type.
+///
+/// @param q the qualified type to consider.
+///
+/// @return the underlying type of @p q if it's a const-qualified
+/// type, otherwise, return @p q itself.
+type_base_sptr
+peel_const_qualified_type(const qualified_type_def_sptr& q)
+{
+  if (!q)
+    return q;
+
+  if (is_const_qualified_type(q))
+    return q->get_underlying_type();
+
+  return q;
+}
+
 /// Return the leaf underlying type of a qualified or typedef type.
 ///
 /// If the underlying type is itself a qualified or typedef type, then
@@ -7546,7 +7562,7 @@ clone_array(const array_type_def_sptr& array)
 					   (*i)->get_underlying_type(),
 					   (*i)->get_location(),
 					   (*i)->get_language()));
-      subrange->is_infinite((*i)->is_infinite());
+      subrange->is_non_finite((*i)->is_non_finite());
       if (scope_decl *scope = (*i)->get_scope())
 	add_decl_to_scope(subrange, scope);
       subranges.push_back(subrange);
@@ -7785,6 +7801,7 @@ struct scope_decl::priv
   scopes member_scopes_;
   canonical_type_sptr_set_type canonical_types_;
   type_base_sptrs_type sorted_canonical_types_;
+  bool clear_sorted_member_types_cache_ = false;
 }; // end struct scope_decl::priv
 
 /// Constructor of the @ref scope_decl type.
@@ -7974,6 +7991,36 @@ scope_decl::is_empty() const
 	  && get_canonical_types().empty());
 }
 
+/// Set the translation unit of a decl
+///
+/// It also perform some IR integrity checks.
+///
+/// This is a sub-routine of scope_decl::{insert,add}_member_decl.
+///
+/// @param decl the decl to set the translation unit for.
+///
+/// @param tu the translation unit to set.
+static void
+maybe_set_translation_unit(const decl_base_sptr& decl,
+			   translation_unit*     tu)
+{
+  ABG_ASSERT(tu);
+
+  if (translation_unit* existing_tu = decl->get_translation_unit())
+    // The decl already belongs to a translation unit.
+    // Either:
+    //
+    //   1/ it's a unique type, in which case we should not add it to
+    // any translation unique since unique types are "logically"
+    // supposed to belong to no translation unit in particular, as
+    // they are unique.
+    //
+    // 2/ or the decl was already added to this translation unit.
+    ABG_ASSERT(tu == existing_tu || is_unique_type(is_type(decl)));
+  else
+    decl->set_translation_unit(tu);
+}
+
 /// Add a member decl to this scope.  Note that user code should not
 /// use this, but rather use add_decl_to_scope.
 ///
@@ -7991,7 +8038,10 @@ scope_decl::add_member_decl(const decl_base_sptr& member)
   member->set_scope(this);
   priv_->members_.push_back(member);
   if (is_type(member))
-    priv_->member_types_.push_back(is_type(member));
+    {
+      priv_->member_types_.push_back(is_type(member));
+      priv_->clear_sorted_member_types_cache_ = true;
+    }
 
   if (scope_decl_sptr m = dynamic_pointer_cast<scope_decl>(member))
     priv_->member_scopes_.push_back(m);
@@ -7999,12 +8049,7 @@ scope_decl::add_member_decl(const decl_base_sptr& member)
   update_qualified_name(member);
 
   if (translation_unit* tu = get_translation_unit())
-    {
-      if (translation_unit* existing_tu = member->get_translation_unit())
-	ABG_ASSERT(tu == existing_tu);
-      else
-	member->set_translation_unit(tu);
-    }
+    maybe_set_translation_unit(member, tu);
 
   maybe_update_types_lookup_map(member);
 
@@ -8048,6 +8093,7 @@ scope_decl::insert_member_type(type_base_sptr t,
   ABG_ASSERT(!has_scope(d));
 
   priv_->member_types_.push_back(t);
+  priv_->clear_sorted_member_types_cache_= true;
   insert_member_decl(d, before);
 }
 
@@ -8102,9 +8148,26 @@ scope_decl::remove_member_type(type_base_sptr t)
 const type_base_sptrs_type&
 scope_decl::get_sorted_member_types() const
 {
+  if (priv_->clear_sorted_member_types_cache_)
+    {
+      priv_->sorted_member_types_.clear();
+      priv_->clear_sorted_member_types_cache_ = false;
+    }
+
   if (priv_->sorted_member_types_.empty())
     {
+      unordered_set<type_base_sptr> canonical_pointer_types;
       for (auto t : get_member_types())
+	{
+	  if (is_non_canonicalized_type(t))
+	    priv_->sorted_member_types_.push_back(t);
+	  else if (auto c = t->get_canonical_type())
+	    canonical_pointer_types.insert(c);
+	  else
+	    canonical_pointer_types.insert(t);
+	}
+
+      for (auto t : canonical_pointer_types)
 	priv_->sorted_member_types_.push_back(t);
 
       type_topo_comp comp;
@@ -8112,6 +8175,11 @@ scope_decl::get_sorted_member_types() const
 		       priv_->sorted_member_types_.end(),
 		       comp);
     }
+
+  const ir::environment& env = get_environment();
+  if (!env.canonicalization_started() && !env.canonicalization_is_done())
+    priv_->clear_sorted_member_types_cache_ = true;
+
   return priv_->sorted_member_types_;
 }
 
@@ -8141,12 +8209,7 @@ scope_decl::insert_member_decl(decl_base_sptr member,
   update_qualified_name(member);
 
   if (translation_unit* tu = get_translation_unit())
-    {
-      if (translation_unit* existing_tu = member->get_translation_unit())
-	ABG_ASSERT(tu == existing_tu);
-      else
-	member->set_translation_unit(tu);
-    }
+    maybe_set_translation_unit(member, tu);
 
   maybe_update_types_lookup_map(member);
 
@@ -8186,18 +8249,9 @@ scope_decl::remove_member_decl(decl_base_sptr member)
 	    }
 	}
     }
-}
 
-/// Return the hash value for the current instance of scope_decl.
-///
-/// This method can trigger the computing of the hash value, if need be.
-///
-/// @return the hash value.
-size_t
-scope_decl::get_hash() const
-{
-  scope_decl::hash hash_scope;
-  return hash_scope(this);
+  member->set_scope(nullptr);
+  member->set_translation_unit(nullptr);
 }
 
 /// Compares two instances of @ref scope_decl.
@@ -8395,7 +8449,8 @@ scope_decl::~scope_decl()
 decl_base_sptr
 add_decl_to_scope(decl_base_sptr decl, scope_decl* scope)
 {
-  ABG_ASSERT(scope);
+  if (!scope)
+    return decl;
 
   if (scope && decl && !decl->get_scope())
     decl = scope->add_member_decl(decl);
@@ -8424,7 +8479,6 @@ remove_decl_from_scope(decl_base_sptr decl)
 
   scope_decl* scope = decl->get_scope();
   scope->remove_member_decl(decl);
-  decl->set_scope(0);
 }
 
 /// Inserts a declaration into a given scope, before a given IR child
@@ -8832,30 +8886,30 @@ get_generic_anonymous_internal_type_name(const decl_base *d)
   return result;
 }
 
-/// Get the internal name for a given integral type.
+/// Get the internal name for a given real type.
 ///
-/// All integral types that have the modifiers 'short, long or long
+/// All real types that have the modifiers 'short, long or long
 /// long' have the same internal name.  This is so that they can all
 /// have the same canonical type if they are of the same size.
 /// Otherwise, 'long int' and 'long long int' would have different
 /// canonical types even though they are equivalent from an ABI point
 /// of view.
 ///
-/// @param t the integral type to consider
+/// @param t the real type to consider
 ///
 /// @return the internal name for @p t if it's an integral type, or
-/// the empty string if @p t is not an integral type.
+/// the empty string if @p t is not a real type.
 static string
-get_internal_integral_type_name(const type_base* t)
+get_internal_real_type_name(const type_base* t)
 {
   string name;
-  type_decl *type = is_integral_type(t);
+  type_decl *type = is_real_type(t);
 
   if (!type)
     return name;
 
-  integral_type int_type;
-  if (parse_integral_type(type->get_name(), int_type))
+  real_type int_type;
+  if (parse_real_type(type->get_name(), int_type))
     name = int_type.to_string(/*internal=*/true);
 
   return name;
@@ -8878,11 +8932,17 @@ get_internal_integral_type_name(const type_base* t)
 interned_string
 get_type_name(const type_base* t, bool qualified, bool internal)
 {
+  interned_string empty_string;
+
+  if (!t)
+    return empty_string;
+
   const decl_base* d = dynamic_cast<const decl_base*>(t);
   if (!d)
     {
       const function_type* fn_type = is_function_type(t);
-      ABG_ASSERT(fn_type);
+      if (!fn_type)
+	return empty_string;
       return fn_type->get_cached_name(internal);
     }
 
@@ -8893,8 +8953,11 @@ get_type_name(const type_base* t, bool qualified, bool internal)
   // among themselves during type canonicalization.
   if (internal)
     {
-      if (d->get_is_anonymous())
+      if (d->get_is_anonymous() && !is_type_decl(t))
 	{
+	  // Note that anonymous type_decl that are used for
+	  // enumerators are not handled here because they don't have
+	  // generic internal type names.
 	  string r;
 	  r += get_generic_anonymous_internal_type_name(d);
 	  return t->get_environment().intern(r);
@@ -8906,7 +8969,7 @@ get_type_name(const type_base* t, bool qualified, bool internal)
       if (qualified)
 	return d->get_qualified_name(internal);
 
-      return env.intern(get_internal_integral_type_name(t));
+      return env.intern(get_internal_real_type_name(t));
     }
 
   if (d->get_is_anonymous())
@@ -9097,30 +9160,13 @@ get_function_type_name(const function_type& fn_type,
   // canonicalization), we want its representation to stay the same,
   // regardless of typedefs.  So let's strip typedefs from the return
   // type.
-  type_base_sptr return_type =
-    internal
-    ? peel_typedef_type(fn_type.get_return_type())
-    : fn_type.get_return_type();
+  type_base_sptr return_type = fn_type.get_return_type();
   const environment& env = fn_type.get_environment();
 
-  o <<  get_pretty_representation(return_type, internal);
-
-  o << " (";
-  type_base_sptr type;
-  for (function_type::parameters::const_iterator i =
-	 fn_type.get_parameters().begin();
-       i != fn_type.get_parameters().end();
-       ++i)
-    {
-      if (i != fn_type.get_parameters().begin())
-	o << ", ";
-      type = (*i)->get_type();
-      if (internal)
-	type = peel_typedef_type(type);
-      o << get_pretty_representation(type, internal);
-    }
-  o <<")";
-
+  o <<  get_type_name(return_type, /*qualified=*/true, internal) << " ";
+  stream_pretty_representation_of_fn_parms(fn_type, o,
+					   /*qualified=*/true,
+					   internal);
   return env.intern(o.str());
 }
 
@@ -9131,13 +9177,13 @@ get_function_type_name(const function_type& fn_type,
 ///
 /// @return the function ID of pretty representation of @p fn.
 interned_string
-get_function_id_or_pretty_representation(function_decl *fn)
+get_function_id_or_pretty_representation(const function_decl *fn)
 {
   ABG_ASSERT(fn);
 
   interned_string result = fn->get_environment().intern(fn->get_id());
 
-  if (corpus *c = fn->get_corpus())
+  if (const corpus *c = fn->get_corpus())
     {
       corpus::exported_decls_builder_sptr b =
 	c->get_exported_decls_builder();
@@ -9202,14 +9248,12 @@ get_method_type_name(const method_type& fn_type,
   // canonicalization), we want its representation to stay the same,
   // regardless of typedefs.  So let's strip typedefs from the return
   // type.
-  type_base_sptr return_type =
-    internal
-    ? peel_typedef_type(fn_type.get_return_type())
-    : fn_type.get_return_type();
+  type_base_sptr return_type = fn_type.get_return_type();
+
   const environment& env = fn_type.get_environment();
 
   if (return_type)
-    o << return_type->get_cached_pretty_representation(internal);
+    o << get_type_name(return_type, /*qualified=*/true, internal);
   else
     // There are still some abixml files out there in which "void"
     // can be expressed as an empty type.
@@ -9218,28 +9262,10 @@ get_method_type_name(const method_type& fn_type,
   class_or_union_sptr class_type = fn_type.get_class_type();
   ABG_ASSERT(class_type);
 
-  o << " (" << class_type->get_qualified_name(internal) << "::*)"
-    << " (";
-
-  type_base_sptr type;
-  for (function_type::parameters::const_iterator i =
-	 fn_type.get_parameters().begin();
-       i != fn_type.get_parameters().end();
-       ++i)
-    {
-      if (i != fn_type.get_parameters().begin())
-	o << ", ";
-      type = (*i)->get_type();
-      if (internal)
-	type = peel_typedef_type(type);
-      if (*i)
-	o << type->get_cached_pretty_representation(internal);
-      else
-	// There are still some abixml files out there in which "void"
-	// can be expressed as an empty type.
-	o << "void";
-    }
-  o <<")";
+  o << " (" << class_type->get_qualified_name(internal) << "::*) ";
+  stream_pretty_representation_of_fn_parms(fn_type, o,
+					   /*qualified=*/true,
+					   internal);
 
   return env.intern(o.str());
 }
@@ -9508,6 +9534,21 @@ get_class_or_union_flat_representation(const class_or_union& cou,
   if (!cou.get_is_anonymous())
     repr += name;
 
+  if (cou.priv_->is_printing_flat_representation())
+    {
+      // We have just detected a cycle while walking the sub-tree
+      // of this class or union type for the purpose of printing
+      // its flat representation.  We need to get out of here
+      // pronto or else we'll be spinning endlessly.
+      repr += "{}";
+      return repr;
+    }
+
+  // Let's mark this class or union type to signify that we started
+  // walking its sub-tree.  This is to detect potential cycles and
+  // avoid looping endlessly.
+  cou.priv_->set_printing_flat_representation();
+
   repr += "{";
 
   if (!one_line)
@@ -9553,6 +9594,11 @@ get_class_or_union_flat_representation(const class_or_union& cou,
     repr += "}";
   else
     repr += indent + "}";
+
+  // Let's unmark this class or union type to signify that we are done
+  // walking its sub-tree.  This was to detect potential cycles and
+  // avoid looping endlessly.
+  cou.priv_->unset_printing_flat_representation();
 
   return repr;
 }
@@ -9786,8 +9832,9 @@ get_class_or_enum_flat_representation(const type_base& coe,
 string
 get_debug_representation(const type_or_decl_base* artifact)
 {
+  string nil_str;
   if (!artifact)
-    return string("");
+    return nil_str;
 
   class_or_union * c = is_class_or_union_type(artifact);
   if (c)
@@ -9816,7 +9863,13 @@ get_debug_representation(const type_or_decl_base* artifact)
 	      if (b->get_is_virtual())
 		o << "virtual ";
 	      o << b->get_base_class()->get_qualified_name()
-		<< std::endl;
+		<< "   // hash: ";
+	      hash_t h = peek_hash_value(*b->get_base_class());
+	      if (h)
+		o << std::hex << *h << std::dec;
+	      else
+		o << "none";
+	      o << std::endl;
 	    }
 	}
       o << std::endl
@@ -9824,10 +9877,45 @@ get_debug_representation(const type_or_decl_base* artifact)
 	<< "   // size in bits: " << c->get_size_in_bits() << "\n"
 	<< "   // is-declaration-only: " << c->get_is_declaration_only() << "\n"
 	<< "   // definition point: " << get_natural_or_artificial_location(c).expand() << "\n"
-	<< "   // translation unit: " << c->get_translation_unit()->get_absolute_path() << std::endl
+	<< "   // translation unit: "
+	<< (c->get_translation_unit()
+	    ? c->get_translation_unit()->get_absolute_path()
+	    : nil_str)
+	<< std::endl
 	<< "   // @: " << std::hex << is_type(c)
-	<< ", @canonical: " << c->get_canonical_type().get() << std::dec
-	<< "\n\n";
+	<< ", @canonical: " << c->get_canonical_type().get() << std::dec << "\n"
+	<< "   // hash: " ;
+
+      hash_t h = peek_hash_value(*c);
+      if (h)
+	o << std::hex << *h << std::dec;
+      else
+	o << "none";
+      o << "\n" <<  "   // cti: " << std::dec << get_canonical_type_index(*c);
+      o << "\n\n";
+
+
+      for (auto member_type : c->get_sorted_member_types())
+	{
+	  o << "  "
+	    << member_type->get_pretty_representation(/*internal=*/false,
+						      /*qualified=*/false)
+	    << ";";
+	  if (member_type->get_canonical_type())
+	    {
+	      o << " // uses canonical type: '@"
+		<< std::hex << member_type->get_canonical_type().get() << "'";
+	      o << " / h:";
+	      hash_t h = peek_hash_value(*member_type);
+	      o << std::hex << *h << std::dec;
+	      if (get_canonical_type_index(*member_type))
+		o << "#" << get_canonical_type_index(*member_type);
+	    }
+	  o << "\n";
+	}
+
+      if (!c->get_sorted_member_types().empty())
+	o << std::endl;
 
       for (auto m : c->get_data_members())
 	{
@@ -9841,18 +9929,36 @@ get_debug_representation(const type_or_decl_base* artifact)
 
 	  if (t && t->get_canonical_type())
 	    o << " // uses canonical type '@"
-	      << std::hex << t->get_canonical_type().get() << std::dec;
+	      << std::hex << t->get_canonical_type().get() << "'";
 
-	  o << "'" << std::endl;
+	  o << "/ h:";
+	  hash_t h = peek_hash_value(*m->get_type());
+	  if (h)
+	    o << std::hex << *h << std::dec;
+	  else
+	    o << "none";
+	  o << std::endl;
 	}
+
+      if (!c->get_data_members().empty())
+	o << std::endl;
 
       if (clazz && clazz->has_vtable())
 	{
 	  o << "  // virtual member functions\n\n";
 	  for (auto f : clazz->get_virtual_mem_fns())
-	    o << "  " << f->get_pretty_representation(/*internal=*/false,
-						      /*qualified=*/false)
-	      << ";" << std::endl;
+	    {
+	      o << "  " << f->get_pretty_representation(/*internal=*/false,
+							/*qualified=*/false)
+		<< "   // voffset: " << get_member_function_vtable_offset(f)
+		<< ", h: ";
+	      hash_t h = peek_hash_value(*f->get_type());
+	      if (h)
+		o << std::hex << *h << std::dec;
+	      else
+		o << "none";
+	      o << ";" << std::endl;
+	    }
 	}
 
       o << "};" << std::endl;
@@ -9875,8 +9981,16 @@ get_debug_representation(const type_or_decl_base* artifact)
 	<< "  // translation unit: "
 	<< e->get_translation_unit()->get_absolute_path() << "\n"
 	<< "  // @: " << std::hex << is_type(e)
-	<< ", @canonical: " << e->get_canonical_type().get() << std::dec
-	<< "\n\n";
+	<< ", @canonical: " << e->get_canonical_type().get() << std::dec << "\n"
+	<< "  // hash: ";
+
+      hash_t h = peek_hash_value(*e);
+      if (h)
+	o << std::hex << *h << std::dec;
+      else
+	o << "none";
+      o << "\n" << "  // cti: " << std::dec << get_canonical_type_index(*e);
+      o << "\n\n";
 
       for (const auto &enom : e->get_enumerators())
 	o << "  " << enom.get_name() << " = " << enom.get_value() << ",\n";
@@ -9885,6 +9999,16 @@ get_debug_representation(const type_or_decl_base* artifact)
 
       return o.str();
     }
+  else if (type_base *t = is_type(artifact))
+    {
+      std::ostringstream o;
+      o << t->get_pretty_representation(/*internal=*/true,
+					/*qualified=*/true)
+	<< " // cti: " << get_canonical_type_index(*t)
+	<< "\n";
+      return o.str();
+    }
+
   return artifact->get_pretty_representation(/*internal=*/true,
 					     /*qualified=*/true);
 }
@@ -10082,6 +10206,9 @@ debug_comp_stack(const environment& env)
 bool
 odr_is_relevant(const type_or_decl_base& artifact)
 {
+  if (!artifact.get_translation_unit())
+    return false;
+
   translation_unit::language l =
     artifact.get_translation_unit()->get_language();
 
@@ -10120,12 +10247,146 @@ decl_base_sptr
 get_type_declaration(const type_base_sptr t)
 {return dynamic_pointer_cast<decl_base>(t);}
 
-/// Test if two types are equal modulo a typedef.
+/// Test if two classes have the same layout.
+///
+/// Test if all the types and offsets of the members are equal,
+/// regardless of their access modifiers.
+///
+/// @param f the first class to take into account.
+///
+/// @param s the second class to take into account.
+///
+/// @return true iff @p s and @p f are class types with the same
+/// layout.
+bool
+classes_have_same_layout(const type_base_sptr& f, const type_base_sptr& s)
+{
+#ifdef RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT
+#undef RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT
+#endif
+
+#ifdef ENSURE_NO_ENDLESS_LOOP
+#undef ENSURE_NO_ENDLESS_LOOP
+#endif
+
+#define RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(VALUE)		\
+  do								\
+    {								\
+      auto t1 = is_class_or_union_type(f);			\
+      auto t2 = is_class_or_union_type(s);			\
+      t1->priv_->comparing_class_layouts_.erase(t2.get());	\
+      t2->priv_->comparing_class_layouts_.erase(t1.get());	\
+      return VALUE;						\
+    } while (false)
+
+#define ENSURE_NO_ENDLESS_LOOP						\
+  do									\
+    {									\
+      auto t1 = is_class_or_union_type(f);				\
+      auto t2 = is_class_or_union_type(s);				\
+      const auto& END = t1->priv_->comparing_class_layouts_.end();	\
+      if (t1->priv_->comparing_class_layouts_.find(t2.get()) != END	\
+	  || t2->priv_->comparing_class_layouts_.find(t1.get()) != END) \
+	return true;							\
+      t1->priv_->comparing_class_layouts_.insert(t2.get());		\
+      t2->priv_->comparing_class_layouts_.insert(t1.get());		\
+    } while (false)
+
+  class_decl_sptr fc = is_class_type(peel_qualified_or_typedef_type(f)),
+    sc = is_class_type(peel_qualified_or_typedef_type(s));
+
+  if (!fc
+      || !sc
+      || (fc->get_qualified_name() != sc->get_qualified_name())
+      || (fc->get_size_in_bits() != sc->get_size_in_bits())
+      || (fc->get_data_members().size() != sc->get_data_members().size()))
+    return false;
+
+  if (*fc == *sc)
+    RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(true);
+
+  // Compare the types and offsets of data members one by one.
+  for (auto f_decl_it = fc->get_data_members().begin(),
+	 s_decl_it = sc->get_data_members().begin();
+       (f_decl_it != fc->get_data_members().end()
+	&& s_decl_it != sc->get_data_members().end());
+       ++f_decl_it, ++s_decl_it)
+    {
+      var_decl_sptr dm1 = *f_decl_it, dm2 = *s_decl_it;
+      type_base_sptr dm1_type = dm1->get_type(), dm2_type = dm2->get_type();
+
+      if (*dm1_type != *dm2_type
+	  || get_data_member_offset(dm1) != get_data_member_offset(dm2))
+	RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(false);
+    }
+
+  // Compare the layout of base types
+  for (auto f_bs_it = fc->get_base_specifiers().begin(),
+	 s_bs_it = sc->get_base_specifiers().end();
+       (f_bs_it != fc->get_base_specifiers().end()
+	&& s_bs_it != sc->get_base_specifiers().end());
+       ++f_bs_it, ++s_bs_it)
+    {
+      class_decl::base_spec_sptr f_bs = *f_bs_it, s_bs = *s_bs_it;
+      if ((f_bs->get_is_virtual() != s_bs->get_is_virtual())
+	  || (f_bs->get_offset_in_bits() != s_bs->get_offset_in_bits()))
+	RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(false);
+
+      class_decl_sptr fb = f_bs->get_base_class(), sb = s_bs->get_base_class();
+      if (!classes_have_same_layout(fb, sb))
+	RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(false);
+    }
+
+  if (fc->has_vtable() != sc->has_vtable())
+    RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(false);
+
+  // Compare virtual function types
+  ENSURE_NO_ENDLESS_LOOP;
+  if (fc->has_vtable())
+    {
+      if (fc->get_virtual_mem_fns().size() > sc->get_virtual_mem_fns().size())
+	// Some virtual member function got removed.  Bad.
+	RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(false);
+
+      for (auto it1 = fc->get_virtual_mem_fns().begin(),
+	     it2 = sc->get_virtual_mem_fns().begin();
+	   (it1 != fc->get_virtual_mem_fns().end()
+	    && it2 != sc->get_virtual_mem_fns().end());
+	   ++it1, ++it2)
+	{
+	  method_decl_sptr method1 = *it1;
+	  method_decl_sptr method2 = *it2;
+
+	  if ((get_member_function_vtable_offset(method1)
+	       != get_member_function_vtable_offset(method2))
+	      || !types_are_compatible(method1->get_type(),
+				       method2->get_type()))
+	    RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(false);
+	}
+    }
+
+  RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT(true);
+
+#ifdef RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT
+#undef RETURN_FROM_CLASSES_HAVE_SAME_LAYOUT
+#endif
+
+#ifdef ENSURE_NO_ENDLESS_LOOP
+#undef ENSURE_NO_ENDLESS_LOOP
+#endif
+}
+
+/// Test if two types are equal modulo a typedef or CV qualifiers.
 ///
 /// Type A and B are compatible if
 ///
 ///	- A and B are equal
+///	- or A and B are integral types with harmless name change
 ///	- or if one type is a typedef of the other one.
+///	- or if one type is the CV qualified version of the other
+///	- or if A and B are classes with the same layout.
+///	- or if A and B are pointers, references or arrays of
+///	  compatible types
 ///
 /// @param type1 the first type to consider.
 ///
@@ -10133,29 +10394,86 @@ get_type_declaration(const type_base_sptr t)
 ///
 /// @return true iff @p type1 and @p type2 are compatible.
 bool
-types_are_compatible(const type_base_sptr type1,
-		     const type_base_sptr type2)
+types_are_compatible(const type_base_sptr type1, const type_base_sptr type2)
 {
   if (!type1 || !type2)
     return false;
 
-  if (type1 == type2)
+  if (type1 == type2 || *type1 == *type2)
     return true;
 
-  // Normally we should strip typedefs entirely, but this is
-  // potentially costly, especially on binaries with huge changesets
-  // like the Linux Kernel.  So we just get the leaf types for now.
-  //
-  // Maybe there should be an option by which users accepts to pay the
-  // CPU usage toll in exchange for finer filtering?
+  type_base_sptr t1 = peel_qualified_or_typedef_type(type1);
+  type_base_sptr t2 = peel_qualified_or_typedef_type(type2);
 
-  // type_base_sptr t1 = strip_typedef(type1);
-  // type_base_sptr t2 = strip_typedef(type2);
+  if (t1 && t2 && *t1 == *t2)
+    return true;
 
-  type_base_sptr t1 = peel_typedef_type(type1);
-  type_base_sptr t2 = peel_typedef_type(type2);
+  if (integral_type_has_harmless_name_change(t1, t2))
+    return true;
 
-  return t1 == t2;
+  if (is_pointer_type(t1) && is_pointer_type(t2))
+    {
+      t1 = is_pointer_type(t1)->get_pointed_to_type();
+      t2 = is_pointer_type(t2)->get_pointed_to_type();
+      return types_are_compatible(t1, t2);
+    }
+
+  if (is_reference_type(t1) && is_reference_type(t2))
+    {
+      t1 = is_reference_type(t1)->get_pointed_to_type();
+      t2 = is_reference_type(t2)->get_pointed_to_type();
+      return types_are_compatible(t1, t2);
+    }
+
+  if (is_array_type(t1) && is_array_type(t2))
+    {
+      array_type_def_sptr a1 = is_array_type(t1);
+      array_type_def_sptr a2 =is_array_type(t2);
+      type_base_sptr e1 = a1->get_element_type();
+      type_base_sptr e2 = a2->get_element_type();
+      e1 = peel_qualified_or_typedef_type(e1);
+      e2 = peel_qualified_or_typedef_type(e2);
+
+      if ((a1->get_size_in_bits() != a2->get_size_in_bits())
+	  || (a1->get_dimension_count() != a2->get_dimension_count())
+	  || !types_are_compatible(e1, e2))
+	return false;
+
+      return true;
+    }
+
+  if (function_type_sptr fn_type1 = is_function_type(t1))
+    if (function_type_sptr fn_type2 = is_function_type(t2))
+      {
+	// Compare return types
+	if (!types_are_compatible(fn_type1->get_return_type(),
+				  fn_type2->get_return_type()))
+	  return false;
+
+	// Compare parameter types, omitting the implicit parameter to
+	// avoid infinite recursion when we are being called from
+	// classes_have_same_layout on classes with virtual member
+	// functions.
+	if (fn_type1->get_parameters().size()
+	    != fn_type2->get_parameters().size())
+	  return false;
+
+	for (auto p1 = fn_type1->get_first_non_implicit_parm(),
+	     p2 = fn_type2->get_first_non_implicit_parm();
+	     (p1 != fn_type1->get_parameters().end()
+	      && p2 != fn_type2->get_parameters().end());
+	     ++p1, ++p2)
+	  if (!types_are_compatible((*p1)->get_type(),
+				    (*p2)->get_type()))
+	    return false;
+
+	return true;
+      }
+
+  if (classes_have_same_layout(t1, t2))
+    return true;
+
+  return false;
 }
 
 /// Test if two types are equal modulo a typedef.
@@ -10182,8 +10500,28 @@ types_are_compatible(const decl_base_sptr d1,
 /// @return the resulting translation unit, or null if the decl is not
 /// yet added to a translation unit.
 translation_unit*
-get_translation_unit(const decl_base& decl)
-{return const_cast<translation_unit*>(decl.get_translation_unit());}
+get_translation_unit(const type_or_decl_base& t)
+{
+  translation_unit* result =
+    const_cast<translation_unit*>(t.get_translation_unit());
+
+  if (result)
+    return result;
+
+  if (decl_base* decl = is_decl(&t))
+    {
+      scope_decl* scope = decl->get_scope();
+      while (scope)
+	{
+	  result = scope->get_translation_unit();
+	  if (result)
+	    break;
+	  scope = scope->get_scope();
+	}
+    }
+
+  return result;
+}
 
 /// Return the translation unit a declaration belongs to.
 ///
@@ -10192,8 +10530,8 @@ get_translation_unit(const decl_base& decl)
 /// @return the resulting translation unit, or null if the decl is not
 /// yet added to a translation unit.
 translation_unit*
-get_translation_unit(const decl_base* decl)
-{return decl ? get_translation_unit(*decl) : 0;}
+get_translation_unit(const type_or_decl_base* decl)
+{return decl ? get_translation_unit(*decl) : nullptr;}
 
 /// Return the translation unit a declaration belongs to.
 ///
@@ -10202,7 +10540,7 @@ get_translation_unit(const decl_base* decl)
 /// @return the resulting translation unit, or null if the decl is not
 /// yet added to a translation unit.
 translation_unit*
-get_translation_unit(const shared_ptr<decl_base> decl)
+get_translation_unit(const type_or_decl_base_sptr& decl)
 {return get_translation_unit(decl.get());}
 
 /// Tests whether if a given scope is the global scope.
@@ -10545,6 +10883,24 @@ bool
 is_anonymous_type(const type_base_sptr& t)
 {return is_anonymous_type(t.get());}
 
+/// Test if a type is a neither a pointer, an array nor a function
+/// type.
+///
+/// @param t the type to consider.
+///
+/// @return true if the @p t is NOT a pointer, an array nor a
+/// function.
+bool
+is_npaf_type(const type_base_sptr& t)
+{
+  if (!(is_pointer_type(t)
+	|| is_array_type(t)
+	|| is_function_type(t)
+	|| is_ptr_to_mbr_type(t)))
+    return true;
+  return false;
+}
+
 /// Test whether a type is a type_decl (a builtin type).
 ///
 /// @return the type_decl* for @t if it's type_decl, otherwise, return
@@ -10561,6 +10917,46 @@ type_decl_sptr
 is_type_decl(const type_or_decl_base_sptr& t)
 {return dynamic_pointer_cast<type_decl>(t);}
 
+/// Test if a type is a real type.
+///
+/// @param t the type to test.
+///
+/// @return the real type @p t can be converted to, or nil if @p
+/// is not a real type.
+type_decl*
+is_real_type(const type_or_decl_base* t)
+{
+  type_decl *type = const_cast<type_decl*>(is_type_decl(t));
+  if (!type)
+    return nullptr;
+
+  real_type int_type;
+  if (!parse_real_type(type->get_name(), int_type))
+    return nullptr;
+
+  return type;
+}
+
+/// Test if a type is a real type.
+///
+/// @param t the type to test.
+///
+/// @return the real type @p t can be converted to, or nil if @p is
+/// not a real type.
+type_decl_sptr
+is_real_type(const type_or_decl_base_sptr& t)
+{
+  const type_decl_sptr type = is_type_decl(t);
+  if (!type)
+    return type_decl_sptr();
+
+  real_type int_type;
+  if (!parse_real_type(type->get_name(), int_type))
+    return type_decl_sptr();
+
+  return type;
+}
+
 /// Test if a type is an integral type.
 ///
 /// @param t the type to test.
@@ -10570,12 +10966,14 @@ is_type_decl(const type_or_decl_base_sptr& t)
 type_decl*
 is_integral_type(const type_or_decl_base* t)
 {
-  type_decl *type = const_cast<type_decl*>(is_type_decl(t));
+  type_decl* type = is_real_type(t);
   if (!type)
     return nullptr;
 
-  integral_type int_type;
-  if (!parse_integral_type(type->get_name(), int_type))
+  real_type rt;
+  ABG_ASSERT(parse_real_type(type->get_name(), rt));
+  if (rt.get_base_type () == real_type::FLOAT_BASE_TYPE
+      || rt.get_base_type() == real_type::DOUBLE_BASE_TYPE)
     return nullptr;
 
   return type;
@@ -10590,12 +10988,14 @@ is_integral_type(const type_or_decl_base* t)
 type_decl_sptr
 is_integral_type(const type_or_decl_base_sptr& t)
 {
-  const type_decl_sptr type = is_type_decl(t);
+  type_decl_sptr type = is_real_type(t);
   if (!type)
-    return type_decl_sptr();
+    return type;
 
-  integral_type int_type;
-  if (!parse_integral_type(type->get_name(), int_type))
+  real_type rt;
+  ABG_ASSERT(parse_real_type(type->get_name(), rt));
+  if (rt.get_base_type () == real_type::FLOAT_BASE_TYPE
+      || rt.get_base_type() == real_type::DOUBLE_BASE_TYPE)
     return type_decl_sptr();
 
   return type;
@@ -10640,6 +11040,23 @@ is_typedef(type_base* t)
 const typedef_decl*
 is_typedef(const type_or_decl_base* t)
 {return dynamic_cast<const typedef_decl*>(t);}
+
+/// Test if a type is an enum. This function looks through typedefs.
+///
+/// @parm t the type to consider.
+///
+/// @return the enum_decl if @p t is an @ref enum_decl or null
+/// otherwise.
+const enum_type_decl*
+is_compatible_with_enum_type(const type_base* t)
+{
+  if (!t)
+    return nullptr;
+
+  type_base* ty = const_cast<type_base*>(peel_typedef_type(t));
+  return is_enum_type(ty);
+}
+
 /// Test if a type is an enum. This function looks through typedefs.
 ///
 /// @parm t the type to consider.
@@ -10691,6 +11108,21 @@ is_enum_type(const type_or_decl_base* d)
 enum_type_decl_sptr
 is_enum_type(const type_or_decl_base_sptr& d)
 {return dynamic_pointer_cast<enum_type_decl>(d);}
+
+/// Test if a type is a class. This function looks through typedefs.
+///
+/// @parm t the type to consider.
+///
+/// @return the class_decl if @p t is a class_decl or null otherwise.
+const class_decl*
+is_compatible_with_class_type(const type_base* t)
+{
+  if(!t)
+    return nullptr;
+
+  const type_base* ty = peel_typedef_type(t);
+  return is_class_type(ty);
+}
 
 /// Test if a type is a class. This function looks through typedefs.
 ///
@@ -10780,7 +11212,7 @@ has_flexible_array_data_member(const class_decl& klass)
 
   if (array_type_def_sptr array = is_array_type(dms.back()->get_type()))
     {// The type of the last data member is an array.
-      if (array->is_infinite())
+      if (array->is_non_finite())
 	// The array has a non-finite size.  We are thus looking at a
 	// flexible array data member.  Let's return it.
 	return dms.back();
@@ -10822,6 +11254,88 @@ var_decl_sptr
 has_flexible_array_data_member(const class_decl_sptr& klass)
 {return has_flexible_array_data_member(klass.get());}
 
+/// Test if the last data member of a class is an array with
+/// one element.
+///
+/// An array with one element is a way to mimic the flexible data
+/// member idiom that was later standardized in C99.
+///
+/// To learn more about the flexible data member idiom, please
+/// consider reading :
+/// https://en.wikipedia.org/wiki/Flexible_array_member.
+///
+/// The various ways of representing that idiom pre-standardization
+/// are presented in this article:
+/// https://developers.redhat.com/articles/2022/09/29/benefits-limitations-flexible-array-members#
+///
+/// @param klass the class to consider.
+///
+/// @return the data member which type is a fake flexible array, if
+/// any, or nil.
+var_decl_sptr
+has_fake_flexible_array_data_member(const class_decl& klass)
+{
+  var_decl_sptr nil;
+  const class_or_union::data_members& dms = klass.get_data_members();
+  if (dms.empty())
+    return nil;
+
+  if (array_type_def_sptr array = is_array_type(dms.back()->get_type()))
+    {// The type of the last data member is an array.
+      if (array->get_subranges().size() == 1
+	  && array->get_subranges()[0]->get_length() == 1)
+	// The array has a size of one. We are thus looking at a
+	// "fake" flexible array data member.  Let's return it.
+	return dms.back();
+    }
+
+  return nil;
+}
+
+/// Test if the last data member of a class is an array with
+/// one element.
+///
+/// An array with one element is a way to mimic the flexible data
+/// member idiom that was later standardized in C99.
+///
+/// To learn more about the flexible data member idiom, please
+/// consider reading :
+/// https://en.wikipedia.org/wiki/Flexible_array_member.
+///
+/// The various ways of representing that idiom pre-standardization
+/// are presented in this article:
+/// https://developers.redhat.com/articles/2022/09/29/benefits-limitations-flexible-array-members#
+///
+/// @param klass the class to consider.
+///
+/// @return the data member which type is a fake flexible array, if
+/// any, or nil.
+var_decl_sptr
+has_fake_flexible_array_data_member(const class_decl* klass)
+{return has_fake_flexible_array_data_member(*klass);}
+
+/// Test if the last data member of a class is an array with
+/// one element.
+///
+/// An array with one element is a way to mimic the flexible data
+/// member idiom that was later standardized in C99.
+///
+/// To learn more about the flexible data member idiom, please
+/// consider reading :
+/// https://en.wikipedia.org/wiki/Flexible_array_member.
+///
+/// The various ways of representing that idiom pre-standardization
+/// are presented in this article:
+/// https://developers.redhat.com/articles/2022/09/29/benefits-limitations-flexible-array-members#
+///
+/// @param klass the class to consider.
+///
+/// @return the data member which type is a fake flexible array, if
+/// any, or nil.
+var_decl_sptr
+has_fake_flexible_array_data_member(const class_decl_sptr& klass)
+{return has_fake_flexible_array_data_member(klass.get());}
+
 /// Test wheter a type is a declaration-only class.
 ///
 /// @param t the type to considier.
@@ -10843,7 +11357,6 @@ is_declaration_only_class_or_union_type(const type_base *t,
     }
   return false;
 }
-
 
 /// Test wheter a type is a declaration-only class.
 ///
@@ -10956,43 +11469,114 @@ is_union_type(const shared_ptr<type_or_decl_base>& t)
 ///
 /// @param t the type to test.
 ///
-/// @return the @ref pointer_type_def_sptr if @p t is a
-/// pointer_type_def, null otherwise.
-pointer_type_def*
-is_pointer_type(type_or_decl_base* t)
-{
-  if (!t)
-    return 0;
-
-  if (t->kind() & type_or_decl_base::POINTER_TYPE)
-    return reinterpret_cast<pointer_type_def*>
-      (const_cast<type_or_decl_base*>(t)->runtime_type_instance());
-
-  return 0;
-}
-
-/// Test whether a type is a pointer_type_def.
-///
-/// @param t the type to test.
+/// @param look_through_decl_only if this is true, then look through
+/// qualified types to see if the underlying type is a
+/// pointer_type_def.
 ///
 /// @return the @ref pointer_type_def_sptr if @p t is a
 /// pointer_type_def, null otherwise.
 const pointer_type_def*
-is_pointer_type(const type_or_decl_base* t)
+is_pointer_type(const type_or_decl_base* t,
+		bool look_through_qualifiers)
 {
-  return is_pointer_type(const_cast<type_or_decl_base*>(t));
+  if (!t)
+    return 0;
+
+  const type_base* type = is_type(t);
+  if (look_through_qualifiers)
+    type = peel_qualified_type(is_type(t));
+
+  return dynamic_cast<pointer_type_def*>(const_cast<type_base*>(type));
 }
 
 /// Test whether a type is a pointer_type_def.
 ///
 /// @param t the type to test.
 ///
+/// @param look_through_decl_only if this is true, then look through
+/// qualified types to see if the underlying type is a
+/// pointer_type_def.
+///
 /// @return the @ref pointer_type_def_sptr if @p t is a
 /// pointer_type_def, null otherwise.
 pointer_type_def_sptr
-is_pointer_type(const type_or_decl_base_sptr &t)
-{return dynamic_pointer_cast<pointer_type_def>(t);}
+is_pointer_type(const type_or_decl_base_sptr &t,
+		bool look_through_qualifiers)
+{
+  type_base_sptr type = is_type(t);
+  if (look_through_qualifiers)
+    type = peel_qualified_type(type);
+  return dynamic_pointer_cast<pointer_type_def>(type);
+}
 
+/// Test if a type is a pointer to function type.
+///
+/// @param t the type to consider.
+///
+/// @return the @ref pointer_type_def_sptr iff @p t is a pointer to
+/// function type.
+pointer_type_def_sptr
+is_pointer_to_function_type(const type_base_sptr& t)
+{
+  if (pointer_type_def_sptr p = is_pointer_type(t))
+    {
+      if (is_function_type(p->get_pointed_to_type()))
+	return p;
+    }
+  return pointer_type_def_sptr();
+}
+
+/// Test if a type is a pointer to array type.
+///
+/// @param t the type to consider.
+///
+/// @return the pointer_type_def_sptr iff @p t is a pointer to array
+/// type.
+pointer_type_def_sptr
+is_pointer_to_array_type(const type_base_sptr& t)
+{
+  if (pointer_type_def_sptr p = is_pointer_type(t))
+    {
+      if (is_array_type(p->get_pointed_to_type()))
+	return p;
+    }
+  return pointer_type_def_sptr();
+}
+
+/// Test if we are looking at a pointer to a
+/// neither-a-pointer-to-an-array-nor-a-function type.
+///
+/// @param t the type to consider.
+///
+/// @return the @ref pointer_type_def_sptr type iff @p t is a
+/// neither-a-pointer-an-array-nor-a-function type.
+pointer_type_def_sptr
+is_pointer_to_npaf_type(const type_base_sptr& t)
+{
+  if (pointer_type_def_sptr p = is_pointer_type(t))
+    {
+      if (is_npaf_type(p->get_pointed_to_type()))
+	return p;
+    }
+  return pointer_type_def_sptr();
+}
+
+/// Test if we are looking at a pointer to pointer to member type.
+///
+/// @param t the type to consider.
+///
+/// @return the @ref pointer_type_def_sptr type iff @p t is a pointer
+/// to pointer to member type.
+pointer_type_def_sptr
+is_pointer_to_ptr_to_mbr_type(const type_base_sptr& t)
+{
+  if (pointer_type_def_sptr p = is_pointer_type(t))
+    {
+      if (is_ptr_to_mbr_type(p->get_pointed_to_type()))
+	return p;
+    }
+  return pointer_type_def_sptr();
+}
 
 /// Test if a type is a typedef, pointer or reference to a decl-only
 /// class/union.
@@ -11016,35 +11600,142 @@ is_typedef_ptr_or_ref_to_decl_only_class_or_union_type(const type_base* t)
   return false;
 }
 
+/// Test if a type is a typedef of a class or union type, or a typedef
+/// of a qualified class or union type.
+///
+/// Note that if the type is directly a class or union type, the
+/// function returns true as well.
+///
+/// @param t the type to consider.
+///
+/// @return true iff @p t is a typedef of a class or union type, or a
+/// typedef of a qualified class or union type.
+bool
+is_typedef_of_maybe_qualified_class_or_union_type(const type_base* t)
+{
+  if (!t)
+    return false;
+
+  t = peel_qualified_or_typedef_type(t);
+  if (is_class_or_union_type(t))
+    return true;
+
+return false;
+}
+
+/// Test if a type is a typedef of a class or union type, or a typedef
+/// of a qualified class or union type.
+///
+/// Note that if the type is directly a class or union type, the
+/// function returns true as well.
+///
+/// @param t the type to consider.
+///
+/// @return true iff @p t is a typedef of a class or union type, or a
+/// typedef of a qualified class or union type.
+bool
+is_typedef_of_maybe_qualified_class_or_union_type(const type_base_sptr& t)
+{return is_typedef_of_maybe_qualified_class_or_union_type(t.get());}
+
 /// Test whether a type is a reference_type_def.
 ///
 /// @param t the type to test.
+///
+/// @param look_through_decl_only if this is true, then look through
+/// qualified types to see if the underlying type is a
+/// reference_type_def.
 ///
 /// @return the @ref reference_type_def_sptr if @p t is a
 /// reference_type_def, null otherwise.
 reference_type_def*
-is_reference_type(type_or_decl_base* t)
-{return dynamic_cast<reference_type_def*>(t);}
+is_reference_type(type_or_decl_base* t,
+		  bool look_through_qualifiers)
+{
+  const type_base* type = is_type(t);
+  if (!type)
+    return nullptr;
+
+  if (look_through_qualifiers)
+    type = peel_qualified_type(type);
+  return dynamic_cast<reference_type_def*>(const_cast<type_base*>(type));
+}
 
 /// Test whether a type is a reference_type_def.
 ///
 /// @param t the type to test.
+///
+/// @param look_through_decl_only if this is true, then look through
+/// qualified types to see if the underlying type is a
+/// reference_type_def.
 ///
 /// @return the @ref reference_type_def_sptr if @p t is a
 /// reference_type_def, null otherwise.
 const reference_type_def*
-is_reference_type(const type_or_decl_base* t)
-{return dynamic_cast<const reference_type_def*>(t);}
+is_reference_type(const type_or_decl_base* t,
+		  bool look_through_qualifiers)
+{
+  const type_base* type = is_type(t);
+
+  if (look_through_qualifiers)
+    type = peel_qualified_type(type);
+  return dynamic_cast<const reference_type_def*>(type);
+}
 
 /// Test whether a type is a reference_type_def.
 ///
 /// @param t the type to test.
 ///
+/// @param look_through_decl_only if this is true, then look through
+/// qualified types to see if the underlying type is a
+/// reference_type_def.
+///
 /// @return the @ref reference_type_def_sptr if @p t is a
 /// reference_type_def, null otherwise.
 reference_type_def_sptr
-is_reference_type(const type_or_decl_base_sptr& t)
-{return dynamic_pointer_cast<reference_type_def>(t);}
+is_reference_type(const type_or_decl_base_sptr& t,
+		  bool look_through_qualifiers)
+{
+  type_base_sptr type = is_type(t);
+  if (look_through_qualifiers)
+    type = peel_qualified_type(type);
+  return dynamic_pointer_cast<reference_type_def>(type);
+}
+
+/// Test whether a type is a @ref ptr_to_mbr_type.
+///
+/// @param t the type to test.
+///
+/// @return the @ref ptr_to_mbr_type* if @p t is a @ref
+/// ptr_to_mbr_type type, null otherwise.
+const ptr_to_mbr_type*
+is_ptr_to_mbr_type(const type_or_decl_base* t,
+		   bool look_through_qualifiers)
+{
+  const type_base* type = is_type(t);
+  if (look_through_qualifiers)
+    type = peel_qualified_type(type);
+  return dynamic_cast<const ptr_to_mbr_type*>(type);
+}
+
+/// Test whether a type is a @ref ptr_to_mbr_type_sptr.
+///
+/// @param t the type to test.
+///
+/// @param look_through_decl_only if this is true, then look through
+/// qualified types to see if the underlying type is a
+/// ptr_to_mbr_type..
+///
+/// @return the @ref ptr_to_mbr_type_sptr if @p t is a @ref
+/// ptr_to_mbr_type type, null otherwise.
+ptr_to_mbr_type_sptr
+is_ptr_to_mbr_type(const type_or_decl_base_sptr& t,
+		   bool look_through_qualifiers)
+{
+  type_base_sptr type = is_type(t);
+  if (look_through_qualifiers)
+    type = peel_qualified_type(type);
+  return dynamic_pointer_cast<ptr_to_mbr_type>(type);
+}
 
 /// Test if a type is equivalent to a pointer to void type.
 ///
@@ -11127,7 +11818,7 @@ is_void_pointer_type(const type_base_sptr& t)
   if (t->get_environment().get_void_pointer_type().get() == t.get())
     return t;
 
-  pointer_type_def* ptr = is_pointer_type(t.get());
+  const pointer_type_def* ptr = is_pointer_type(t.get());
   if (!ptr)
     return nil;
 
@@ -11333,7 +12024,7 @@ look_through_decl_only(const decl_base_sptr& d)
 ///
 /// @return either the definition of the decl, or the initial type.
 type_base*
-look_through_decl_only(type_base* t)
+look_through_decl_only_type(type_base* t)
 {
   decl_base* d = is_decl(t);
   if (!d)
@@ -11349,7 +12040,7 @@ look_through_decl_only(type_base* t)
 ///
 /// @return either the definition of the decl, or the initial type.
 type_base_sptr
-look_through_decl_only(const type_base_sptr& t)
+look_through_decl_only_type(const type_base_sptr& t)
 {
   decl_base_sptr d = is_decl(t);
   if (!d)
@@ -11429,8 +12120,15 @@ is_function_template_pattern(const shared_ptr<decl_base> decl)
 ///
 /// @return true iff @p type is an array_type_def.
 array_type_def*
-is_array_type(const type_or_decl_base* type)
-{return dynamic_cast<array_type_def*>(const_cast<type_or_decl_base*>(type));}
+is_array_type(const type_or_decl_base* type,
+	      bool look_through_qualifiers)
+{
+  const type_base* t = is_type(type);
+
+  if (look_through_qualifiers)
+    t = peel_qualified_type(t);
+  return dynamic_cast<array_type_def*>(const_cast<type_base*>(t));
+}
 
 /// Test if a type is an array_type_def.
 ///
@@ -11438,8 +12136,15 @@ is_array_type(const type_or_decl_base* type)
 ///
 /// @return true iff @p type is an array_type_def.
 array_type_def_sptr
-is_array_type(const type_or_decl_base_sptr& type)
-{return dynamic_pointer_cast<array_type_def>(type);}
+is_array_type(const type_or_decl_base_sptr& type,
+	      bool look_through_qualifiers)
+{
+  type_base_sptr t = is_type(type);
+
+  if (look_through_qualifiers)
+    t = peel_qualified_type(t);
+  return dynamic_pointer_cast<array_type_def>(t);
+}
 
 /// Tests if the element of a given array is a qualified type.
 ///
@@ -12050,7 +12755,7 @@ pointer_type_def_sptr
 lookup_pointer_type(const type_base_sptr& pointed_to_type,
 		    const translation_unit& tu)
 {
-  type_base_sptr t = look_through_decl_only(pointed_to_type);
+  type_base_sptr t = look_through_decl_only_type(pointed_to_type);
   interned_string type_name = get_name_of_pointer_to_type(*t);
   return lookup_pointer_type(type_name, tu);
 }
@@ -12095,7 +12800,7 @@ lookup_reference_type(const type_base_sptr& pointed_to_type,
 		      const translation_unit& tu)
 {
   interned_string type_name =
-    get_name_of_reference_to_type(*look_through_decl_only(pointed_to_type),
+    get_name_of_reference_to_type(*look_through_decl_only_type(pointed_to_type),
 				  lvalue_reference);
   return lookup_reference_type(type_name, tu);
 }
@@ -14292,6 +14997,39 @@ maybe_update_types_lookup_map(const pointer_type_def_sptr& pointer_type)
 }
 
 /// Update the map that associates the fully qualified name of a
+/// pointer-to-member type with the type itself.
+///
+/// The per-translation unit type map is updated if no type with this
+/// name was already existing in that map.
+///
+/// If no type with this name did already exist in the per-corpus type
+/// map, then that per-corpus type map is updated. Otherwise, that
+/// type is erased from that per-corpus map.
+///
+/// @param ptr_to_mbr_type the type to consider.
+void
+maybe_update_types_lookup_map(const ptr_to_mbr_type_sptr& ptr_to_member)
+{
+  if (translation_unit *tu = ptr_to_member->get_translation_unit())
+    maybe_update_types_lookup_map<ptr_to_mbr_type>
+      (ptr_to_member, tu->get_types().ptr_to_mbr_types());
+
+  if (corpus *type_corpus = ptr_to_member->get_corpus())
+    {
+      maybe_update_types_lookup_map<ptr_to_mbr_type>
+	(ptr_to_member,
+	 type_corpus->priv_->get_types().ptr_to_mbr_types());
+
+      if (corpus *group = type_corpus->get_group())
+	{
+	  maybe_update_types_lookup_map<ptr_to_mbr_type>
+	    (ptr_to_member,
+	     group->priv_->get_types().ptr_to_mbr_types());
+	}
+    }
+}
+
+/// Update the map that associates the fully qualified name of a
 /// reference type with the type itself.
 ///
 /// The per-translation unit type map is updated if no type with this
@@ -14476,6 +15214,8 @@ maybe_update_types_lookup_map(const decl_base_sptr& decl)
     maybe_update_types_lookup_map(qualified_type);
   else if (pointer_type_def_sptr pointer_type = is_pointer_type(decl))
     maybe_update_types_lookup_map(pointer_type);
+  else if (ptr_to_mbr_type_sptr ptr_to_member = is_ptr_to_mbr_type(decl))
+    maybe_update_types_lookup_map(ptr_to_member);
   else if (reference_type_def_sptr reference_type = is_reference_type(decl))
     maybe_update_types_lookup_map(reference_type);
   else if (array_type_def_sptr array_type = is_array_type(decl))
@@ -14731,10 +15471,6 @@ global_scope::~global_scope()
 {
 }
 
-static bool
-maybe_propagate_canonical_type(const type_base& lhs_type,
-			       const type_base& rhs_type);
-
 /// Test if two types are eligible to the "Linux Kernel Fast Type
 /// Comparison Optimization", a.k.a LKFTCO.
 ///
@@ -14883,10 +15619,12 @@ compare_types_during_canonicalization(const type_base& canonical_type,
   if (env.debug_type_canonicalization_is_on())
     {
       bool canonical_equality = false, structural_equality = false;
+      env.priv_->allow_type_comparison_results_caching(false);
       env.priv_->use_canonical_type_comparison_ = false;
       structural_equality = canonical_type == candidate_type;
       env.priv_->use_canonical_type_comparison_ = true;
       canonical_equality = canonical_type == candidate_type;
+      env.priv_->allow_type_comparison_results_caching(true);
       if (canonical_equality != structural_equality)
 	{
 	  std::cerr << "structural & canonical equality different for type: "
@@ -14944,7 +15682,7 @@ compare_canonical_type_against_candidate(const type_base& canonical_type,
   // resolved to any of the two definitions of struct S.
   bool saved_decl_only_class_equals_definition =
     env.decl_only_class_equals_definition();
-  env.do_on_the_fly_canonicalization(true);
+
   // Compare types by considering that decl-only classes don't
   // equal their definition.
   env.decl_only_class_equals_definition(false);
@@ -14958,7 +15696,6 @@ compare_canonical_type_against_candidate(const type_base& canonical_type,
   // flags.
   env.priv_->clear_type_comparison_results_cache();
   env.priv_->allow_type_comparison_results_caching(false);
-  env.do_on_the_fly_canonicalization(false);
   env.decl_only_class_equals_definition
     (saved_decl_only_class_equals_definition);
   return equal;
@@ -15018,6 +15755,79 @@ compare_canonical_type_against_candidate(const type_base_sptr& canonical_type,
 {
   return compare_canonical_type_against_candidate(canonical_type.get(),
 						  candidate_type.get());
+}
+
+/// Test if a candidate for type canonicalization coming from ABIXML
+/// matches a canonical type by first looking at their hash values.
+///
+/// If the two hash values are equal then the candidate is
+/// structurally compared to the canonical type.  If the two hashes
+/// are different then the two types are considered different and the
+/// function returns nullptr.
+///
+/// If the candidate doesn't come from ABIXML then the function
+/// returns nullptr.
+///
+/// @param cncls the vector of canonical types to consider.
+///
+/// @param type the candidate to consider for canonicalization.
+///
+/// @return the canonical type from @p cncls that matches the
+/// candidate @p type.
+static type_base_sptr
+candidate_matches_a_canonical_type_hash(const vector<type_base_sptr>&	cncls,
+					type_base&			type)
+{
+  if (type.get_corpus()
+      && type.get_corpus()->get_origin() == corpus::NATIVE_XML_ORIGIN
+      && peek_hash_value(type))
+    {
+      // The candidate type comes from ABIXML and does have a stashed
+      // hash value coming from the ABIXML.
+
+      // Let's see if we find a potential canonical type whose hash
+      // matches the stashed hash and whose canonical type index
+      // matches it too.
+      for (const auto& c : cncls)
+	if (peek_hash_value(type) == peek_hash_value(*c))
+	  if (get_canonical_type_index(type) == get_canonical_type_index(*c))
+	    // We found a potential canonical type which hash matches the
+	    // stashed hash of the candidate type.  Let's compare them to
+	    // see if they match.
+	    if (compare_canonical_type_against_candidate(*c, type))
+	      return c;
+
+      // Let's do the same things, but just consideing hash values.
+      for (const auto& c : cncls)
+	if (peek_hash_value(type) == peek_hash_value(*c))
+	  // We found a potential canonical type which hash matches the
+	  // stashed hash of the candidate type.  Let's compare them to
+	  // see if they match.
+	  if (compare_canonical_type_against_candidate(*c, type))
+	    return c;
+    }
+
+  return nullptr;
+}
+
+/// Test if we should attempt to compute a hash value for a given
+/// type.
+///
+/// For now this function returns true only for types originating from
+/// ELF.  For types originating from ABIXML, for instance, the
+/// function return false, meaning that types originating from ABIXML
+/// should NOT be hashed.
+///
+/// @param t the type to consider.
+///
+/// @return true iff @p type should be considered for hashing.
+bool
+type_is_suitable_for_hash_computing(const type_base& t)
+{
+  if (t.get_corpus()
+      && (t.get_corpus()->get_origin() & corpus::ELF_ORIGIN))
+    return true;
+  return false;
 }
 
 /// Compute the canonical type for a given instance of @ref type_base.
@@ -15110,6 +15920,7 @@ type_base::get_canonical_type_for(type_base_sptr t)
 
   type_base_sptr result;
   environment::canonical_types_map_type::iterator i = types.find(repr);
+
   if (i == types.end())
     {
       vector<type_base_sptr> v;
@@ -15120,6 +15931,12 @@ type_base::get_canonical_type_for(type_base_sptr t)
   else
     {
       vector<type_base_sptr> &v = i->second;
+      // Look at the canonical types and if the current candidate type
+      // coming from abixml has the same hash as one of the canonical
+      // types, then compare the current candidate with the one with a
+      // matching hash.
+      result = candidate_matches_a_canonical_type_hash(v, *t);
+
       // Let's compare 't' structurally (i.e, compare its sub-types
       // recursively) against the canonical types of the system. If it
       // equals a given canonical type C, then it means C is the
@@ -15127,7 +15944,7 @@ type_base::get_canonical_type_for(type_base_sptr t)
       // all the canonical types of the system, then it means 't' is a
       // canonical type itself.
       for (vector<type_base_sptr>::const_reverse_iterator it = v.rbegin();
-	   it != v.rend();
+	   !result && it != v.rend();
 	   ++it)
 	{
 	  bool equal = compare_canonical_type_against_candidate(*it, t);
@@ -15144,7 +15961,9 @@ type_base::get_canonical_type_for(type_base_sptr t)
 	  // possibly via the use of 'abidw --debug-abidiff <binary>'.
 	  corpus_sptr corp1, corp2;
 	  env.get_self_comparison_debug_inputs(corp1, corp2);
-	  if (corp1 && corp2 && t->get_corpus() == corp2.get())
+	  if (corp1 && corp2 && type_originates_from_corpus(t, corp2)
+	      && corp1->get_origin() != corp2->get_origin()
+	      && corp2->get_origin() & corpus::NATIVE_XML_ORIGIN)
 	    {
 	      // If 't' comes from the second corpus, then it *must*
 	      // be equal to its matching canonical type coming from
@@ -15180,6 +15999,7 @@ type_base::get_canonical_type_for(type_base_sptr t)
 				<< "'.  Should have had canonical type: "
 				<< std::hex
 				<< should_have_canonical_type
+				<< std::dec
 				<< std::endl;
 		    }
 		}
@@ -15210,8 +16030,36 @@ type_base::get_canonical_type_for(type_base_sptr t)
 			    << "' from second corpus"
 			    << ", ptr: " << std::hex << t.get()
 			    << " type-id: " << type_id
+			    << " /hash="
+			    << *t->hash_value()
+			    << std::dec
 			    << std::endl;
 		}
+	    }
+	  if (result)
+	    {
+	      if (!is_type_decl(t))
+		  if (hash_t t_hash = peek_hash_value(*t))
+		    if (hash_t result_hash = peek_hash_value(*result))
+		      if (t_hash != result_hash)
+			{
+			  std::cerr << "error: type hash mismatch"
+				    << " between type: '"
+				    << repr
+				    << "' @ "
+				    << std::hex
+				    << t.get()
+				    << "/hash="
+				    << *t->hash_value()
+				    << " and its computed canonical type @"
+				    << std::hex
+				    << result.get()
+				    << "/hash="
+				    << std::hex
+				    << *result->hash_value()
+				    << std::dec
+				    << std::endl;
+			}
 	    }
 	}
 #endif //WITH_DEBUG_SELF_COMPARISON
@@ -15220,6 +16068,10 @@ type_base::get_canonical_type_for(type_base_sptr t)
 	{
 	  v.push_back(t);
 	  result = t;
+	  // we need to generate a canonical type index to sort these
+	  // types that have the same representation and potentially
+	  // same hash value but are canonically different.
+	  t->priv_->canonical_type_index = v.size();
 	}
     }
 
@@ -15251,18 +16103,16 @@ static void
 maybe_adjust_canonical_type(const type_base_sptr& canonical,
 			    const type_base_sptr& type)
 {
-  if (!canonical
-      // If 'type' is *NOT* a newly canonicalized type ...
-      || type->get_naked_canonical_type()
-      // ... or if 'type' is it's own canonical type, then get out.
-      || type.get() == canonical.get())
+  if (type->get_naked_canonical_type())
     return;
+
+  class_decl_sptr canonical_class = is_class_type(canonical);
 
   if (class_decl_sptr cl = is_class_type(type))
     {
-      class_decl_sptr canonical_class = is_class_type(canonical);
-
-      if (canonical_class)
+      cl = is_class_type(look_through_decl_only_class(cl));
+      if (canonical_class
+	  && canonical_class.get() != cl.get())
 	{
 	  // Set symbols of member functions that might be missing
 	  // theirs.
@@ -15283,17 +16133,78 @@ maybe_adjust_canonical_type(const type_base_sptr& canonical,
 		      m->set_symbol(s1);
 		  }
 		else
-		  // There is a member function defined and publicly
-		  // exported in the other class, and the canonical
-		  // class doesn't have that member function.  Let's
-		  // copy that member function to the canonical class
-		  // then.
-		  {
-		    method_decl_sptr method =
-		      copy_member_function (canonical_class, *i);
-		    canonicalize(method->get_type());
-		  }
+		  if (canonical_class->get_corpus()
+		      && cl->get_corpus()
+		      && (cl->get_corpus() == canonical_class->get_corpus()))
+		    // There is a member function defined and publicly
+		    // exported in the other class and the canonical
+		    // class doesn't have that member function.  This
+		    // should not have happened!  For instance, the
+		    // DWARF reader does merge the member functions of
+		    // classes having the same name so that all of them
+		    // end-up having the same member functions.  What's
+		    // going on here?
+		    ABG_ASSERT_NOT_REACHED;
 	      }
+
+	  // Set symbols of static data members that might be missing
+	  // theirs.
+	  for (const auto& data_member : cl->get_data_members())
+	    {
+	      if (!get_member_is_static(data_member))
+		continue;
+	      elf_symbol_sptr sym = data_member->get_symbol();
+	      if (!sym)
+		continue;
+	      const auto& canonical_data_member =
+		canonical_class->find_data_member(data_member->get_name());
+	      if (!canonical_data_member)
+		// Hmmh, maybe we
+		// should consider
+		// static data members
+		// when comparing two
+		// classes for the
+		// purpose of type
+		// canonicalization?
+		continue;
+	      if (!canonical_data_member->get_symbol())
+		canonical_data_member->set_symbol(sym);
+	    }
+	}
+    }
+
+  // Make sure the virtual member functions with exported symbols are
+  // all added to the set of exported functions of the corpus.
+
+  // If we are looking at a non-canonicalized class (for instance, a
+  // decl-only class that has virtual member functions), let's pretend
+  // it does have a canonical class so that we can perform the
+  // necessary virtual  member function adjustments
+  if (class_decl_sptr cl = is_class_type(type))
+    if (is_non_canonicalized_type(cl))
+      {
+	ABG_ASSERT(!canonical_class);
+	canonical_class = cl;
+      }
+
+  if (canonical_class)
+    {
+      if (auto abi_corpus = canonical_class->get_corpus())
+	{
+	  for (auto& fn : canonical_class->get_member_functions())
+	    {
+	      if (elf_symbol_sptr sym = fn->get_symbol())
+		{
+		  if (sym->is_defined() && sym->is_public())
+		    {
+		      fn->set_is_in_public_symbol_table(true);
+		      auto b = abi_corpus->get_exported_decls_builder();
+		      b->maybe_add_fn_to_exported_fns(fn.get());
+		    }
+		  else if (!sym->is_defined())
+		    abi_corpus->get_undefined_functions().insert(fn.get());
+		}
+	    }
 	}
     }
 
@@ -15321,9 +16232,15 @@ maybe_adjust_canonical_type(const type_base_sptr& canonical,
 /// t->get_canonical_type() will return the newly computed canonical
 /// type.
 ///
+/// @param do_log if true then logs are emitted about canonicalization
+/// progress.
+///
+/// @param show_stats if true and if @p do_log is true as well, then
+/// more detailed logs are emitted about canonicalization.
+///
 /// @return the canonical type computed for @p t.
 type_base_sptr
-canonicalize(type_base_sptr t)
+canonicalize(type_base_sptr t, bool do_log, bool show_stats)
 {
   if (!t)
     return t;
@@ -15331,21 +16248,21 @@ canonicalize(type_base_sptr t)
   if (t->get_canonical_type())
     return t->get_canonical_type();
 
-  if (t->get_environment().priv_->do_log())
+  if (do_log && show_stats)
     std::cerr << "Canonicalization of type '"
 	      << t->get_pretty_representation(true, true)
 	      << "/@#" << std::hex << t.get() << ": ";
 
   tools_utils::timer tmr;
 
-  if (t->get_environment().priv_->do_log())
+  if (do_log && show_stats)
     tmr.start();
   type_base_sptr canonical = type_base::get_canonical_type_for(t);
 
-  if (t->get_environment().priv_->do_log())
+  if (do_log && show_stats)
     tmr.stop();
 
-  if (t->get_environment().priv_->do_log())
+  if (do_log && show_stats)
     std::cerr << tmr << "\n";
 
   maybe_adjust_canonical_type(canonical, t);
@@ -15353,20 +16270,9 @@ canonicalize(type_base_sptr t)
   t->priv_->canonical_type = canonical;
   t->priv_->naked_canonical_type = canonical.get();
 
-  // So this type is now canonicalized.
-  //
-  // It means that:
-  //
-  //   1/ Either the canonical type was not propagated during the
-  //      comparison of another type that was being canonicalized
-  //
-  //   2/ Or the canonical type has been propagated during the
-  //      comparison of another type that was being canonicalized and
-  //      that propagated canonical type has been confirmed, because
-  //      it was depending on a recursive type which comparison
-  //      succeeded.
-  ABG_ASSERT(!t->priv_->canonical_type_propagated()
-	     || t->priv_->propagated_canonical_type_confirmed());
+  if (canonical)
+    if (!t->priv_->canonical_type_index)
+      t->priv_->canonical_type_index = canonical->priv_->canonical_type_index;
 
   if (class_decl_sptr cl = is_class_type(t))
     if (type_base_sptr d = is_type(cl->get_earlier_declaration()))
@@ -15391,11 +16297,11 @@ canonicalize(type_base_sptr t)
 		// 'canonical' to the set of canonical types belonging
 		// to ST.
 		if (type_base_sptr c = is_type(scope)->get_canonical_type())
-		  // We want to add 'canonical' to set of canonical
-		  // types belonging to the canonical type of ST.  That
-		  // way, just looking at the canonical type of ST is
-		  // enough to get the types that belong to the scope of
-		  // the class of equivalence of ST.
+		  // We want to add 'canonical' to the set of
+		  // canonical types belonging to the canonical type
+		  // of ST.  That way, just looking at the canonical
+		  // type of ST is enough to get the types that belong
+		  // to the scope of the class of equivalence of ST.
 		  scope = is_scope_decl(is_decl(c)).get();
 	      scope->get_canonical_types().insert(canonical);
 	    }
@@ -15403,18 +16309,6 @@ canonicalize(type_base_sptr t)
 	  // emitted.  This can be the case for the result of the
 	  // function strip_typedef, for instance.
 	}
-
-#ifdef WITH_DEBUG_CT_PROPAGATION
-      // Update the book-keeping of the set of the types which
-      // propagated canonical type has been cleared.
-      //
-      // If this type 't' which has just been canonicalized was
-      // previously in the set of types which propagated canonical
-      // type has been cleared, then remove it from that set because
-      // its canonical type is now computed and definitely set.
-      const environment& env = t->get_environment();
-      env.priv_->erase_type_with_cleared_propagated_canonical_type(t.get());
-#endif
     }
 
   t->on_canonical_type_set();
@@ -15445,6 +16339,20 @@ type_base::type_base(const environment& e, size_t s, size_t a)
   : type_or_decl_base(e, ABSTRACT_TYPE_BASE|ABSTRACT_TYPE_BASE),
     priv_(new priv(s, a))
 {}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+type_base::hash_value() const
+{
+  type_base::hash do_hash;
+  return do_hash(this);
+}
 
 /// Getter of the canonical type of the current instance of @ref
 /// type_base.
@@ -15479,19 +16387,26 @@ type_base::get_naked_canonical_type() const
 /// is empty, this function computes the pretty representation, put it
 /// in the cache and returns it.
 ///
-/// Note that if the type is *NOT* canonicalized, the pretty
-/// representation is never cached.
+/// Please note that if this function is called too early in the life
+/// cycle of the type (before the type is fully constructed), then the
+/// pretty representation that is cached is going to represent a
+/// non-complete (and thus wrong) representation of the type.  Thus
+/// this function must be called only once the type is fully
+/// constructed.
 ///
 /// @param internal if true, then the pretty representation is to be
 /// used for purpuses that are internal to the libabigail library
 /// itself.  If you don't know what this means, then you probably
 /// should set this parameter to "false".
+///
+/// @return a reference to a cached @ref interned_string holding the
+/// pretty representation of the current type.
 const interned_string&
 type_base::get_cached_pretty_representation(bool internal) const
 {
   if (internal)
     {
-      if (!get_naked_canonical_type() || priv_->internal_cached_repr_.empty())
+      if (priv_->internal_cached_repr_.empty())
 	{
 	  string r = ir::get_pretty_representation(this, internal);
 	  priv_->internal_cached_repr_ = get_environment().intern(r);
@@ -15499,7 +16414,7 @@ type_base::get_cached_pretty_representation(bool internal) const
       return priv_->internal_cached_repr_;
     }
 
-  if (!get_naked_canonical_type() || priv_->cached_repr_.empty())
+  if (priv_->cached_repr_.empty())
     {
       string r = ir::get_pretty_representation(this, internal);
       priv_->cached_repr_ = get_environment().intern(r);
@@ -15609,80 +16524,80 @@ type_base::~type_base()
 
 // </type_base definitions>
 
-// <integral_type definitions>
+// <real_type definitions>
 
-/// Bitwise OR operator for integral_type::modifiers_type.
+/// Bitwise OR operator for real_type::modifiers_type.
 ///
 /// @param l the left-hand side operand.
 ///
 /// @param r the right-hand side operand.
 ///
 /// @return the result of the bitwise OR.
-integral_type::modifiers_type
-operator|(integral_type::modifiers_type l, integral_type::modifiers_type r)
+real_type::modifiers_type
+operator|(real_type::modifiers_type l, real_type::modifiers_type r)
 {
-  return static_cast<integral_type::modifiers_type>(static_cast<unsigned>(l)
+  return static_cast<real_type::modifiers_type>(static_cast<unsigned>(l)
 						    |
 						    static_cast<unsigned>(r));
 }
 
-/// Bitwise AND operator for integral_type::modifiers_type.
+/// Bitwise AND operator for real_type::modifiers_type.
 ///
 /// @param l the left-hand side operand.
 ///
 /// @param r the right-hand side operand.
 ///
 /// @return the result of the bitwise AND.
-integral_type::modifiers_type
-operator&(integral_type::modifiers_type l, integral_type::modifiers_type r)
+real_type::modifiers_type
+operator&(real_type::modifiers_type l, real_type::modifiers_type r)
 {
-  return static_cast<integral_type::modifiers_type>(static_cast<unsigned>(l)
+  return static_cast<real_type::modifiers_type>(static_cast<unsigned>(l)
 						    &
 						    static_cast<unsigned>(r));
 }
 
-/// Bitwise one's complement operator for integral_type::modifiers_type.
+/// Bitwise one's complement operator for real_type::modifiers_type.
 ///
 /// @param l the left-hand side operand.
 ///
 /// @param r the right-hand side operand.
 ///
 /// @return the result of the bitwise one's complement operator.
-integral_type::modifiers_type
-operator~(integral_type::modifiers_type l)
+real_type::modifiers_type
+operator~(real_type::modifiers_type l)
 {
-  return static_cast<integral_type::modifiers_type>(~static_cast<unsigned>(l));
+  return static_cast<real_type::modifiers_type>(~static_cast<unsigned>(l));
 }
 
-/// Bitwise |= operator for integral_type::modifiers_type.
+/// Bitwise |= operator for real_type::modifiers_type.
 ///
 /// @param l the left-hand side operand.
 ///
 /// @param r the right-hand side operand.
 ///
 /// @return the result of the bitwise |=.
-integral_type::modifiers_type&
-operator|=(integral_type::modifiers_type& l, integral_type::modifiers_type r)
+real_type::modifiers_type&
+operator|=(real_type::modifiers_type& l, real_type::modifiers_type r)
 {
   l = l | r;
   return l;
 }
 
-/// Bitwise &= operator for integral_type::modifiers_type.
+/// Bitwise &= operator for real_type::modifiers_type.
 ///
 /// @param l the left-hand side operand.
 ///
 /// @param r the right-hand side operand.
 ///
 /// @return the result of the bitwise &=.
-integral_type::modifiers_type&
-operator&=(integral_type::modifiers_type& l, integral_type::modifiers_type r)
+real_type::modifiers_type&
+operator&=(real_type::modifiers_type& l, real_type::modifiers_type r)
 {
   l = l & r;
   return l;
 }
 
-/// Parse a word containing one integral type modifier.
+/// Parse a word containing one real type modifier.
 ///
 /// A word is considered to be a string of characters that doesn't
 /// contain any white space.
@@ -15695,26 +16610,26 @@ operator&=(integral_type::modifiers_type& l, integral_type::modifiers_type r)
 ///
 /// @return true iff @word was successfully parsed.
 static bool
-parse_integral_type_modifier(const string& word,
-			     integral_type::modifiers_type &modifiers)
+parse_real_type_modifier(const string& word,
+			     real_type::modifiers_type &modifiers)
 {
     if (word == "signed")
-      modifiers |= integral_type::SIGNED_MODIFIER;
+      modifiers |= real_type::SIGNED_MODIFIER;
     else if (word == "unsigned")
-      modifiers |= integral_type::UNSIGNED_MODIFIER;
+      modifiers |= real_type::UNSIGNED_MODIFIER;
     else if (word == "short")
-      modifiers |= integral_type::SHORT_MODIFIER;
+      modifiers |= real_type::SHORT_MODIFIER;
     else if (word == "long")
-      modifiers |= integral_type::LONG_MODIFIER;
+      modifiers |= real_type::LONG_MODIFIER;
     else if (word == "long long")
-      modifiers |= integral_type::LONG_LONG_MODIFIER;
+      modifiers |= real_type::LONG_LONG_MODIFIER;
     else
       return false;
 
     return true;
 }
 
-/// Parse a base type of an integral type from a string.
+/// Parse a base type of a real type from a string.
 ///
 /// @param type_name the type name to parse.
 ///
@@ -15724,47 +16639,57 @@ parse_integral_type_modifier(const string& word,
 /// @return true iff the function could successfully parse the base
 /// type.
 static bool
-parse_base_integral_type(const string& type_name,
-			 integral_type::base_type& base)
+parse_base_real_type(const string& type_name,
+			 real_type::base_type& base)
 {
   if (type_name == "int")
-    base = integral_type::INT_BASE_TYPE;
+    base = real_type::INT_BASE_TYPE;
   else if (type_name == "char")
-    base = integral_type::CHAR_BASE_TYPE;
+    base = real_type::CHAR_BASE_TYPE;
   else if (type_name == "bool" || type_name == "_Bool")
-    base = integral_type::BOOL_BASE_TYPE;
+    base = real_type::BOOL_BASE_TYPE;
   else if (type_name == "double")
-    base = integral_type::DOUBLE_BASE_TYPE;
+    base = real_type::DOUBLE_BASE_TYPE;
   else if (type_name =="float")
-    base = integral_type::FLOAT_BASE_TYPE;
+    base = real_type::FLOAT_BASE_TYPE;
   else if (type_name == "char16_t")
-    base = integral_type::CHAR16_T_BASE_TYPE;
+    base = real_type::CHAR16_T_BASE_TYPE;
   else if (type_name == "char32_t")
-    base = integral_type::CHAR32_T_BASE_TYPE;
+    base = real_type::CHAR32_T_BASE_TYPE;
   else if (type_name == "wchar_t")
-    base = integral_type::WCHAR_T_BASE_TYPE;
+    base = real_type::WCHAR_T_BASE_TYPE;
+  else if (type_name == "__ARRAY_SIZE_TYPE__")
+    base = real_type::ARRAY_SIZE_BASE_TYPE;
+  else if (type_name == "sizetype")
+    base = real_type::SIZE_BASE_TYPE;
+  else if (type_name == "ssizetype")
+    base = real_type::SSIZE_BASE_TYPE;
+  else if (type_name == "bitsizetype")
+    base = real_type::BIT_SIZE_BASE_TYPE;
+  else if (type_name == "sbitsizetype")
+    base = real_type::SBIT_SIZE_BASE_TYPE;
   else
     return false;
 
   return true;
 }
 
-/// Parse an integral type from a string.
+/// Parse a real type from a string.
 ///
-/// @param type_name the string containing the integral type to parse.
+/// @param type_name the string containing the real type to parse.
 ///
 /// @param base out parameter.  Is set by this function to the base
-/// type of the integral type, iff the function returned true.
+/// type of the real type, iff the function returned true.
 ///
 /// @param modifiers out parameter  If set by this function to the
-/// modifier of the integral type, iff the function returned true.
+/// modifier of the real type, iff the function returned true.
 ///
-/// @return true iff the function could parse an integral type from @p
+/// @return true iff the function could parse a real type from @p
 /// type_name.
 static bool
-parse_integral_type(const string&			type_name,
-		    integral_type::base_type&		base,
-		    integral_type::modifiers_type&	modifiers)
+parse_real_type(const string&			type_name,
+		    real_type::base_type&		base,
+		    real_type::modifiers_type&	modifiers)
 {
   string input = type_name;
   string::size_type len = input.length();
@@ -15808,9 +16733,9 @@ parse_integral_type(const string&			type_name,
 	    }
 	}
 
-      if (!parse_integral_type_modifier(cur_word, modifiers))
+      if (!parse_real_type_modifier(cur_word, modifiers))
 	{
-	  if (!parse_base_integral_type(cur_word, base))
+	  if (!parse_base_real_type(cur_word, base))
 	    return false;
 	  else
 	    ok = true;
@@ -15822,99 +16747,99 @@ parse_integral_type(const string&			type_name,
   return ok;
 }
 
-/// Parse an integral type from a string.
+/// Parse a real type from a string.
 ///
-/// @param str the string containing the integral type to parse.
+/// @param str the string containing the real type to parse.
 ///
-///@param type the resulting @ref integral_type.  Is set to the result
+///@param type the resulting @ref real_type.  Is set to the result
 ///of the parse, iff the function returns true.
 ///
-/// @return true iff the function could parse an integral type from @p
+/// @return true iff the function could parse a real type from @p
 /// str.
 bool
-parse_integral_type(const string& str, integral_type& type)
+parse_real_type(const string& str, real_type& type)
 {
-  integral_type::base_type base_type = integral_type::INT_BASE_TYPE;
-  integral_type::modifiers_type modifiers = integral_type::NO_MODIFIER;
+  real_type::base_type base_type = real_type::INT_BASE_TYPE;
+  real_type::modifiers_type modifiers = real_type::NO_MODIFIER;
 
-  if (!parse_integral_type(str, base_type, modifiers))
+  if (!parse_real_type(str, base_type, modifiers))
     return false;
 
-  // So this is an integral type.
-  integral_type int_type(base_type, modifiers);
+  // So this is a real type.
+  real_type int_type(base_type, modifiers);
   type = int_type;
   return true;
 }
 
-/// Default constructor of the @ref integral_type.
-integral_type::integral_type()
+/// Default constructor of the @ref real_type.
+real_type::real_type()
   : base_(INT_BASE_TYPE),
     modifiers_(NO_MODIFIER)
 {}
 
-/// Constructor of the @ref integral_type.
+/// Constructor of the @ref real_type.
 ///
-/// @param b the base type of the integral type.
+/// @param b the base type of the real type.
 ///
-/// @param m the modifiers of the integral type.
-integral_type::integral_type(base_type b, modifiers_type m)
+/// @param m the modifiers of the real type.
+real_type::real_type(base_type b, modifiers_type m)
   : base_(b), modifiers_(m)
 {}
 
-/// Constructor of the @ref integral_type.
+/// Constructor of the @ref real_type.
 ///
-/// @param the name of the integral type to parse to initialize the
-/// current instance of @ref integral_type.
-integral_type::integral_type(const string& type_name)
+/// @param the name of the real type to parse to initialize the
+/// current instance of @ref real_type.
+real_type::real_type(const string& type_name)
   : base_(INT_BASE_TYPE),
     modifiers_(NO_MODIFIER)
 {
-  bool could_parse = parse_integral_type(type_name, base_, modifiers_);
+  bool could_parse = parse_real_type(type_name, base_, modifiers_);
   ABG_ASSERT(could_parse);
 }
 
-/// Getter of the base type of the @ref integral_type.
+/// Getter of the base type of the @ref real_type.
 ///
-/// @return the base type of the @ref integral_type.
-integral_type::base_type
-integral_type::get_base_type() const
+/// @return the base type of the @ref real_type.
+real_type::base_type
+real_type::get_base_type() const
 {return base_;}
 
-/// Getter of the modifiers bitmap of the @ref integral_type.
+/// Getter of the modifiers bitmap of the @ref real_type.
 ///
-/// @return the modifiers bitmap of the @ref integral_type.
-integral_type::modifiers_type
-integral_type::get_modifiers() const
+/// @return the modifiers bitmap of the @ref real_type.
+real_type::modifiers_type
+real_type::get_modifiers() const
 {return modifiers_;}
 
-/// Setter of the modifiers bitmap of the @ref integral_type.
+/// Setter of the modifiers bitmap of the @ref real_type.
 ///
 /// @param m the new modifiers.
 void
-integral_type::set_modifiers(modifiers_type m)
+real_type::set_modifiers(modifiers_type m)
 {modifiers_ = m;}
 
-/// Equality operator for the @ref integral_type.
+/// Equality operator for the @ref real_type.
 ///
-/// @param other the other integral type to compare against.
+/// @param other the other real type to compare against.
 ///
 /// @return true iff @p other equals the current instance of @ref
-/// integral_type.
+/// real_type.
 bool
-integral_type::operator==(const integral_type&other) const
+real_type::operator==(const real_type&other) const
 {return base_ == other.base_ && modifiers_ == other.modifiers_;}
 
 /// Return the string representation of the current instance of @ref
-/// integral_type.
+/// real_type.
 ///
 /// @param internal if true the string representation is to be used
 /// for internal purposes.  In general, it means it's for type
 /// canonicalization purposes.
 ///
 /// @return the string representation of the current instance of @ref
-/// integral_type.
+/// real_type.
 string
-integral_type::to_string(bool internal) const
+real_type::to_string(bool internal) const
 {
   string result;
 
@@ -15957,19 +16882,28 @@ integral_type::to_string(bool internal) const
     result += "char32_t";
     else if (base_ == WCHAR_T_BASE_TYPE)
     result += "wchar_t";
-
+    else if (base_ == ARRAY_SIZE_BASE_TYPE)
+      result += "__ARRAY_SIZE_TYPE__";
+    else if (base_ == SIZE_BASE_TYPE)
+      result += "sizetype";
+    else if (base_ == SSIZE_BASE_TYPE)
+      result += "ssizetype";
+    else if (base_ == BIT_SIZE_BASE_TYPE)
+      result += "bitsizetype";
+    else if (base_ == SBIT_SIZE_BASE_TYPE)
+      result += "sbitsizetype";
   return result;
 }
 
-/// Convert the current instance of @ref integral_type into its string
+/// Convert the current instance of @ref real_type into its string
 /// representation.
 ///
 /// @return the string representation of the current instance of @ref
-/// integral_type.
-integral_type::operator string() const
+/// real_type.
+real_type::operator string() const
 {return to_string();}
 
-// </integral_type definitions>
+// </real_type definitions>
 
 //<type_decl definitions>
 
@@ -16006,23 +16940,37 @@ type_decl::type_decl(const environment& env,
 {
   runtime_type_instance(this);
 
-  integral_type::base_type base_type = integral_type::INT_BASE_TYPE;
-  integral_type::modifiers_type modifiers = integral_type::NO_MODIFIER;
-  integral_type int_type(base_type, modifiers);
-  if (parse_integral_type(name, int_type))
+  real_type::base_type base_type = real_type::INT_BASE_TYPE;
+  real_type::modifiers_type modifiers = real_type::NO_MODIFIER;
+  real_type int_type(base_type, modifiers);
+  if (parse_real_type(name, int_type))
     {
-      // Convert the integral_type into its canonical string
+      // Convert the real_type into its canonical string
       // representation.
-      string integral_type_name = int_type;
+      string real_type_name = int_type;
 
       // Set the name of this type_decl to the canonical string
       // representation above
-      set_name(integral_type_name);
+      set_name(real_type_name);
       set_qualified_name(get_name());
 
       if (!get_linkage_name().empty())
-	set_linkage_name(integral_type_name);
+	set_linkage_name(real_type_name);
     }
+}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+type_decl::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
 }
 
 /// Compares two instances of @ref type_decl.
@@ -16200,19 +17148,19 @@ type_decl::get_qualified_name(bool internal) const
 
 
   if (internal)
-    if (is_integral_type(this))
+    if (is_real_type(this))
       {
 	if (get_naked_canonical_type())
 	  {
 	    if (decl_base::priv_->internal_qualified_name_.empty())
 	      decl_base::priv_->internal_qualified_name_ =
-		env.intern(get_internal_integral_type_name(this));
+		env.intern(get_internal_real_type_name(this));
 	    return decl_base::priv_->internal_qualified_name_;
 	  }
 	else
 	  {
 	    decl_base::priv_->temporary_internal_qualified_name_ =
-	      env.intern(get_internal_integral_type_name(this));
+	      env.intern(get_internal_real_type_name(this));
 	    return decl_base::priv_->temporary_internal_qualified_name_;
 	  }
       }
@@ -16242,8 +17190,8 @@ type_decl::get_pretty_representation(bool internal,
 				     bool qualified_name) const
 {
   if (internal)
-    if (is_integral_type(this))
-      return get_internal_integral_type_name(this);
+    if (is_real_type(this))
+      return get_internal_real_type_name(this);
 
   if (qualified_name)
     return get_qualified_name(internal);
@@ -16672,6 +17620,20 @@ qualified_type_def::qualified_type_def(const environment& env,
   set_name(name);
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+qualified_type_def::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Get the size of the qualified type def.
 ///
 /// This is an overload for type_base::get_size_in_bits().
@@ -16843,7 +17805,8 @@ qualified_type_def::get_qualified_name(bool internal) const
 	  // We are asked to return a temporary *internal* name.
 	  // Lets compute it and return a reference to where it's
 	  // stored.
-	  priv_->temporary_internal_name_ =
+	  if (priv_->temporary_internal_name_.empty())
+	    priv_->temporary_internal_name_ =
 	      env.intern(build_name(true, /*internal=*/true));
 	  return priv_->temporary_internal_name_;
 	}
@@ -17152,6 +18115,20 @@ pointer_type_def::pointer_type_def(const environment& env, size_t size_in_bits,
   set_name(env.intern(name));
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+pointer_type_def::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Set the pointed-to type of the pointer.
 ///
 /// @param t the new pointed-to type.
@@ -17197,17 +18174,8 @@ pointer_type_def::set_pointed_to_type(const type_base_sptr& t)
 bool
 equals(const pointer_type_def& l, const pointer_type_def& r, change_kind* k)
 {
-  // In C and C++ languages, a pointer to void equals all other
-  // pointers.
-  if (l.get_translation_unit()
-      && r.get_translation_unit()
-      && is_c_language(l.get_translation_unit()->get_language())
-      && is_c_language(r.get_translation_unit()->get_language())
-      && (is_void_pointer_type_equivalent(&l)
-	  || is_void_pointer_type_equivalent(&r)))
-    return true;
-
-  bool result = l.get_pointed_to_type() == r.get_pointed_to_type();
+  type_base_sptr p1 = l.get_pointed_to_type(), p2 = r.get_pointed_to_type();
+  bool result = p1 == p2;
   if (!result)
     if (k)
       {
@@ -17311,7 +18279,7 @@ const interned_string&
 pointer_type_def::get_qualified_name(bool internal) const
 {
   type_base* pointed_to_type = get_naked_pointed_to_type();
-  pointed_to_type = look_through_decl_only(pointed_to_type);
+  pointed_to_type = look_through_decl_only_type(pointed_to_type);
 
   if (internal)
     {
@@ -17320,13 +18288,14 @@ pointer_type_def::get_qualified_name(bool internal) const
 	  if (priv_->internal_qualified_name_.empty())
 	    if (pointed_to_type)
 	      priv_->internal_qualified_name_ =
-		get_name_of_pointer_to_type(*pointed_to_type,
-					    /*qualified_name=*/
-					    is_typedef(pointed_to_type)
-					    ? false
-					    : true,
-					    /*internal=*/true);
-	  return priv_->internal_qualified_name_;
+		pointer_declaration_name(this,
+					 /*variable_name=*/"",
+					 /*qualified_name=*/
+					 is_typedef(pointed_to_type)
+					 ? false
+					 : true,
+					 /*internal=*/true);
+		return priv_->internal_qualified_name_;
 	}
       else
 	{
@@ -17335,13 +18304,15 @@ pointer_type_def::get_qualified_name(bool internal) const
 	  // cache where we store its name at each invocation of this
 	  // function.
 	  if (pointed_to_type)
-	    priv_->temp_internal_qualified_name_ =
-	      get_name_of_pointer_to_type(*pointed_to_type,
-					  /*qualified_name=*/
-					  is_typedef(pointed_to_type)
-					  ? false
-					  : true,
-					  /*internal=*/true);
+	    if (priv_->temp_internal_qualified_name_.empty())
+	      priv_->temp_internal_qualified_name_ =
+		pointer_declaration_name(this,
+					 /*variable_name=*/"",
+					 /*qualified_name=*/
+					 is_typedef(pointed_to_type)
+					 ? false
+					 : true,
+					 /*internal=*/true);
 	  return priv_->temp_internal_qualified_name_;
 	}
     }
@@ -17351,9 +18322,10 @@ pointer_type_def::get_qualified_name(bool internal) const
 	{
 	  if (decl_base::peek_qualified_name().empty())
 	    set_qualified_name
-	      (get_name_of_pointer_to_type(*pointed_to_type,
-					   /*qualified_name=*/true,
-					   /*internal=*/false));
+	      (pointer_declaration_name(this,
+					/*variable_name=*/"",
+					/*qualified_name=*/true,
+					/*internal=*/false));
 	  return decl_base::peek_qualified_name();
 	}
       else
@@ -17364,9 +18336,10 @@ pointer_type_def::get_qualified_name(bool internal) const
 	  // function.
 	  if (pointed_to_type)
 	    set_qualified_name
-	      (get_name_of_pointer_to_type(*pointed_to_type,
-					   /*qualified_name=*/true,
-					   /*internal=*/false));
+	      (pointer_declaration_name(this,
+					/*variable_name=*/"",
+					/*qualified_name=*/true,
+					/*internal=*/false));
 	  return decl_base::peek_qualified_name();
 	}
     }
@@ -17564,6 +18537,20 @@ reference_type_def::reference_type_def(const environment& env, bool lvalue,
   priv_->pointed_to_type_ = type_base_wptr(env.get_void_type());
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+reference_type_def::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Setter of the pointed_to type of the current reference type.
 ///
 /// @param pointed_to the new pointed to type.
@@ -17618,9 +18605,8 @@ equals(const reference_type_def& l, const reference_type_def& r, change_kind* k)
 	*k |= LOCAL_TYPE_CHANGE_KIND;
       ABG_RETURN_FALSE;
     }
-
-  // Compare the pointed-to-types modulo the typedefs they might have
-  bool result = (l.get_pointed_to_type() == r.get_pointed_to_type());
+  type_base_sptr p1 = l.get_pointed_to_type(), p2 = r.get_pointed_to_type();
+  bool result = p1 == p2;
   if (!result)
     if (k)
       {
@@ -17714,7 +18700,7 @@ const interned_string&
 reference_type_def::get_qualified_name(bool internal) const
 {
   type_base_sptr pointed_to_type = get_pointed_to_type();
-  pointed_to_type = look_through_decl_only(pointed_to_type);
+  pointed_to_type = look_through_decl_only_type(pointed_to_type);
 
   if (internal)
     {
@@ -17739,14 +18725,15 @@ reference_type_def::get_qualified_name(bool internal) const
 	  // cache where we store its name at each invocation of this
 	  // function.
 	  if (pointed_to_type)
-	    priv_->temp_internal_qualified_name_ =
-	      get_name_of_reference_to_type(*pointed_to_type,
-					    is_lvalue(),
-					    /*qualified_name=*/
-					    is_typedef(pointed_to_type)
-					    ? false
-					    : true,
-					    /*internal=*/true);
+	    if (priv_->temp_internal_qualified_name_.empty())
+	      priv_->temp_internal_qualified_name_ =
+		get_name_of_reference_to_type(*pointed_to_type,
+					      is_lvalue(),
+					      /*qualified_name=*/
+					      is_typedef(pointed_to_type)
+					      ? false
+					      : true,
+					      /*internal=*/true);
 	  return priv_->temp_internal_qualified_name_;
 	}
     }
@@ -17800,7 +18787,7 @@ reference_type_def::get_pretty_representation(bool internal,
 					      bool qualified_name) const
 {
   string result =
-    get_name_of_reference_to_type(*look_through_decl_only
+    get_name_of_reference_to_type(*look_through_decl_only_type
 				  (get_pointed_to_type()),
 				  is_lvalue(),
 				  qualified_name,
@@ -17879,6 +18866,302 @@ operator!=(const reference_type_def_sptr& l, const reference_type_def_sptr& r)
 {return !operator==(l, r);}
 
 // </reference_type_def definitions>
+
+// <ptr_to_mbr_type definitions>
+
+/// The private data type of @ref ptr_to_mbr_type.
+struct ptr_to_mbr_type::priv
+{
+  // The type of the data member this pointer-to-member-type
+  // designates.
+  type_base_sptr dm_type_;
+  // The class (or typedef to potentially qualified class) containing
+  // the data member this pointer-to-member-type designates.
+  type_base_sptr containing_type_;
+  interned_string internal_qualified_name_;
+  interned_string temp_internal_qualified_name_;
+
+  priv()
+  {}
+
+  priv(const type_base_sptr& dm_type, const type_base_sptr& containing_type)
+    :  dm_type_(dm_type),
+       containing_type_(containing_type)
+  {}
+};// end struct ptr_to_mbr_type::priv
+
+/// A constructor for a @ref ptr_to_mbr_type type.
+///
+/// @param env the environment to construct the @ref ptr_to_mbr_type in.
+///
+/// @param member_type the member type of the of the @ref
+/// ptr_to_mbr_type to construct.
+///
+/// @param containing_type the containing type of the @ref
+/// ptr_to_mbr_type to construct.
+///
+/// @param size_in_bits the size (in bits) of the resulting type.
+///
+/// @param alignment_in_bits the alignment (in bits) of the resulting
+/// type.
+///
+/// @param locus the source location of the definition of the
+/// resulting type.
+ptr_to_mbr_type::ptr_to_mbr_type(const environment&		env,
+				 const type_base_sptr&		member_type,
+				 const type_base_sptr&		containing_type,
+				 size_t			size_in_bits,
+				 size_t			alignment_in_bits,
+				 const location&		locus)
+  : type_or_decl_base(env,
+		      POINTER_TO_MEMBER_TYPE
+		      | ABSTRACT_TYPE_BASE
+		      | ABSTRACT_DECL_BASE),
+    type_base(env, size_in_bits, alignment_in_bits),
+    decl_base(env, "", locus, ""),
+    priv_(new priv(member_type, containing_type))
+{
+  runtime_type_instance(this);
+  ABG_ASSERT(member_type);
+  ABG_ASSERT(containing_type);
+  set_is_anonymous(false);
+}
+
+/// Getter of the name of the current ptr-to-mbr-type.
+///
+/// This just returns the qualified name.
+///
+/// @return the (qualified) name of the the type.
+const interned_string&
+ptr_to_mbr_type::get_name() const
+{
+  return get_qualified_name(/*internal=*/false);
+}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+ptr_to_mbr_type::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
+/// Getter of the member type of the current @ref ptr_to_mbr_type.
+///
+/// @return the type of the member referred to by the current
+/// @ptr_to_mbr_type.
+const type_base_sptr&
+ptr_to_mbr_type::get_member_type() const
+{return priv_->dm_type_;}
+
+/// Getter of the type containing the member pointed-to by the current
+/// @ref ptr_to_mbr_type.
+///
+/// @return the type containing the member pointed-to by the current
+/// @ref ptr_to_mbr_type.
+const type_base_sptr&
+ptr_to_mbr_type::get_containing_type() const
+{return priv_->containing_type_;}
+
+/// Equality operator for the current @ref ptr_to_mbr_type.
+///
+///@param o the other instance of @ref ptr_to_mbr_type to compare the
+///current instance to.
+///
+/// @return true iff the current @ref ptr_to_mbr_type equals @p o.
+bool
+ptr_to_mbr_type::operator==(const decl_base& o) const
+{
+  const ptr_to_mbr_type* other =
+    dynamic_cast<const ptr_to_mbr_type*>(&o);
+  if (!other)
+    return false;
+  return try_canonical_compare(this, other);
+}
+
+/// Equality operator for the current @ref ptr_to_mbr_type.
+///
+///@param o the other instance of @ref ptr_to_mbr_type to compare the
+///current instance to.
+///
+/// @return true iff the current @ref ptr_to_mbr_type equals @p o.
+bool
+ptr_to_mbr_type::operator==(const type_base& o) const
+{
+  const decl_base* other = dynamic_cast<const decl_base*>(&o);
+  if (!other)
+    return false;
+  return *this == *other;
+}
+
+/// Equality operator for the current @ref ptr_to_mbr_type.
+///
+///@param o the other instance of @ref ptr_to_mbr_type to compare the
+///current instance to.
+///
+/// @return true iff the current @ref ptr_to_mbr_type equals @p o.
+bool
+ptr_to_mbr_type::operator==(const ptr_to_mbr_type& o) const
+{
+  const decl_base* other = dynamic_cast<const decl_base*>(&o);
+  if (!other)
+    return false;
+  return *this == *other;
+}
+
+/// Get the qualified name for the current @ref ptr_to_mbr_type.
+///
+/// @param qualified_name out parameter.  This is set to the name of
+/// the current @ref ptr_to_mbr_type.
+///
+/// @param internal if this is true, then the qualified name is for
+/// the purpose of type canoicalization.
+void
+ptr_to_mbr_type::get_qualified_name(interned_string& qualified_name,
+				    bool internal) const
+{qualified_name = get_qualified_name(internal);}
+
+/// Get the qualified name for the current @ref ptr_to_mbr_type.
+///
+/// @param internal if this is true, then the qualified name is for
+/// the purpose of type canoicalization.
+///
+/// @return the qualified name for the current @ref ptr_to_mbr_type.
+const interned_string&
+ptr_to_mbr_type::get_qualified_name(bool internal) const
+{
+  type_base_sptr member_type = get_member_type();
+  type_base_sptr containing_type = get_containing_type();
+
+  if (internal)
+    {
+      if (get_canonical_type())
+	{
+	  if (priv_->internal_qualified_name_.empty())
+	    priv_->internal_qualified_name_ =
+	      ptr_to_mbr_declaration_name(this, "",
+					  /*qualified=*/true,
+					  internal);
+	  return  priv_->internal_qualified_name_;
+	}
+      else
+	{
+	  priv_->temp_internal_qualified_name_ =
+	    ptr_to_mbr_declaration_name(this, "", /*qualified=*/true, internal);
+	  return priv_->temp_internal_qualified_name_;
+	}
+    }
+  else
+    {
+      set_qualified_name
+	(ptr_to_mbr_declaration_name(this, "", /*qualified=*/true,
+				     /*internal=*/false));
+      return decl_base::peek_qualified_name();
+    }
+}
+
+/// This implements the ir_traversable_base::traverse pure virtual
+/// function for @ref ptr_to_mbr_type.
+///
+/// @param v the visitor used on the current instance.
+///
+/// @return true if the entire IR node tree got traversed, false
+/// otherwise.
+bool
+ptr_to_mbr_type::traverse(ir_node_visitor& v)
+{
+  if (v.type_node_has_been_visited(this))
+    return true;
+
+  if (visiting())
+    return true;
+
+  if (v.visit_begin(this))
+    {
+      visiting(true);
+      if (type_base_sptr t = get_member_type())
+	t->traverse(v);
+
+      if (type_base_sptr t = get_containing_type())
+	t->traverse(v);
+      visiting(false);
+    }
+
+  bool result = v.visit_end(this);
+  v.mark_type_node_as_visited(this);
+  return result;
+}
+
+/// Desctructor for @ref ptr_to_mbr_type.
+ptr_to_mbr_type::~ptr_to_mbr_type()
+{}
+
+
+/// Compares two instances of @ref ptr_to_mbr_type.
+///
+/// If the two intances are different, set a bitfield to give some
+/// insight about the kind of differences there are.
+///
+/// @param l the first artifact of the comparison.
+///
+/// @param r the second artifact of the comparison.
+///
+/// @param k a pointer to a bitfield that gives information about the
+/// kind of changes there are between @p l and @p r.  This one is set
+/// iff @p k is non-null and the function returns false.
+///
+/// Please note that setting k to a non-null value does have a
+/// negative performance impact because even if @p l and @p r are not
+/// equal, the function keeps up the comparison in order to determine
+/// the different kinds of ways in which they are different.
+///
+/// @return true if @p l equals @p r, false otherwise.
+bool
+equals(const ptr_to_mbr_type& l, const ptr_to_mbr_type& r, change_kind* k)
+{
+  bool result = true;
+
+  if (!(l.decl_base::operator==(r)))
+    {
+      result = false;
+      if (k)
+	*k |= LOCAL_TYPE_CHANGE_KIND;
+      else
+	result = false;
+    }
+
+  if (l.get_member_type() != r.get_member_type())
+    {
+      if (k)
+	{
+	  if (!types_have_similar_structure(&l, &r))
+	    *k |= LOCAL_TYPE_CHANGE_KIND;
+	  *k |= SUBTYPE_CHANGE_KIND;
+	}
+      result = false;
+    }
+
+  if (l.get_containing_type() != r.get_containing_type())
+    {
+      if (k)
+	{
+	  if (!types_have_similar_structure(&l, &r))
+	    *k |= LOCAL_TYPE_CHANGE_KIND;
+	  *k |= SUBTYPE_CHANGE_KIND;
+	}
+      result = false;
+    }
+
+  ABG_RETURN(result);
+}
+
+// </ptr_to_mbr_type definitions>
 
 // <array_type_def definitions>
 
@@ -18024,10 +19307,11 @@ array_type_def::subrange_type::subrange_type(const environment& env,
 					     const type_base_sptr& utype,
 					     const location&	loc,
 					     translation_unit::language l)
-  : type_or_decl_base(env, ABSTRACT_TYPE_BASE | ABSTRACT_DECL_BASE),
+  : type_or_decl_base(env, SUBRANGE_TYPE | ABSTRACT_TYPE_BASE | ABSTRACT_DECL_BASE),
     type_base(env,
-	      upper_bound.get_unsigned_value()
-	      - lower_bound.get_unsigned_value(),
+	      utype
+	      ? utype->get_size_in_bits()
+	      : 0,
 	      0),
     decl_base(env, name, loc, ""),
     priv_(new priv(lower_bound, upper_bound, utype, l))
@@ -18055,10 +19339,8 @@ array_type_def::subrange_type::subrange_type(const environment& env,
 					     bound_value	upper_bound,
 					     const location&	loc,
 					     translation_unit::language l)
-  : type_or_decl_base(env, ABSTRACT_TYPE_BASE | ABSTRACT_DECL_BASE),
-    type_base(env,
-	      upper_bound.get_unsigned_value()
-	      - lower_bound.get_unsigned_value(), 0),
+  : type_or_decl_base(env, SUBRANGE_TYPE | ABSTRACT_TYPE_BASE | ABSTRACT_DECL_BASE),
+    type_base(env, /*size-in-bits=*/0, /*alignment=*/0),
     decl_base(env, name, loc, ""),
     priv_(new priv(lower_bound, upper_bound, l))
 {
@@ -18082,12 +19364,26 @@ array_type_def::subrange_type::subrange_type(const environment& env,
 					     bound_value	upper_bound,
 					     const location&	loc,
 					     translation_unit::language l)
-  : type_or_decl_base(env, ABSTRACT_TYPE_BASE | ABSTRACT_DECL_BASE),
+  : type_or_decl_base(env, SUBRANGE_TYPE | ABSTRACT_TYPE_BASE | ABSTRACT_DECL_BASE),
     type_base(env, upper_bound.get_unsigned_value(), 0),
     decl_base(env, name, loc, ""),
     priv_(new priv(upper_bound, l))
 {
   runtime_type_instance(this);
+}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+array_type_def::subrange_type::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
 }
 
 /// Getter of the underlying type of the subrange, that is, the type
@@ -18107,6 +19403,8 @@ array_type_def::subrange_type::set_underlying_type(const type_base_sptr &u)
 {
   ABG_ASSERT(priv_->underlying_type_.expired());
   priv_->underlying_type_ = u;
+  if (u)
+    set_size_in_bits(u->get_size_in_bits());
 }
 
 /// Getter of the upper bound of the subrange type.
@@ -18146,7 +19444,7 @@ array_type_def::subrange_type::set_lower_bound(int64_t lb)
 uint64_t
 array_type_def::subrange_type::get_length() const
 {
-  if (is_infinite())
+  if (is_non_finite())
     return 0;
 
   // A subrange can have an upper bound that is lower than its lower
@@ -18161,7 +19459,7 @@ array_type_def::subrange_type::get_length() const
 ///
 /// @return true iff the length of the subrange type is infinite.
 bool
-array_type_def::subrange_type::is_infinite() const
+array_type_def::subrange_type::is_non_finite() const
 {return priv_->infinite_;}
 
 /// Set the infinite-ness status of the subrange type.
@@ -18169,7 +19467,7 @@ array_type_def::subrange_type::is_infinite() const
 /// @param f true iff the length of the subrange type should be set to
 /// being infinite.
 void
-array_type_def::subrange_type::is_infinite(bool f)
+array_type_def::subrange_type::is_non_finite(bool f)
 {priv_->infinite_ = f;}
 
 /// Getter of the language that generated this type.
@@ -18194,7 +19492,7 @@ array_type_def::subrange_type::as_string() const
 	o << ir::get_pretty_representation(underlying_type, false) << " ";
       o << "range "<< get_lower_bound() << " .. " << get_upper_bound();
     }
-  else if (is_infinite())
+  else if (is_non_finite())
     o << "[]";
   else
     o << "["  << get_length() << "]";
@@ -18253,6 +19551,17 @@ equals(const array_type_def::subrange_type& l,
       result = false;
       if (k)
 	*k |= LOCAL_TYPE_CHANGE_KIND;
+      else
+	ABG_RETURN(result);
+    }
+
+  if (l.get_underlying_type()
+      && r.get_underlying_type()
+      && (*l.get_underlying_type() != *r.get_underlying_type()))
+    {
+      result = false;
+      if (k)
+	*k |= SUBTYPE_CHANGE_KIND;
       else
 	ABG_RETURN(result);
     }
@@ -18471,6 +19780,20 @@ array_type_def::array_type_def(const environment&				env,
   append_subranges(subs);
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+array_type_def::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Update the size of the array.
 ///
 /// This function computes the size of the array and sets it using
@@ -18499,48 +19822,6 @@ array_type_def::get_subrange_representation() const
   return r;
 }
 
-/// Get the string representation of an @ref array_type_def.
-///
-/// @param a the array type to consider.
-///
-/// @param internal set to true if the call is intended for an
-/// internal use (for technical use inside the library itself), false
-/// otherwise.  If you don't know what this is for, then set it to
-/// false.
-static string
-get_type_representation(const array_type_def& a, bool internal)
-{
-  type_base_sptr e_type = a.get_element_type();
-  decl_base_sptr d = get_type_declaration(e_type);
-  string r;
-
-  if (is_ada_language(a.get_language()))
-    {
-      std::ostringstream o;
-      o << "array ("
-	<< a.get_subrange_representation()
-	<< ") of "
-	<<  e_type ? e_type->get_pretty_representation(internal):string("void");
-    }
-  else
-    {
-      if (internal)
-	r = (e_type
-	     ? get_type_name(e_type,
-			     /*qualified=*/true,
-			     /*internal=*/true)
-	     : string("void"))
-	  + a.get_subrange_representation();
-      else
-	r = (e_type
-	     ? get_type_name(e_type, /*qualified=*/true, /*internal=*/false)
-	     : string("void"))
-	  + a.get_subrange_representation();
-    }
-
-  return r;
-}
-
 /// Get the pretty representation of the current instance of @ref
 /// array_type_def.
 ///
@@ -18561,8 +19842,11 @@ get_type_representation(const array_type_def& a, bool internal)
 /// @return the pretty representation of the ABI artifact.
 string
 array_type_def::get_pretty_representation(bool internal,
-					  bool /*qualified_name*/) const
-{return get_type_representation(*this, internal);}
+					  bool qualified_name) const
+{
+  return array_declaration_name(this, /*variable_name=*/"",
+				qualified_name, internal);
+}
 
 /// Compares two instances of @ref array_type_def.
 ///
@@ -18594,7 +19878,7 @@ equals(const array_type_def& l, const array_type_def& r, change_kind* k)
     {
       result = false;
       if (k)
-	*k |= LOCAL_TYPE_CHANGE_KIND;
+	*k |= LOCAL_NON_TYPE_CHANGE_KIND;
       else
 	ABG_RETURN_FALSE;
     }
@@ -18608,7 +19892,7 @@ equals(const array_type_def& l, const array_type_def& r, change_kind* k)
 	result = false;
 	if (k)
 	  {
-	    *k |= LOCAL_TYPE_CHANGE_KIND;
+	    *k |= LOCAL_NON_TYPE_CHANGE_KIND;
 	    break;
 	  }
 	else
@@ -18628,7 +19912,7 @@ equals(const array_type_def& l, const array_type_def& r, change_kind* k)
   ABG_RETURN(result);
 }
 
-/// Test if two variables are equals modulo CV qualifiers.
+/// Test if two array types are equals modulo CV qualifiers.
 ///
 /// @param l the first array of the comparison.
 ///
@@ -18671,6 +19955,72 @@ equals_modulo_cv_qualifier(const array_type_def* l, const array_type_def* r)
 
   return true;
 }
+
+/// Test if two array types are equals modulo CV qualifiers.
+///
+/// @param l the first array of the comparison.
+///
+/// @param r the second array of the comparison.
+///
+/// @return true iff @p l equals @p r or, if they are different, the
+/// difference between the too is just a matter of CV qualifiers.
+bool
+equals_modulo_cv_qualifier(const array_type_def_sptr& l,
+			   const array_type_def_sptr& r)
+{return equals_modulo_cv_qualifier(l.get(), r.get());}
+
+/// Test if two pointer types are equals modulo CV qualifiers.
+///
+/// @param l the first pointer of the comparison.
+///
+/// @param r the second pointer of the comparison.
+///
+/// @return true iff @p l equals @p r or, if they are different, the
+/// difference between the too is just a matter of CV qualifiers.
+bool
+equals_modulo_cv_qualifier(const pointer_type_def* l, const pointer_type_def* r)
+{
+  if (l == r)
+    return true;
+
+  if (!l || !r)
+    ABG_RETURN_FALSE;
+
+  type_base_sptr l_ptt = l->get_pointed_to_type(),
+    r_ptt = r->get_pointed_to_type();
+
+  do
+    {
+      l_ptt = peel_qualified_or_typedef_type(l_ptt);
+      r_ptt = peel_qualified_or_typedef_type(r_ptt);
+
+      l_ptt = is_pointer_type(l_ptt)
+	? is_pointer_type(l_ptt)->get_pointed_to_type()
+	: l_ptt;
+
+      r_ptt = is_pointer_type(r_ptt)
+	? is_pointer_type(r_ptt)->get_pointed_to_type()
+	: r_ptt;
+    } while (is_pointer_type(l_ptt) && is_pointer_type(r_ptt));
+
+  l_ptt = peel_qualified_or_typedef_type(l_ptt);
+  r_ptt = peel_qualified_or_typedef_type(r_ptt);
+
+  return *l_ptt == *r_ptt;
+}
+
+/// Test if two pointer types are equals modulo CV qualifiers.
+///
+/// @param l the first pointer of the comparison.
+///
+/// @param r the second pointer of the comparison.
+///
+/// @return true iff @p l equals @p r or, if they are different, the
+/// difference between the too is just a matter of CV qualifiers.
+bool
+equals_modulo_cv_qualifier(const pointer_type_def_sptr& l,
+			   const pointer_type_def_sptr& r)
+{return equals_modulo_cv_qualifier(l.get(), r.get());}
 
 /// Get the language of the array.
 ///
@@ -18748,7 +20098,7 @@ array_type_def::append_subranges(const std::vector<subrange_sptr>& subs)
 /// if the array has no sub-range at all, also meaning that the size
 /// of the array is infinite.
 bool
-array_type_def::is_infinite() const
+array_type_def::is_non_finite() const
 {
   if (priv_->subranges_.empty())
     return true;
@@ -18757,7 +20107,7 @@ array_type_def::is_infinite() const
 	 priv_->subranges_.begin();
        i != priv_->subranges_.end();
        ++i)
-    if ((*i)->is_infinite())
+    if ((*i)->is_non_finite())
       return true;
 
   return false;
@@ -18792,22 +20142,22 @@ array_type_def::get_qualified_name(interned_string& qn, bool internal) const
 const interned_string&
 array_type_def::get_qualified_name(bool internal) const
 {
-  const environment& env = get_environment();
-
-
   if (internal)
     {
       if (get_canonical_type())
 	{
 	  if (priv_->internal_qualified_name_.empty())
 	    priv_->internal_qualified_name_ =
-	      env.intern(get_type_representation(*this, /*internal=*/true));
+	      array_declaration_name(this, /*variable_name=*/"",
+				     /*qualified=*/false,
+				     /*internal=*/true);
 	  return priv_->internal_qualified_name_;
 	}
       else
 	{
 	  priv_->temp_internal_qualified_name_ =
-	    env.intern(get_type_representation(*this, /*internal=*/true));
+	    array_declaration_name(this, /*variable_name=*/"",
+				   /*qualified*/false, /*internal*/true);
 	  return priv_->temp_internal_qualified_name_;
 	}
     }
@@ -18816,15 +20166,18 @@ array_type_def::get_qualified_name(bool internal) const
       if (get_canonical_type())
 	{
 	  if (decl_base::peek_qualified_name().empty())
-	    set_qualified_name(env.intern(get_type_representation
-					   (*this, /*internal=*/false)));
+	    set_qualified_name(array_declaration_name(this,
+						      /*variable_name=*/"",
+						      /*qualified=*/false,
+						      /*internal=*/false));
 	  return decl_base::peek_qualified_name();
 	}
       else
 	{
-	  set_temporary_qualified_name(env.intern(get_type_representation
-						   (*this,
-						    /*internal=*/false)));
+	  set_temporary_qualified_name
+	    (array_declaration_name(this, /*variable_name=*/"",
+				    /*qualified=*/false,
+				    /*internal=*/false));
 	  return decl_base::peek_temporary_qualified_name();
 	}
     }
@@ -18930,6 +20283,20 @@ enum_type_decl::enum_type_decl(const string&	name,
     e->set_enum_type(this);
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+enum_type_decl::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Return the underlying type of the enum.
 type_base_sptr
 enum_type_decl::get_underlying_type() const
@@ -18970,6 +20337,54 @@ enum_type_decl::get_sorted_enumerators() const
     }
 
   return priv_->sorted_enumerators_;
+}
+
+/// Find an enumerator by its value.
+///
+/// @param value the enumerator value to look for.
+///
+/// @param result output parameter.  This is set to the enumerator
+/// which value is @p value, if found.  This is set iff the function
+/// returns true.
+///
+/// @return true iff an enumerator with value @p value was found and
+/// returned by argument via @p result.
+bool
+enum_type_decl::find_enumerator_by_value(int64_t value,
+					 enum_type_decl:: enumerator& result)
+{
+  for (auto& e : get_enumerators())
+    if (e.get_value() == value)
+      {
+	result = e;
+	return true;
+      }
+
+  return false;
+}
+
+/// Find an enumerator by its name
+///
+/// @param name the enumerator name to look for.
+///
+/// @param result output parameter.  This is set to the enumerator
+/// which name is @p name, if found.  This is set iff the function
+/// returns true.
+///
+/// @return true iff an enumerator with name @p name was found and
+/// returned by argument via @p result.
+bool
+enum_type_decl::find_enumerator_by_name(const string& name,
+					enum_type_decl::enumerator& result)
+{
+  for (auto& e : get_enumerators())
+    if (e.get_name() == name)
+      {
+	result = e;
+	return true;
+      }
+
+  return false;
 }
 
 /// Get the pretty representation of the current instance of @ref
@@ -19298,7 +20713,34 @@ equals(const enum_type_decl& l, const enum_type_decl& r, change_kind* k)
 	ABG_RETURN_FALSE;
     }
 
-  // Now compare the enumerators.  Note that the order of declaration
+  // Now compare the enumerators.
+
+  // First in a naive (but potentially fast) way in case both enums
+  // are equal in a naive manner.
+
+  if (def1->get_enumerators().size() == def2->get_enumerators().size())
+    {
+      bool equals = true;
+      for (auto e1 = def1->get_enumerators().begin(),
+	     e2 = def2->get_enumerators().begin();
+	   (e1 != def1->get_enumerators().end()
+	    &&  e2 != def2->get_enumerators().end());
+	   ++e1, ++e2)
+	{
+	  if (*e1 != *e2)
+	    {
+	      equals = false;
+	      break;
+	    }
+	}
+      if (equals)
+	ABG_RETURN(result);
+    }
+
+  // If the two enums where not naively equals, let's try a more
+  // clever (and slow) way.
+
+  // Note that the order of declaration
   // of enumerators should not matter in the comparison.
   //
   // Also if an enumerator value is redundant, that shouldn't impact
@@ -19664,6 +21106,20 @@ typedef_decl::typedef_decl(const string& name,
   runtime_type_instance(this);
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+typedef_decl::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Return the size of the typedef.
 ///
 /// This function looks at the size of the underlying type and ensures
@@ -19797,15 +21253,10 @@ typedef_decl::get_pretty_representation(bool internal,
 {
 
   string result = "typedef ";
-  if (internal)
-    result += get_name();
+  if (qualified_name)
+    result += get_qualified_name(internal);
   else
-    {
-      if (qualified_name)
-	result += get_qualified_name(internal);
-      else
-	result += get_name();
-    }
+    result += get_name();
 
   return result;
 }
@@ -20103,12 +21554,10 @@ var_equals_modulo_types(const var_decl& l, const var_decl& r, change_kind* k)
       else
 	ABG_RETURN_FALSE;
     }
-  else if (s0 && s0 != s1)
+  else if (s0 && !textually_equals(*s0, *s1, k))
     {
       result = false;
-      if (k)
-	*k |= LOCAL_NON_TYPE_CHANGE_KIND;
-      else
+      if (!k)
 	ABG_RETURN_FALSE;
     }
   bool symbols_are_equal = (s0 && s1 && result);
@@ -20253,16 +21702,6 @@ var_decl::get_id() const
   return priv_->id_;
 }
 
-/// Return the hash value for the current instance.
-///
-/// @return the hash value.
-size_t
-var_decl::get_hash() const
-{
-  var_decl::hash hash_var;
-  return hash_var(this);
-}
-
 /// Get the qualified name of a given variable or data member.
 ///
 ///
@@ -20334,7 +21773,11 @@ var_decl::get_pretty_representation(bool internal, bool qualified_name) const
     if (scope->get_is_anonymous())
       member_of_anonymous_class = true;
 
-  if (array_type_def_sptr t = is_array_type(get_type()))
+  type_base_sptr type = get_type();
+  if (is_array_type(type, /*look_through_qualifiers=*/true)
+      || is_pointer_type(type, /*look_through_qualifiers=*/true)
+      || is_reference_type(type, /*look_through_qualifiers=*/true)
+      || is_ptr_to_mbr_type(type, /*look_through_qualifiers=*/true))
     {
       string name;
       if (member_of_anonymous_class || !qualified_name)
@@ -20342,12 +21785,26 @@ var_decl::get_pretty_representation(bool internal, bool qualified_name) const
       else
 	name = get_qualified_name(internal);
 
-      type_base_sptr et = t->get_element_type();
-      ABG_ASSERT(et);
-      decl_base_sptr decl = get_type_declaration(et);
-      ABG_ASSERT(decl);
-      result += decl->get_qualified_name(internal)
-	+ " " + name + t->get_subrange_representation();
+      if (qualified_type_def_sptr q = is_qualified_type(type))
+	{
+	  string quals_repr =
+	    get_string_representation_of_cv_quals(q->get_cv_quals());
+	  if (!quals_repr.empty())
+	    name = quals_repr + " " + name;
+	  type = peel_qualified_type(type);
+	}
+
+      name = string(" ") + name;
+      if (array_type_def_sptr t = is_array_type(type))
+	result += array_declaration_name(t, name, qualified_name, internal);
+      else if (pointer_type_def_sptr t = is_pointer_type(type))
+	result += pointer_declaration_name(t, name, qualified_name, internal);
+      else if (reference_type_def_sptr t = is_reference_type(type))
+	result += pointer_declaration_name(t, name, qualified_name, internal);
+      else if (ptr_to_mbr_type_sptr t = is_ptr_to_mbr_type(type))
+	result += ptr_to_mbr_declaration_name(t, name,
+					      qualified_name,
+					      internal);
     }
   else
     {
@@ -20545,6 +22002,20 @@ function_type::function_type(const environment& env,
     priv_(new priv)
 {
   runtime_type_instance(this);
+}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+function_type::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
 }
 
 /// Getter for the return type of the current instance of @ref
@@ -20768,9 +22239,7 @@ equals(const function_type& l, const function_type& r, change_kind* k)
       // TODO: We should also do this for parameter types, or rather,
       // we should teach the equality operators in the IR, at some
       // point, to peel typedefs off.
-      if (peel_typedef_type(l.get_return_type())
-	  !=
-	  peel_typedef_type(r.get_return_type()))
+      if (l.get_return_type() != r.get_return_type())
 	{
 	  result = false;
 	  if (k)
@@ -20846,7 +22315,7 @@ function_type::get_first_non_implicit_parm() const
 
   parameters::const_iterator i = get_parameters().begin();
 
-  if (is_method)
+  if (is_method && (*i)->get_is_artificial())
     ++i;
 
   return i;
@@ -20893,8 +22362,7 @@ function_type::get_cached_name(bool internal) const
       else
 	{
 	  priv_->temp_internal_cached_name_ =
-	    get_function_type_name(this,
-				   /*internal=*/true);
+	    get_function_type_name(this, /*internal=*/true);
 	  return priv_->temp_internal_cached_name_;
 	}
     }
@@ -21137,6 +22605,20 @@ method_type::method_type(class_or_union_sptr class_type,
   set_is_const(is_const);
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+method_type::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Get the class type this method belongs to.
 ///
 /// @return the class type.
@@ -21191,6 +22673,43 @@ method_type::set_is_const(bool f)
 bool
 method_type::get_is_const() const
 {return priv_->is_const;}
+
+/// Test if the current method type is for a static method or not.
+///
+/// @return true iff the current method_type denotes a the type of a
+/// static method.
+bool
+method_type::get_is_for_static_method() const
+{
+  // Let's see if the first parameter is artificial and is a pointer
+  // to an instance of the same class type as the current class.
+  function_decl::parameter_sptr first_parm;
+  if (!get_parameters().empty())
+    first_parm = get_parameters()[0];
+  if (!first_parm)
+    return true;
+  if (!first_parm->get_is_artificial())
+    return true;
+
+  type_base_sptr this_ptr_type = first_parm->get_type();
+  // Sometimes, the type of the "this" pointer is "const class_type*
+  // const".  Meaning that the "this pointer" itself is const
+  // qualified.  So let's get the underlying non-qualified pointer.
+  this_ptr_type = peel_qualified_type(this_ptr_type);
+  if (!is_pointer_type(this_ptr_type))
+    return true;
+
+  type_base_sptr candidate_class_type =
+    is_pointer_type(this_ptr_type)->get_pointed_to_type();
+  candidate_class_type = peel_qualified_type(candidate_class_type);
+  if (is_class_type(candidate_class_type)
+      && get_type_name(candidate_class_type) == get_type_name(get_class_type()))
+    // At this point, we are sure we are looking at a *non-static*
+    // method.
+    return false;
+
+  return true;
+}
 
 /// The destructor of method_type
 method_type::~method_type()
@@ -21326,32 +22845,48 @@ function_decl::get_pretty_representation(bool internal,
   const method_decl* mem_fn =
     dynamic_cast<const method_decl*>(this);
 
-  string result = mem_fn ? "method ": "function ";
+  string fn_prefix = mem_fn ? "method ": "function ";
+  string result;
 
   if (mem_fn
       && is_member_function(mem_fn)
       && get_member_function_is_virtual(mem_fn))
-    result += "virtual ";
+    fn_prefix += "virtual ";
 
-  decl_base_sptr type;
+  decl_base_sptr return_type;
   if ((mem_fn
        && is_member_function(mem_fn)
        && (get_member_function_is_dtor(*mem_fn)
 	   || get_member_function_is_ctor(*mem_fn))))
     /*cdtors do not have return types.  */;
   else
-    type = mem_fn
+    return_type = mem_fn
       ? get_type_declaration(mem_fn->get_type()->get_return_type())
       : get_type_declaration(get_type()->get_return_type());
 
-  if (type)
-    result += get_type_name(is_type(type).get(),
-			    qualified_name,
-			    internal) + " ";
+  result = get_pretty_representation_of_declarator(internal);
+  if (return_type)
+    {
+      if (is_npaf_type(is_type(return_type))
+	  || !(is_pointer_to_function_type(is_type(return_type))
+	       || is_pointer_to_array_type(is_type(return_type))))
+	result = get_type_name(is_type(return_type).get(), qualified_name,
+			       internal) + " " + result;
+      else if (pointer_type_def_sptr p =
+	       is_pointer_to_function_type(is_type(return_type)))
+	result = add_outer_pointer_to_fn_type_expr(p, result,
+						   /*qualified=*/true,
+						   internal);
+      else if(pointer_type_def_sptr p =
+	      is_pointer_to_array_type(is_type(return_type)))
+	result = add_outer_pointer_to_array_type_expr(p, result,
+						      qualified_name,
+						      internal);
+      else
+	ABG_ASSERT_NOT_REACHED;
+    }
 
-  result += get_pretty_representation_of_declarator(internal);
-
-  return result;
+  return fn_prefix + result;
 }
 
 /// Compute and return the pretty representation for the part of the
@@ -21387,35 +22922,12 @@ function_decl::get_pretty_representation_of_declarator (bool internal) const
   else
     result += get_qualified_name();
 
-  result += "(";
-
-  parameters::const_iterator i = get_parameters().begin(),
-    end = get_parameters().end();
-
-  // Skip the first parameter if this is a method.
-  if (mem_fn && i != end)
-    ++i;
-  parameter_sptr parm;
-  parameter_sptr first_parm;
-  if (i != end)
-    first_parm = *i;
-  for (; i != end; ++i)
-    {
-      parm = *i;
-      if (parm.get() != first_parm.get())
-	result += ", ";
-      if (parm->get_variadic_marker()
-	  || get_environment().is_variadic_parameter_type(parm->get_type()))
-	result += "...";
-      else
-	{
-	  type_base_sptr type = parm->get_type();
-	  if (internal)
-	    type = peel_typedef_type(type);
-	  result += get_type_name(type, /*qualified=*/true, internal);
-	}
-    }
-  result += ")";
+  std::ostringstream fn_parms;
+  stream_pretty_representation_of_fn_parms(*get_type(),
+					   fn_parms,
+					   /*qualified=*/true,
+					   internal);
+  result += fn_parms.str();
 
   if (mem_fn
       &&((is_member_function(mem_fn) && get_member_function_is_const(*mem_fn))
@@ -21507,9 +23019,19 @@ const elf_symbol_sptr&
 function_decl::get_symbol() const
 {return priv_->symbol_;}
 
+/// Test if the function was declared inline.
+///
+/// @return true iff the function was declared inline.
 bool
 function_decl::is_declared_inline() const
 {return priv_->declared_inline_;}
+
+/// Set the property of the function being declared inline.
+///
+/// @param value true iff the function was declared inline.
+void
+function_decl::is_declared_inline(bool value)
+{priv_->declared_inline_ = value;}
 
 decl_base::binding
 function_decl::get_binding() const
@@ -21556,12 +23078,12 @@ function_decl::clone() const
     {
       method_decl_sptr
 	m(new method_decl(get_name(),
-				      get_type(),
-				      is_declared_inline(),
-				      get_location(),
-				      get_linkage_name(),
-				      get_visibility(),
-				      get_binding()));
+			  get_type(),
+			  is_declared_inline(),
+			  get_location(),
+			  get_linkage_name(),
+			  get_visibility(),
+			  get_binding()));
       class_or_union* scope = is_class_or_union_type(get_scope());
       ABG_ASSERT(scope);
       scope->add_member_function(m, get_member_access_specifier(*this),
@@ -21692,9 +23214,10 @@ equals(const function_decl& l, const function_decl& r, change_kind* k)
 	  ABG_RETURN_FALSE;
       }
 
-  // Compare the remaining properties
-  if (l.is_declared_inline() != r.is_declared_inline()
-      || l.get_binding() != r.get_binding())
+  // Compare the remaining properties.  Note that we don't take into
+  // account the fact that the function was declared inline or not as
+  // that doesn't have any impact on the final ABI.
+  if (l.get_binding() != r.get_binding())
     {
       result = false;
       if (k)
@@ -21764,18 +23287,6 @@ function_decl::is_variadic() const
 {
   return (!get_parameters().empty()
 	  && get_parameters().back()->get_variadic_marker());
-}
-
-/// The virtual implementation of 'get_hash' for a function_decl.
-///
-/// This allows decl_base::get_hash to work for function_decls.
-///
-/// @return the hash value for function decl.
-size_t
-function_decl::get_hash() const
-{
-  function_decl::hash hash_fn;
-  return hash_fn(*this);
 }
 
 /// Return an ID that tries to uniquely identify the function inside a
@@ -22100,8 +23611,9 @@ equals(const function_decl::parameter& l,
 	ABG_RETURN_FALSE;
     }
 
-  type_base_sptr l_type = peel_typedef_type(l.get_type());
-  type_base_sptr r_type = peel_typedef_type(r.get_type());
+  type_base_sptr l_type = l.get_type();
+  type_base_sptr r_type = r.get_type();
+
   if (l_type != r_type)
     {
       result = false;
@@ -22186,17 +23698,6 @@ function_decl::parameter::traverse(ir_node_visitor& v)
   return v.visit_end(this);
 }
 
-/// Get the hash of a decl.  If the hash hasn't been computed yet,
-/// compute it ans store its value; otherwise, just return the hash.
-///
-/// @return the hash of the decl.
-size_t
-function_decl::parameter::get_hash() const
-{
-  function_decl::parameter::hash hash_fn_parm;
-  return hash_fn_parm(this);
-}
-
 /// Compute the qualified name of the parameter.
 ///
 /// @param internal set to true if the call is intended for an
@@ -22227,7 +23728,7 @@ function_decl::parameter::get_qualified_name(interned_string& qualified_name,
 /// function parameter.
 string
 function_decl::parameter::get_pretty_representation(bool internal,
-						    bool /*qualified_name*/) const
+						    bool qualified_name) const
 {
   const environment& env = get_environment();
 
@@ -22238,7 +23739,7 @@ function_decl::parameter::get_pretty_representation(bool internal,
   else if (env.is_variadic_parameter_type(t))
     type_repr = "...";
   else
-    type_repr = ir::get_pretty_representation(t, internal);
+    type_repr = ir::get_type_name(t, qualified_name, internal);
 
   string result = type_repr;
   string parm_name = get_name_id();
@@ -22362,6 +23863,21 @@ class_or_union::class_or_union(const environment& env, const string& name,
     priv_(new priv)
 {
   set_is_declaration_only(is_declaration_only);
+}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+class_or_union::hash_value() const
+{
+  class_or_union::hash do_hash;
+  hash_t h = do_hash(this);
+  return h;
 }
 
 /// This implements the ir_traversable_base::traverse pure virtual
@@ -22661,11 +24177,26 @@ class_or_union::add_data_member(var_decl_sptr v, access_specifier access,
   set_member_access_specifier(v, access);
   set_member_is_static(v, is_static);
 
-  if (!is_static)
+  // Add the variable to the set of static or non-static data members,
+  // if it's not already in there.
+  bool is_already_in = false;
+  if (is_static)
+    {
+      for (const auto& s_dm: priv_->static_data_members_)
+	{
+	  if (s_dm == v)
+	    {
+	      is_already_in = true;
+	      break;
+	    }
+	}
+      if (!is_already_in)
+	priv_->static_data_members_.push_back(v);
+    }
+  else
     {
       // If this is a non-static variable, add it to the set of
-      // non-static variables, if it's not only in there.
-      bool is_already_in = false;
+      // non-static variables, if it's not already in there.
       for (data_members::const_iterator i =
 	     priv_->non_static_data_members_.begin();
 	   i != priv_->non_static_data_members_.end();
@@ -22777,13 +24308,21 @@ class_or_union::find_data_member(const var_decl_sptr& v) const
 }
 
 
-/// Get the non-static data memebers of this @ref class_or_union.
+/// Get the non-static data members of this @ref class_or_union.
 ///
 /// @return a vector of the non-static data members of this @ref
 /// class_or_union.
 const class_or_union::data_members&
 class_or_union::get_non_static_data_members() const
 {return priv_->non_static_data_members_;}
+
+/// Get the static data memebers of this @ref class_or_union.
+///
+/// @return a vector of the static data members of this @ref
+/// class_or_union.
+const class_or_union::data_members&
+class_or_union::get_static_data_members() const
+{return priv_->static_data_members_;}
 
 /// Add a member function.
 ///
@@ -23092,9 +24631,7 @@ equals(const class_or_union& l, const class_or_union& r, change_kind* k)
 	    // change.
 	    return true;
 
-	  if ((l.get_environment().decl_only_class_equals_definition()
-	       || ((odr_is_relevant(l) && !def1)
-		   || (odr_is_relevant(r) && !def2)))
+	  if (l.get_environment().decl_only_class_equals_definition()
 	      && !is_anonymous_or_typedef_named(l)
 	      && !is_anonymous_or_typedef_named(r))
 	    {
@@ -23168,9 +24705,8 @@ equals(const class_or_union& l, const class_or_union& r, change_kind* k)
   //overload for class_decl and union_decl because this one ( the
   //equal overload for class_or_union) is just a sub-routine of these
   //two above.
-#define RETURN(value)							\
-  return return_comparison_result(l, r, value,				\
-				  /*propagate_canonical_type=*/false);
+#define RETURN(value)				\
+  return return_comparison_result(l, r, value);
 
   RETURN_TRUE_IF_COMPARISON_CYCLE_DETECTED(l, r);
 
@@ -23354,125 +24890,6 @@ copy_member_function(const class_or_union_sptr& t, const method_decl* method)
 }
 
 // </class_or_union definitions>
-
-/// @defgroup OnTheFlyCanonicalization On-the-fly Canonicalization
-/// @{
-///
-/// This optimization is also known as "canonical type propagation".
-/// 
-/// During the canonicalization of a type T (which doesn't yet have a
-/// canonical type), T is compared structurally (member-wise) against
-/// a type C which already has a canonical type.  The comparison
-/// expression is C == T.
-///
-/// During that structural comparison, if a subtype of C (which also
-/// already has a canonical type) is structurally compared to a
-/// subtype of T (which doesn't yet have a canonical type) and if they
-/// are equal, then we can deduce that the canonical type of the
-/// subtype of C is the canonical type of the subtype of C.
-///
-/// Thus, we can canonicalize the sub-type of the T, during the
-/// canonicalization of T itself.  That canonicalization of the
-/// sub-type of T is what we call the "on-the-fly canonicalization".
-/// It's on the fly because it happens during a comparison -- which
-/// itself happens during the canonicalization of T.
-///
-/// For now this on-the-fly canonicalization only happens when
-/// comparing @ref class_decl and @ref function_type.
-///
-/// Note however that there is a case when a type is *NOT* eligible to
-/// this canonical type propagation optimization.
-///
-/// The reason why a type is deemed NON-eligible to the canonical type
-/// propagation optimization is that it "depends" on recursively
-/// present type.  Let me explain.
-///
-/// Suppose we have a type T that has sub-types named ST0 and ST1.
-/// Suppose ST1 itself has a sub-type that is T itself.  In this case,
-/// we say that T is a recursive type, because it has T (itself) as
-/// one of its sub-types:
-///
-/// <PRE>
-///    T
-///    +-- ST0
-///    |
-///    +-- ST1
-///    |    +
-///    |    |
-///    |    +-- T
-///    |
-///    +-- ST2
-/// </PRE>
-///
-/// ST1 is said to "depend" on T because it has T as a sub-type.  But
-/// because T is recursive, then ST1 is said to depend on a recursive
-/// type.  Notice however that ST0 does not depend on any recursive
-/// type.
-///
-/// Now suppose we are comparing T to a type T' that has the same
-/// structure with sub-types ST0', ST1' and ST2'.  During the
-/// comparison of ST1 against ST1', their sub-type T is compared
-/// against T'.  Because T (resp. T') is a recursive type that is
-/// already being compared, the comparison of T against T' (as a
-/// subtypes of ST1 and ST1') returns true, meaning they are
-/// considered equal.  This is done so that we don't enter an infinite
-/// recursion.
-///
-/// That means ST1 is also deemed equal to ST1'.  If we are in the
-/// course of the canonicalization of T' and thus if T (as well as as
-/// all of its sub-types) is already canonicalized, then the canonical
-/// type propagation optimization will make us propagate the canonical
-/// type of ST1 onto ST1'.  So the canonical type of ST1' will be
-/// equal to the canonical type of ST1 as a result of that
-/// optmization.
-///
-/// But then, later down the road, when ST2 is compared against ST2',
-/// let's suppose that we find out that they are different. Meaning
-/// that ST2 != ST2'.  This means that T != T', i.e, the
-/// canonicalization of T' failed for now.  But most importantly, it
-/// means that the propagation of the canonical type of ST1 to ST1'
-/// must now be invalidated.  Meaning, ST1' must now be considered as
-/// not having any canonical type.
-///
-/// In other words, during type canonicalization, if ST1' depends on a
-/// recursive type T', its propagated canonical type must be
-/// invalidated (set to nullptr) if T' appears to be different from T,
-/// a.k.a, the canonicalization of T' temporarily failed.
-///
-/// This means that any sub-type that depends on recursive types and
-/// that has been the target of the canonical type propagation
-/// optimization must be tracked.  If the dependant recursive type
-/// fails its canonicalization, then the sub-type being compared must
-/// have its propagated canonical type cleared.  In other words, its
-/// propagated canonical type must be cancelled.
-///
-/// @}
-
-
-/// If on-the-fly canonicalization is turned on, then this function
-/// sets the canonical type of its second parameter to the canonical
-/// type of the first parameter.
-///
-/// @param lhs_type the type which canonical type to propagate.
-///
-/// @param rhs_type the type which canonical type to set.
-static bool
-maybe_propagate_canonical_type(const type_base& lhs_type,
-			       const type_base& rhs_type)
-{
-  const environment& env = lhs_type.get_environment();
-#if WITH_DEBUG_TYPE_CANONICALIZATION
-  if (!env.priv_->use_canonical_type_comparison_)
-    return false;
-#endif
-
-  if (env.do_on_the_fly_canonicalization())
-    if (type_base_sptr canonical_type = lhs_type.get_canonical_type())
-      if (!rhs_type.get_canonical_type())
-	if (env.priv_->propagate_ct(lhs_type, rhs_type))
-	  return true;
-  return false;
-}
 
 // <class_decl definitions>
 
@@ -23922,6 +25339,20 @@ class_decl::base_spec::base_spec(const class_decl_sptr& base,
   set_qualified_name(base->get_qualified_name());
 }
 
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+class_decl::base_spec::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
+}
+
 /// Get the base class referred to by the current base class
 /// specifier.
 ///
@@ -23943,16 +25374,6 @@ class_decl::base_spec::get_is_virtual() const
 long
 class_decl::base_spec::get_offset_in_bits() const
 {return priv_->offset_in_bits_;}
-
-/// Calculate the hash value for a class_decl::base_spec.
-///
-/// @return the hash value.
-size_t
-class_decl::base_spec::get_hash() const
-{
-  base_spec::hash h;
-  return h(*this);
-}
 
 /// Traverses an instance of @ref class_decl::base_spec, visiting all
 /// the sub-types and decls that it might contain.
@@ -24352,6 +25773,10 @@ struct virtual_member_function_less_than
     if (f_offset != s_offset) return f_offset < s_offset;
 
     string fn, sn;
+    // Try the linkage names (important for destructors).
+    fn = f.get_linkage_name();
+    sn = s.get_linkage_name();
+    if (fn != sn) return fn < sn;
 
     // If the functions have symbols, then compare their symbol-id
     // string.
@@ -24364,11 +25789,6 @@ struct virtual_member_function_less_than
 	sn = s_sym->get_id_string();
 	if (fn != sn) return fn < sn;
       }
-
-    // Try the linkage names (important for destructors).
-    fn = f.get_linkage_name();
-    sn = s.get_linkage_name();
-    if (fn != sn) return fn < sn;
 
     // None of the functions have symbols or linkage names that
     // distinguish them, so compare their pretty representation.
@@ -24450,10 +25870,9 @@ class_or_union::add_member_function(method_decl_sptr f,
 
   if (class_decl* klass = is_class_type(this))
     {
-      set_member_function_is_virtual(f, is_virtual);
       if (is_virtual)
 	{
-	  set_member_function_vtable_offset(f, vtable_offset);
+	  set_member_function_virtuality(f, is_virtual, vtable_offset);
 	  sort_virtual_member_functions(klass->priv_->virtual_mem_fns_);
 	}
     }
@@ -24477,7 +25896,8 @@ fixup_virtual_member_function(method_decl_sptr method)
   for (m = klass->priv_->virtual_mem_fns_.begin();
        m != klass->priv_->virtual_mem_fns_.end();
        ++m)
-    if (m->get() == method.get())
+    if (m->get() == method.get()
+	|| (*m)->get_linkage_name() == method->get_linkage_name())
       break;
   if (m == klass->priv_->virtual_mem_fns_.end())
     klass->priv_->virtual_mem_fns_.push_back(method);
@@ -24499,7 +25919,8 @@ fixup_virtual_member_function(method_decl_sptr method)
   else
     {
       for (m = i->second.begin() ; m != i->second.end(); ++m)
-	if (m->get() == method.get())
+	if (m->get() == method.get()
+	    || (*m)->get_linkage_name() == method->get_linkage_name())
 	  break;
       if (m == i->second.end())
 	i->second.push_back(method);
@@ -24572,14 +25993,18 @@ class_decl::get_biggest_vtable_offset() const
   return offset;
 }
 
-/// Return the hash value for the current instance.
+/// Return the hash value of the current IR node.
 ///
-/// @return the hash value.
-size_t
-class_decl::get_hash() const
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+class_decl::hash_value() const
 {
-  class_decl::hash hash_class;
-  return hash_class(this);
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
 }
 
 /// Test if two methods are equal without taking their symbol or
@@ -24654,29 +26079,6 @@ method_matches_at_least_one_in_vector(const method_decl_sptr& method,
   return false;
 }
 
-/// Cancel the canonical type that was propagated.
-///
-/// If we are in the process of comparing a type for the purpose of
-/// canonicalization, and if that type has been the target of the
-/// canonical type propagation optimization, then clear the propagated
-/// canonical type.  See @ref OnTheFlyCanonicalization for more about
-/// the canonical type  optimization
-///
-/// @param t the type to consider.
-static bool
-maybe_cancel_propagated_canonical_type(const class_or_union& t)
-{
-  const environment& env = t.get_environment();
-  if (env.do_on_the_fly_canonicalization())
-    if (is_type(&t)->priv_->canonical_type_propagated())
-      {
-	is_type(&t)->priv_->clear_propagated_canonical_type();
-	env.priv_->remove_from_types_with_non_confirmed_propagated_ct(&t);
-	return true;
-      }
-  return false;
-}
-
 /// Compares two instances of @ref class_decl.
 ///
 /// If the two intances are different, set a bitfield to give some
@@ -24716,7 +26118,6 @@ equals(const class_decl& l, const class_decl& r, change_kind* k)
 		      static_cast<const class_or_union&>(r),
 		      k));
 
-  bool had_canonical_type = !!r.get_naked_canonical_type();
   bool result = true;
   if (!equals(static_cast<const class_or_union&>(l),
 	      static_cast<const class_or_union&>(r),
@@ -24726,13 +26127,6 @@ equals(const class_decl& l, const class_decl& r, change_kind* k)
       if (!k)
 	ABG_RETURN(result);
     }
-
-  // If comparing the class_or_union 'part' of the type led to
-  // canonical type propagation, then cancel that because it's too
-  // early to do that at this point.  We still need to compare bases
-  // virtual members.
-  if (!had_canonical_type)
-    maybe_cancel_propagated_canonical_type(r);
 
   RETURN_TRUE_IF_COMPARISON_CYCLE_DETECTED(l, r);
 
@@ -24889,7 +26283,11 @@ class_decl::operator==(const decl_base& other) const
 {
   const class_decl* op = is_class_type(&other);
   if (!op)
-    return false;
+    {
+      if (class_or_union* cou = is_class_or_union_type(&other))
+	return class_or_union::operator==(*cou);
+      return false;
+    }
 
   // If this is a decl-only type (and thus with no canonical type),
   // use the canonical type of the definition, if any.
@@ -25435,51 +26833,68 @@ set_member_is_static(decl_base& d, bool s)
     {
       if (var_decl* v = is_var_decl(&d))
 	{
-	  if (s)
-	    // remove from the non-static data members
-	    for (class_decl::data_members::iterator i =
-		   cl->priv_->non_static_data_members_.begin();
-		 i != cl->priv_->non_static_data_members_.end();
-		 ++i)
+	  // First, find v in the set of data members.
+	  var_decl_sptr var;
+	  for (const auto& dm : cl->get_data_members())
+	    if (dm->get_name() == v->get_name())
 	      {
-		if ((*i)->get_name() == v->get_name())
-		  {
-		    cl->priv_->non_static_data_members_.erase(i);
-		    break;
-		  }
+		var = dm;
+		break;
 	      }
-	  else
+	  if (!var)
+	    return;
+
+	  if (s)
 	    {
-	      bool is_already_in_non_static_data_members = false;
-	      for (class_or_union::data_members::iterator i =
+	      // remove from the non-static data members
+	      for (class_decl::data_members::iterator i =
 		     cl->priv_->non_static_data_members_.begin();
 		   i != cl->priv_->non_static_data_members_.end();
 		   ++i)
-	      {
+		{
+		  if ((*i)->get_name() == v->get_name())
+		    {
+		      cl->priv_->non_static_data_members_.erase(i);
+		      break;
+		    }
+		}
+
+	      // If it's not in the static data members, then add it
+	      // there.
+	      bool already_in_static_dms = false;
+	      for (const auto& s_dm : cl->priv_->static_data_members_)
+		if (s_dm->get_name() == v->get_name())
+		  {
+		    already_in_static_dms = true;
+		    break;
+		  }
+	      if (!already_in_static_dms)
+		cl->priv_->static_data_members_.push_back(var);
+	    }
+	  else // is non-static
+	    {
+	      // Remove from the static data members.
+	      for (class_or_union::data_members::iterator i =
+		     cl->priv_->static_data_members_.begin();
+		   i != cl->priv_->static_data_members_.end();
+		   ++i)
 		if ((*i)->get_name() == v->get_name())
+		  {
+		    cl->priv_->static_data_members_.erase(i);
+		    break;
+		  }
+
+	      // If it's not already in the non-static data members
+	      // then add it there.
+	      bool is_already_in_non_static_data_members = false;
+	      for (const auto& ns_dm : cl->priv_->non_static_data_members_)
+		if (ns_dm->get_name() == v->get_name())
 		  {
 		    is_already_in_non_static_data_members = true;
 		    break;
 		  }
-	      }
 	      if (!is_already_in_non_static_data_members)
-		{
-		  var_decl_sptr var;
-		  // add to non-static data members.
-		  for (class_or_union::data_members::const_iterator i =
-			 cl->priv_->data_members_.begin();
-		       i != cl->priv_->data_members_.end();
-		       ++i)
-		    {
-		      if ((*i)->get_name() == v->get_name())
-			{
-			  var = *i;
-			  break;
-			}
-		    }
-		  ABG_ASSERT(var);
-		  cl->priv_->non_static_data_members_.push_back(var);
-		}
+		cl->priv_->non_static_data_members_.push_back(var);
 	    }
 	}
     }
@@ -25672,6 +27087,20 @@ union_decl::union_decl(const environment& env,
     class_or_union(env, name, is_declaration_only)
 {
   runtime_type_instance(this);
+}
+
+/// Return the hash value of the current IR node.
+///
+/// Note that upon the first invocation, this member functions
+/// computes the hash value and returns it.  Subsequent invocations
+/// just return the hash value that was previously calculated.
+///
+/// @return the hash value of the current IR node.
+hash_t
+union_decl::hash_value() const
+{
+  hash_t h = set_or_get_cached_hash_value(this);
+  return h;
 }
 
 /// Getter of the pretty representation of the current instance of
@@ -26103,13 +27532,6 @@ const template_decl_sptr
 template_parameter::get_enclosing_template_decl() const
 {return priv_->template_decl_.lock();}
 
-bool
-template_parameter::get_hashing_has_started() const
-{return priv_->hashing_started_;}
-
-void
-template_parameter::set_hashing_has_started(bool f) const
-{priv_->hashing_started_ = f;}
 
 bool
 template_parameter::operator==(const template_parameter& o) const
@@ -26326,15 +27748,6 @@ const type_base_sptr
 non_type_tparameter::get_type() const
 {return priv_->type_.lock();}
 
-/// Get the hash value of the current instance.
-///
-/// @return the hash value.
-size_t
-non_type_tparameter::get_hash() const
-{
-  non_type_tparameter::hash hash_tparm;
-  return hash_tparm(this);
-}
 
 bool
 non_type_tparameter::operator==(const decl_base& other) const
@@ -26525,16 +27938,6 @@ type_composition::get_composed_type() const
 void
 type_composition::set_composed_type(type_base_sptr t)
 {priv_->type_ = t;}
-
-/// Get the hash value for the current instance.
-///
-/// @return the hash value.
-size_t
-type_composition::get_hash() const
-{
-  type_composition::hash hash_type_composition;
-  return hash_type_composition(this);
-}
 
 type_composition::~type_composition()
 {}
@@ -27022,7 +28425,7 @@ keep_type_alive(type_base_sptr t)
 size_t
 hash_type_or_decl(const type_or_decl_base *tod)
 {
-  size_t result = 0;
+  hash_t result = 0;
 
   if (tod == 0)
     ;
@@ -27030,10 +28433,17 @@ hash_type_or_decl(const type_or_decl_base *tod)
     result = hash_type(t);
   else if (const decl_base* d = is_decl(tod))
     {
-      if (var_decl* v = is_var_decl(d))
+      if (const scope_decl* s = is_scope_decl(d))
+	{
+	  if (const global_scope* g = is_global_scope(s))
+	    result = reinterpret_cast<size_t>(g);
+	  else
+	    result = reinterpret_cast<size_t>(s);
+	}
+      else if (var_decl* v = is_var_decl(d))
 	{
 	  ABG_ASSERT(v->get_type());
-	  size_t h = hash_type_or_decl(v->get_type());
+	  hash_t h = hash_type_or_decl(v->get_type());
 	  string repr = v->get_pretty_representation(/*internal=*/true);
 	  std::hash<string> hash_string;
 	  h = hashing::combine_hashes(h, hash_string(repr));
@@ -27042,7 +28452,7 @@ hash_type_or_decl(const type_or_decl_base *tod)
       else if (function_decl* f = is_function_decl(d))
 	{
 	  ABG_ASSERT(f->get_type());
-	  size_t h = hash_type_or_decl(f->get_type());
+	  hash_t h = hash_type_or_decl(f->get_type());
 	  string repr = f->get_pretty_representation(/*internal=*/true);
 	  std::hash<string> hash_string;
 	  h = hashing::combine_hashes(h, hash_string(repr));
@@ -27054,7 +28464,7 @@ hash_type_or_decl(const type_or_decl_base *tod)
 	  ABG_ASSERT(parm_type);
 	  std::hash<bool> hash_bool;
 	  std::hash<unsigned> hash_unsigned;
-	  size_t h = hash_type_or_decl(parm_type);
+	  hash_t h = hash_type_or_decl(parm_type);
 	  h = hashing::combine_hashes(h, hash_unsigned(p->get_index()));
 	  h = hashing::combine_hashes(h, hash_bool(p->get_variadic_marker()));
 	  result = h;
@@ -27065,7 +28475,7 @@ hash_type_or_decl(const type_or_decl_base *tod)
 	  std::hash<size_t> hash_size;
 	  std::hash<bool> hash_bool;
 	  type_base_sptr type = bs->get_base_class();
-	  size_t h = hash_type_or_decl(type);
+	  hash_t h = hash_type_or_decl(type);
 	  h = hashing::combine_hashes(h, hash_member(*bs));
 	  h = hashing::combine_hashes(h, hash_size(bs->get_offset_in_bits()));
 	  h = hashing::combine_hashes(h, hash_bool(bs->get_is_virtual()));
@@ -27075,15 +28485,16 @@ hash_type_or_decl(const type_or_decl_base *tod)
 	// This is a *really* *SLOW* path.  If it shows up in a
 	// performance profile, I bet it'd be a good idea to try to
 	// avoid it altogether.
-	result = d->get_hash();
+	// TODO: recode this function or get rid of it altogethe.
+	abort();
     }
   else
     // We should never get here.
     abort();
-  return result;
+  return *result;
 }
 
-/// Hash an ABI artifact that is either a type.
+/// Hash an ABI artifact that is a type.
 ///
 /// This function intends to provides the fastest possible hashing for
 /// types while being completely correct.
@@ -27110,6 +28521,32 @@ hash_type(const type_base *t)
 size_t
 hash_type_or_decl(const type_or_decl_base_sptr& tod)
 {return hash_type_or_decl(tod.get());}
+
+/// Get the hash value associated to an IR node.
+///
+/// Unlike type_or_decl_base::hash_value(), if the IR has no
+/// associated hash value, an empty hash value is returned.
+///
+/// @param artefact the IR node to consider.
+///
+/// @return the hash value stored on the IR node or an empty hash if
+/// no hash value is stored in the @p artefact.
+hash_t
+peek_hash_value(const type_or_decl_base& artefact)
+{
+  const type_or_decl_base* artefactp = &artefact;
+  if (decl_base *d = is_decl(artefactp))
+    {
+      d = look_through_decl_only(d);
+      if (d->type_or_decl_base::priv_->get_hashing_state()
+	  == hashing::HASHING_FINISHED_STATE)
+	return d->type_or_decl_base::priv_->hash_value_;
+    }
+  else if (artefact.priv_->get_hashing_state() == hashing::HASHING_FINISHED_STATE)
+    return artefact.priv_->hash_value_;
+
+  return hash_t();
+}
 
 /// Test if a given type is allowed to be non canonicalized
 ///
@@ -27408,6 +28845,18 @@ types_have_similar_structure(const type_base* first,
 					  /*indirect_type=*/true);
     }
 
+  // Peel off matching pointer-to-member types.
+  if (const ptr_to_mbr_type* ty1 = is_ptr_to_mbr_type(first))
+    {
+      const ptr_to_mbr_type* ty2 = is_ptr_to_mbr_type(second);
+      return (types_have_similar_structure(ty1->get_member_type(),
+					   ty2->get_member_type(),
+					   /*indirect_type=*/true)
+	      && types_have_similar_structure(ty1->get_containing_type(),
+					      ty2->get_containing_type(),
+					      /*indirect_type=*/true));
+    }
+
   if (const type_decl* ty1 = is_type_decl(first))
     {
       const type_decl* ty2 = is_type_decl(second);
@@ -27478,14 +28927,39 @@ types_have_similar_structure(const type_base* first,
   if (const array_type_def* ty1 = is_array_type(first))
     {
       const array_type_def* ty2 = is_array_type(second);
-      // TODO: Handle int[5][2] vs int[2][5] better.
       if (!indirect_type)
 	{
 	  if (ty1->get_size_in_bits() != ty2->get_size_in_bits()
 	      || ty1->get_dimension_count() != ty2->get_dimension_count())
 	    return false;
+
+	  // Handle int[5][2] vs int[2][5] ...
+	  //
+	  // 6.2.5/20 of
+	  //  https://www.open-std.org/jtc1/sc22/WG14/www/docs/n1256.pdf
+	  //  says:
+	  //
+	  //  "Array types are characterized by their element
+	  //  type and by the number of elements in the array"
+	  //
+	  // and 6.5.2.1/3 says:
+	  //
+	  //  "arrays are stored in row-major order (last subscript
+	  //   varies fastest)."
+	  //
+	  // So, let's ensure that all dimensions (sub-ranges) have
+	  // the same length.
+
+	  for (auto r1 = ty1->get_subranges().begin(),
+		 r2 = ty1->get_subranges().begin();
+	       (r1 != ty1->get_subranges().end()
+		&& r2 != ty2->get_subranges().end());
+	       ++r1, ++r2)
+	    if ((*r1)->get_length() != (*r2)->get_length())
+	      return false;
 	}
 
+      // ... then compare the elements of the arrays.
       if (!types_have_similar_structure(ty1->get_element_type(),
 					ty2->get_element_type(),
 					/*indirect_type=*/true))
@@ -27676,6 +29150,930 @@ find_last_data_member_matching_regexp(const class_or_union& t,
   return var_decl_sptr();
 }
 
+/// Emit the pretty representation of the parameters of a function
+/// type.
+///
+/// @param fn_type the function type to consider.
+///
+/// @param o the output stream to emit the pretty representation to.
+///
+/// @param qualified if true, emit fully qualified names.
+///
+/// @param internal if true, then the result is to be used for the
+/// purpose of type canonicalization.
+static void
+stream_pretty_representation_of_fn_parms(const function_type& fn_type,
+					 ostream& o, bool qualified,
+					 bool internal)
+{
+  o << "(";
+  if (fn_type.get_parameters().empty())
+    o << "void";
+  else
+    {
+      type_base_sptr type;
+      auto end = fn_type.get_parameters().end();
+      auto first_parm = fn_type.get_first_non_implicit_parm();
+      function_decl::parameter_sptr parm;
+      const environment& env = fn_type.get_environment();
+      for (auto i = fn_type.get_first_non_implicit_parm(); i != end; ++i)
+	{
+	  if (i != first_parm)
+	    o << ", ";
+	  parm = *i;
+	  type = parm->get_type();
+	  // If the type is a decl-only class, union or enum that has a
+	  // definition, use the definition instead.  That definition
+	  // is what is going to be serialized out in ABIXML anyway,
+	  // so use that for consistency.
+	  if (decl_base_sptr def = look_through_decl_only(is_decl(type)))
+	    type = is_type(def);
+	  if (env.is_variadic_parameter_type(type))
+	    o << "...";
+	  else
+	    o << get_type_name(type, qualified, internal);
+	}
+    }
+  o << ")";
+}
+
+/// When constructing the name of a pointer to function type, add the
+/// return type to the left of the existing type identifier, and the
+/// parameters declarator to the right.
+///
+/// This function considers the name of the type as an expression.
+///
+/// The resulting type expr is going to be made of three parts:
+/// left_expr inner_expr right_expr.
+///
+/// Suppose we want to build the type expression representing:
+///
+///   "an array of pointer to function taking a char parameter and
+///    returning an int".
+///
+/// It's going to look like:
+///
+///   int(*a[])(char);
+///
+/// Suppose the caller of this function started to emit the inner
+/// "a[]" part of the expression already.  It thus calls this
+/// function with that input "a[]" part.  We consider that "a[]" as
+/// the "type identifier".
+///
+/// So the inner_expr is going to be "(*a[])".
+///
+/// The left_expr part is "int".  The right_expr part is "(char)".
+///
+/// In other words, this function adds the left_expr and right_expr to
+/// the inner_expr.  left_expr and right_expr are called "outer
+/// pointer to function type expression".
+///
+/// This is a sub-routine of @ref pointer_declaration_name() and @ref
+/// array_declaration_name()
+///
+/// @param p the pointer to function type to consider.
+///
+/// @param input the type-id to use as the inner expression of the
+/// overall pointer-to-function type expression
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+///
+/// @return the name of the pointer to function type.
+static string
+add_outer_pointer_to_fn_type_expr(const type_base* p,
+				  const string& input,
+				  bool qualified, bool internal)
+{
+  if (!p)
+    return "";
+
+  function_type_sptr pointed_to_fn;
+  string star_or_ref;
+
+  if (const pointer_type_def* ptr = is_pointer_type(p))
+    {
+      pointed_to_fn = is_function_type(ptr->get_pointed_to_type());
+      star_or_ref= "*";
+    }
+  else if (const reference_type_def* ref = is_reference_type(p))
+    {
+      star_or_ref = "&";
+      pointed_to_fn = is_function_type(ref->get_pointed_to_type());
+    }
+
+  if (!pointed_to_fn)
+    return "";
+
+  if (pointed_to_fn->priv_->is_pretty_printing())
+    // We have just detected a cycle while walking the sub-tree of
+    // this function type for the purpose of printing its
+    // representation.  We need to get out of here pronto or else
+    // we'll be spinning endlessly.
+    return "";
+
+  // Let's mark thie function type  to signify that we started walking
+  // its subtree.  This is to detect potential cycles and avoid
+  // looping endlessly.
+  pointed_to_fn->priv_->set_is_pretty_printing();
+
+  std::ostringstream left, right, inner;
+
+  inner <<  "(" << star_or_ref  << input << ")";
+
+  type_base_sptr type;
+  stream_pretty_representation_of_fn_parms(*pointed_to_fn, right,
+					   qualified, internal);
+
+  type_base_sptr return_type = pointed_to_fn->get_return_type();
+  string result;
+
+  if (is_npaf_type(return_type)
+      || !(is_pointer_to_function_type(return_type)
+	   || is_pointer_to_array_type(return_type)))
+    {
+      if (return_type)
+	left << get_type_name(return_type, qualified, internal);
+      result = left.str() + " " + inner.str() + right.str();
+    }
+  else if (pointer_type_def_sptr p = is_pointer_to_function_type(return_type))
+    {
+      string inner_string = inner.str() + right.str();
+      result = add_outer_pointer_to_fn_type_expr(p, inner_string,
+						 qualified, internal);
+    }
+  else if (pointer_type_def_sptr p = is_pointer_to_array_type(return_type))
+    {
+      string inner_string = inner.str() + right.str();
+      result = add_outer_pointer_to_array_type_expr(p, inner_string,
+						    qualified, internal);
+    }
+  else
+    ABG_ASSERT_NOT_REACHED;
+
+  // Lets unmark this function type to signify that we are done
+  // walking its subtree.  This was to detect potential cycles and
+  // avoid looping endlessly.
+  pointed_to_fn->priv_->unset_is_pretty_printing();
+  return result;
+}
+
+/// When constructing the name of a pointer to function type, add the
+/// return type to the left of the existing type identifier, and the
+/// parameters declarator to the right.
+///
+/// This function considers the name of the type as an expression.
+///
+/// The resulting type expr is going to be made of three parts:
+/// left_expr inner_expr right_expr.
+///
+/// Suppose we want to build the type expression representing:
+///
+///   "an array of pointer to function taking a char parameter and
+///    returning an int".
+///
+/// It's going to look like:
+///
+///   int(*a[])(char);
+///
+/// Suppose the caller of this function started to emit the inner
+/// "a[]" part of the expression already.  It thus calls this
+/// function with that input "a[]" part.  We consider that "a[]" as
+/// the "type identifier".
+///
+/// So the inner_expr is going to be "(*a[])".
+///
+/// The left_expr part is "int".  The right_expr part is "(char)".
+///
+/// In other words, this function adds the left_expr and right_expr to
+/// the inner_expr.  left_expr and right_expr are called "outer
+/// pointer to function type expression".
+///
+/// This is a sub-routine of @ref pointer_declaration_name() and @ref
+/// array_declaration_name()
+///
+/// @param p the pointer to function type to consider.
+///
+/// @param input the type-id to use as the inner expression of the
+/// overall pointer-to-function type expression
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+///
+/// @return the name of the pointer to function type.
+static string
+add_outer_pointer_to_fn_type_expr(const type_base_sptr& p,
+				  const string& input,
+				  bool qualified, bool internal)
+{return add_outer_pointer_to_fn_type_expr(p.get(), input, qualified, internal);}
+
+/// When constructing the name of a pointer to array type, add the
+/// array element type type to the left of the existing type
+/// identifier, and the array declarator part to the right.
+///
+/// This function considers the name of the type as an expression.
+///
+/// The resulting type expr is going to be made of three parts:
+/// left_expr inner_expr right_expr.
+///
+/// Suppose we want to build the type expression representing:
+///
+///   "a pointer to an array of int".
+///
+/// It's going to look like:
+///
+///   int(*foo)[];
+///
+/// Suppose the caller of this function started to emit the inner
+/// "foo" part of the expression already.  It thus calls this function
+/// with that input "foo" part.  We consider that "foo" as the "type
+/// identifier".
+///
+/// So we are passed an input string that is "foo" and it's going to
+/// be turned into the inner_expr part, which is going to be "(*foo)".
+///
+/// The left_expr part is "int".  The right_expr part is "[]".
+///
+/// In other words, this function adds the left_expr and right_expr to
+/// the inner_expr.  left_expr and right_expr are called "outer
+/// pointer to array type expression".
+///
+/// The model of this function was taken from the article "Reading C
+/// type declaration", from Steve Friedl at
+/// http://unixwiz.net/techtips/reading-cdecl.html.
+///
+/// This is a sub-routine of @ref pointer_declaration_name() and @ref
+/// array_declaration_name()
+///
+/// @param p the pointer to array type to consider.
+///
+/// @param input the type-id to start from as the inner part of the
+/// final type name.
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+///
+/// @return the name of the pointer to array type.
+static string
+add_outer_pointer_to_array_type_expr(const type_base* p,
+				     const string& input, bool qualified,
+				     bool internal)
+{
+  if (!p)
+    return "";
+
+  string star_or_ref;
+  type_base_sptr pointed_to_type;
+
+  if (const pointer_type_def *ptr = is_pointer_type(p))
+    {
+      pointed_to_type = ptr->get_pointed_to_type();
+      star_or_ref = "*";
+    }
+  else if (const reference_type_def *ref = is_reference_type(p))
+    {
+      pointed_to_type = ref->get_pointed_to_type();
+      star_or_ref = "&";
+    }
+
+  array_type_def_sptr array = is_array_type(pointed_to_type);
+  if (!array)
+    return "";
+
+  std::ostringstream left, right, inner;
+  inner <<  "(" << star_or_ref  << input << ")";
+  right << array->get_subrange_representation();
+  string result;
+
+  type_base_sptr array_element_type = array->get_element_type();
+
+  if (is_npaf_type(array_element_type)
+      || !(is_pointer_to_function_type(array_element_type)
+	   || is_pointer_to_array_type(array_element_type)))
+    {
+      left << get_type_name(array_element_type, qualified, internal);
+      result = left.str() + inner.str() + right.str();
+    }
+  else if (pointer_type_def_sptr p =
+	   is_pointer_to_function_type(array_element_type))
+    {
+      string r = inner.str() + right.str();
+      result = add_outer_pointer_to_fn_type_expr(p, r, qualified, internal);
+    }
+  else if (pointer_type_def_sptr p =
+	   is_pointer_to_array_type(array_element_type))
+    {
+      string inner_string = inner.str() + right.str();
+      result = add_outer_pointer_to_array_type_expr(p, inner_string,
+						    qualified, internal);
+    }
+  else
+    ABG_ASSERT_NOT_REACHED;
+
+  return result;
+}
+
+/// When constructing the name of a pointer to array type, add the
+/// array element type type to the left of the existing type
+/// identifier, and the array declarator part to the right.
+///
+/// This function considers the name of the type as an expression.
+///
+/// The resulting type expr is going to be made of three parts:
+/// left_expr inner_expr right_expr.
+///
+/// Suppose we want to build the type expression representing:
+///
+///   "a pointer to an array of int".
+///
+/// It's going to look like:
+///
+///   int(*foo)[];
+///
+/// Suppose the caller of this function started to emit the inner
+/// "foo" part of the expression already.  It thus calls this function
+/// with that input "foo" part.  We consider that "foo" as the "type
+/// identifier".
+///
+/// So we are passed an input string that is "foo" and it's going to
+/// be turned into the inner_expr part, which is going to be "(*foo)".
+///
+/// The left_expr part is "int".  The right_expr part is "[]".
+///
+/// In other words, this function adds the left_expr and right_expr to
+/// the inner_expr.  left_expr and right_expr are called "outer
+/// pointer to array type expression".
+///
+/// The model of this function was taken from the article "Reading C
+/// type declaration", from Steve Friedl at
+/// http://unixwiz.net/techtips/reading-cdecl.html.
+///
+/// This is a sub-routine of @ref pointer_declaration_name() and @ref
+/// array_declaration_name()
+///
+/// @param p the pointer to array type to consider.
+///
+/// @param input the type-id to start from as the inner part of the
+/// final type name.
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+///
+/// @return the name of the pointer to array type.
+static string
+add_outer_pointer_to_array_type_expr(const type_base_sptr& pointer_to_ar,
+				     const string& input, bool qualified,
+				     bool internal)
+{return add_outer_pointer_to_array_type_expr(pointer_to_ar.get(),
+					     input, qualified, internal);}
+
+/// When constructing the name of a pointer to mebmer type, add the
+/// return type to the left of the existing type identifier, and the
+/// parameters declarator to the right.
+///
+/// This function considers the name of the type as an expression.
+///
+/// The resulting type expr is going to be made of three parts:
+/// left_expr inner_expr right_expr.
+///
+/// Suppose we want to build the type expression representing:
+///
+///   "an array of pointer to member function (of a containing struct
+///    X) taking a char parameter and returning an int".
+///
+/// It's going to look like:
+///
+///   int (X::* a[])(char);
+///
+/// Suppose the caller of this function started to emit the inner
+/// "a[]" part of the expression already.  It thus calls this
+/// function with that input "a[]" part.  We consider that "a[]" as
+/// the "type identifier".
+///
+/// So the inner_expr is going to be "(X::* a[])".
+///
+/// The left_expr part is "int".  The right_expr part is "(char)".
+///
+/// In other words, this function adds the left_expr and right_expr to
+/// the inner_expr.  left_expr and right_expr are called "outer
+/// pointer to member type expression".
+///
+/// This is a sub-routine of @ref ptr_to_mbr_declaration_name().
+///
+/// @param p the pointer to member type to consider.
+///
+/// @param input the type-id to use as the inner expression of the
+/// overall pointer-to-member type expression
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+///
+/// @return the name of the pointer to member type.
+static string
+add_outer_ptr_to_mbr_type_expr(const ptr_to_mbr_type* p,
+			       const  string& input, bool qualified,
+			       bool internal)
+{
+  if (!p)
+    return "";
+
+  std::ostringstream left, right, inner;
+  type_base_sptr void_type = p->get_environment().get_void_type();
+  string containing_type_name = get_type_name(p->get_containing_type(),
+					      qualified, internal);
+  type_base_sptr mbr_type = p->get_member_type();
+  string result;
+  if (function_type_sptr fn_type = is_function_type(mbr_type))
+    {
+      inner << "(" << containing_type_name << "::*" << input << ")";
+      stream_pretty_representation_of_fn_parms(*fn_type, right,
+					       qualified, internal);
+      type_base_sptr return_type = fn_type->get_return_type();
+      if (!return_type)
+	return_type = void_type;
+      if (is_npaf_type(return_type)
+	  || !(is_pointer_to_function_type(return_type)
+	       || is_pointer_to_array_type(return_type)
+	       || is_pointer_to_ptr_to_mbr_type(return_type)
+	       || is_ptr_to_mbr_type(return_type)))
+	{
+	  left << get_type_name(return_type, qualified, internal) << " ";;
+	  result = left.str() + inner.str() + right.str();
+	}
+      else if (pointer_type_def_sptr p = is_pointer_type(return_type))
+	{
+	  string inner_str = inner.str() + right.str();
+	  result = pointer_declaration_name(p, inner_str, qualified, internal);
+	}
+      else if (ptr_to_mbr_type_sptr p = is_ptr_to_mbr_type(return_type))
+	{
+	  string inner_str = inner.str() + right.str();
+	  result = add_outer_ptr_to_mbr_type_expr(p, inner_str,
+						  qualified, internal);
+	}
+      else
+	ABG_ASSERT_NOT_REACHED;
+    }
+  else if (ptr_to_mbr_type_sptr ptr_mbr_type = is_ptr_to_mbr_type(mbr_type))
+    {
+      inner << "(" << containing_type_name << "::*" << input << ")";
+      stream_pretty_representation_of_fn_parms(*fn_type, right,
+					       qualified, internal);
+      string inner_str = inner.str() + right.str();
+      result = add_outer_ptr_to_mbr_type_expr(ptr_mbr_type, inner_str,
+					      qualified, internal);
+    }
+  else
+    {
+      left << get_type_name(p->get_member_type(), qualified, internal) << " ";
+      inner << containing_type_name << "::*" << input;
+      result = left.str()+ inner.str();
+    }
+
+  return result;
+}
+
+/// Test if two decls have different names.
+///
+/// Note that this function takes into account decls whose names are
+/// relevant from an ABI standpoint.  For instance, function parameter
+/// names are not relevant in that context.
+///
+/// @param d1 the first declaration to consider.
+///
+/// @param d2 the second declaration to consider.
+///
+/// @return true if d1 and d2 have different names.
+bool
+decl_name_changed(const type_or_decl_base* a1, const type_or_decl_base *a2)
+{
+  string d1_name, d2_name;
+
+  const decl_base *d1 = dynamic_cast<const decl_base*>(a1);
+  if (d1 == 0)
+    return false;
+
+  const decl_base *d2 = dynamic_cast<const decl_base*>(a2);
+  if (d2 == 0)
+    return false;
+
+  if (is_function_parameter(d1) || is_function_parameter(d2))
+    // Name changes for fn parms are irrelevant.
+    return false;
+
+  d1_name = d1->get_qualified_name();
+  d2_name = d2->get_qualified_name();
+
+  return d1_name != d2_name;
+}
+
+/// Test if two decls have different names.
+///
+/// @param d1 the first declaration to consider.
+///
+/// @param d2 the second declaration to consider.
+///
+/// @return true if d1 and d2 have different names.
+bool
+decl_name_changed(const type_or_decl_base_sptr& d1,
+		  const type_or_decl_base_sptr& d2)
+{return decl_name_changed(d1.get(), d2.get());}
+
+/// Test if a diff node carries a change whereby two integral types
+/// have different names in a harmless way.
+///
+/// Basically, if the integral type name change is accompanied by a
+/// size change then the change is considered harmful.  If there are
+/// modifiers change, the change is considered harmful.
+bool
+integral_type_has_harmless_name_change(const type_base_sptr& f,
+				       const type_base_sptr& s)
+{
+  if (is_decl(f)
+      && is_decl(s)
+      && ((is_integral_type(f) && is_integral_type(s))
+	  || (is_decl(f)->get_name().empty()
+	      && is_type_decl(f)
+	      && is_integral_type(s))
+	  || (is_decl(s)->get_name().empty()
+	      && is_type_decl(s)
+	      && is_integral_type(f)))
+      && decl_name_changed(is_decl(f), is_decl(s))
+      && (f->get_size_in_bits() == s->get_size_in_bits())
+      && (f->get_alignment_in_bits() == s->get_alignment_in_bits()))
+      return true;
+
+  return false;
+}
+
+/// Test if a diff node carries a change whereby two integral types
+/// have different names in a harmless way.
+///
+/// Basically, if the integral type name change is accompanied by a
+/// size change then the change is considered harmful.  If there are
+/// modifiers change, the change is considered harmful.
+bool
+integral_type_has_harmless_name_change(const decl_base_sptr& f,
+				       const decl_base_sptr& s)
+{return integral_type_has_harmless_name_change(is_type(f), is_type(s));}
+
+
+/// When constructing the name of a pointer to mebmer type, add the
+/// return type to the left of the existing type identifier, and the
+/// parameters declarator to the right.
+///
+/// This function considers the name of the type as an expression.
+///
+/// The resulting type expr is going to be made of three parts:
+/// left_expr inner_expr right_expr.
+///
+/// Suppose we want to build the type expression representing:
+///
+///   "an array of pointer to member function (of a containing struct
+///    X) taking a char parameter and returning an int".
+///
+/// It's going to look like:
+///
+///   int (X::* a[])(char);
+///
+/// Suppose the caller of this function started to emit the inner
+/// "a[]" part of the expression already.  It thus calls this
+/// function with that input "a[]" part.  We consider that "a[]" as
+/// the "type identifier".
+///
+/// So the inner_expr is going to be "(X::* a[])".
+///
+/// The left_expr part is "int".  The right_expr part is "(char)".
+///
+/// In other words, this function adds the left_expr and right_expr to
+/// the inner_expr.  left_expr and right_expr are called "outer
+/// pointer to member type expression".
+///
+/// This is a sub-routine of @ref ptr_to_mbr_declaration_name().
+///
+/// @param p the pointer to member type to consider.
+///
+/// @param input the type-id to use as the inner expression of the
+/// overall pointer-to-member type expression
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+///
+/// @return the name of the pointer to member type.
+static string
+add_outer_ptr_to_mbr_type_expr(const ptr_to_mbr_type_sptr& p,
+			       const string& input, bool qualified,
+			       bool internal)
+{return add_outer_ptr_to_mbr_type_expr(p.get(), input, qualified, internal);}
+
+/// This adds the outer parts of a pointer to a pointer-to-member
+/// expression.
+///
+/// Please read the comments of @ref add_outer_ptr_to_mbr_type_expr to
+/// learn more about this function, which is similar.
+///
+/// This is a sub-routine of @ref pointer_declaration_name().
+///
+/// @param a pointer (or reference) to a pointer-to-member type.
+///
+/// @param input the inner type-id to add the outer parts to.
+///
+/// @param qualified if true then use qualified names in the resulting
+/// type name.
+///
+/// @param internal if true then the resulting type name is going to
+/// be used for type canonicalization purposes.
+static string
+add_outer_pointer_to_ptr_to_mbr_type_expr(const type_base* p,
+					  const string& input, bool qualified,
+					  bool internal)
+{
+  if (!p)
+    return "";
+
+  string star_or_ref;
+  type_base_sptr pointed_to_type;
+
+  if (const pointer_type_def* ptr = is_pointer_type(p))
+    {
+      pointed_to_type = ptr->get_pointed_to_type();
+      star_or_ref = "*";
+    }
+  else if (const reference_type_def* ref = is_reference_type(p))
+    {
+      pointed_to_type= ref->get_pointed_to_type();
+      star_or_ref = "&";
+    }
+
+  if (!pointed_to_type)
+    return "";
+
+  ptr_to_mbr_type_sptr pointed_to_ptr_to_mbr =
+    is_ptr_to_mbr_type(pointed_to_type);
+  if (!pointed_to_ptr_to_mbr)
+    return "";
+
+  std::ostringstream inner;
+  inner << star_or_ref << input;
+  string result = add_outer_ptr_to_mbr_type_expr(pointed_to_ptr_to_mbr,
+						 inner.str(),
+						 qualified, internal);
+  return result;
+}
+
+/// Emit the name of a pointer declaration.
+///
+/// @param the pointer to consider.
+///
+/// @param idname the name of the variable that has @p as a type or
+/// the id of the type.  If it's empty then the resulting name is
+/// going to be the abstract name of the type.
+///
+/// @param qualified if true then the type name is going to be
+/// fully qualified.
+///
+/// @param internal if true then the type name is going to be used for
+/// type canonicalization purposes.
+static interned_string
+pointer_declaration_name(const type_base* ptr,
+			 const string& idname,
+			 bool qualified, bool internal)
+{
+  if (!ptr)
+    return interned_string();
+
+  type_base_sptr pointed_to_type;
+  string star_or_ref;
+  if (const pointer_type_def* p = is_pointer_type(ptr))
+    {
+      pointed_to_type = p->get_pointed_to_type();
+      star_or_ref = "*";
+    }
+  else if (const reference_type_def* p = is_reference_type(ptr))
+    {
+      pointed_to_type = p->get_pointed_to_type();
+      star_or_ref = "&";
+    }
+
+  if (!pointed_to_type)
+    return interned_string();
+
+  string result;
+  if (is_npaf_type(pointed_to_type)
+      || !(is_function_type(pointed_to_type)
+	   || is_array_type(pointed_to_type)
+	   || is_ptr_to_mbr_type(pointed_to_type)))
+    {
+      result = get_type_name(pointed_to_type,
+			     qualified,
+			     internal)
+	+ star_or_ref;
+
+      if (!idname.empty())
+	result += idname;
+    }
+  else
+    {
+      // derived type
+      if (is_function_type(pointed_to_type))
+	result = add_outer_pointer_to_fn_type_expr(ptr, idname,
+						   qualified, internal);
+      else if (is_array_type(pointed_to_type))
+	result = add_outer_pointer_to_array_type_expr(ptr, idname,
+						      qualified, internal);
+      else if (is_ptr_to_mbr_type(pointed_to_type))
+	result = add_outer_pointer_to_ptr_to_mbr_type_expr(ptr, idname,
+							   qualified, internal);
+      else
+	ABG_ASSERT_NOT_REACHED;
+    }
+  return ptr->get_environment().intern(result);
+}
+
+
+/// Emit the name of a pointer declaration.
+///
+/// @param the pointer to consider.
+///
+/// @param the name of the variable that has @p as a type.  If it's
+/// empty then the resulting name is going to be the abstract name of
+/// the type.
+///
+/// @param qualified if true then the type name is going to be
+/// fully qualified.
+///
+/// @param internal if true then the type name is going to be used for
+/// type canonicalization purposes.
+static interned_string
+pointer_declaration_name(const type_base_sptr& ptr,
+			 const string& variable_name,
+			 bool qualified, bool internal)
+{return pointer_declaration_name(ptr.get(), variable_name,
+				 qualified, internal);}
+
+/// Emit the name of a array declaration.
+///
+/// @param the array to consider.
+///
+/// @param the name of the variable that has @p as a type.  If it's
+/// empty then the resulting name is going to be the abstract name of
+/// the type.
+///
+/// @param qualified if true then the type name is going to be
+/// fully qualified.
+///
+/// @param internal if true then the type name is going to be used for
+/// type canonicalization purposes.
+static interned_string
+array_declaration_name(const array_type_def* array,
+		       const string& variable_name,
+		       bool qualified, bool internal)
+{
+  if (!array)
+    return interned_string();
+
+  type_base_sptr e_type = array->get_element_type();
+  string e_type_repr =
+    (e_type
+     ? get_type_name(e_type, qualified, internal)
+     : string("void"));
+
+  string result;
+  if (is_ada_language(array->get_language()))
+    {
+      std::ostringstream o;
+      if (!variable_name.empty())
+	o << variable_name << " is ";
+      o << "array ("
+	<< array->get_subrange_representation()
+	<< ") of " << e_type_repr;
+      result = o.str();
+    }
+  else
+    {
+      if (is_npaf_type(e_type)
+	  || !(is_pointer_to_function_type(e_type)
+	       || is_pointer_to_array_type(e_type)
+	       || is_pointer_to_ptr_to_mbr_type(e_type)
+	       || is_ptr_to_mbr_type(e_type)))
+	{
+	  result = e_type_repr;
+	  if (!variable_name.empty())
+	    result += variable_name;
+	  result += array->get_subrange_representation();
+	}
+      else if (pointer_type_def_sptr p = is_pointer_type(e_type))
+	{
+	  string s = variable_name + array->get_subrange_representation();
+	  result = pointer_declaration_name(p, s, qualified, internal);
+	}
+      else if (ptr_to_mbr_type_sptr p = is_ptr_to_mbr_type(e_type))
+	{
+	  string s = variable_name + array->get_subrange_representation();
+	  result = ptr_to_mbr_declaration_name(p, s, qualified, internal);
+	}
+      else
+	ABG_ASSERT_NOT_REACHED;
+    }
+  return array->get_environment().intern(result);
+}
+
+/// Emit the name of a array declaration.
+///
+/// @param the array to consider.
+///
+/// @param the name of the variable that has @p as a type.  If it's
+/// empty then the resulting name is going to be the abstract name of
+/// the type.
+///
+/// @param qualified if true then the type name is going to be
+/// fully qualified.
+///
+/// @param internal if true then the type name is going to be used for
+/// type canonicalization purposes.
+static interned_string
+array_declaration_name(const array_type_def_sptr& array,
+		       const string& variable_name,
+		       bool qualified, bool internal)
+{return array_declaration_name(array.get(), variable_name,
+			       qualified, internal);}
+
+/// Emit the name of a pointer-to-member declaration.
+///
+/// @param ptr the pointer-to-member to consider.
+///
+/// @param variable_name the name of the variable that has @p as a
+/// type.  If it's empty then the resulting name is going to be the
+/// abstract name of the type.
+///
+/// @param qualified if true then the type name is going to be
+/// fully qualified.
+///
+/// @param internal if true then the type name is going to be used for
+/// type canonicalization purposes.
+static interned_string
+ptr_to_mbr_declaration_name(const ptr_to_mbr_type* ptr,
+			    const string& variable_name,
+			    bool qualified, bool internal)
+{
+  if (!ptr)
+    return interned_string();
+
+  string input = variable_name;
+  string result = add_outer_ptr_to_mbr_type_expr(ptr, input,
+						 qualified, internal);
+  return ptr->get_environment().intern(result);
+}
+
+/// Emit the name of a pointer-to-member declaration.
+///
+/// @param ptr the pointer-to-member to consider.
+///
+/// @param variable_name the name of the variable that has @p as a
+/// type.  If it's empty then the resulting name is going to be the
+/// abstract name of the type.
+///
+/// @param qualified if true then the type name is going to be
+/// fully qualified.
+///
+/// @param internal if true then the type name is going to be used for
+/// type canonicalization purposes.
+static interned_string
+ptr_to_mbr_declaration_name(const ptr_to_mbr_type_sptr& ptr,
+			    const string& variable_name,
+			    bool qualified, bool internal)
+{
+  return ptr_to_mbr_declaration_name(ptr.get(), variable_name,
+				     qualified, internal);
+}
+
+/// Sort types right before hashing and canonicalizing them.
+///
+/// @param types the vector of types to sort.
+void
+sort_types_for_hash_computing_and_c14n(vector<type_base_sptr>& types)
+{
+  sort_types_for_hash_computing_and_c14n(types.begin(), types.end());
+}
+
 bool
 ir_traversable_base::traverse(ir_node_visitor&)
 {return true;}
@@ -27734,7 +30132,12 @@ ir_node_visitor::mark_type_node_as_visited(type_base *p)
     return;
 
   type_base* canonical_type = p->get_naked_canonical_type();
-  ABG_ASSERT(canonical_type);
+  if (is_non_canonicalized_type(p))
+    {
+      ABG_ASSERT(!canonical_type);
+      canonical_type = p;
+    }
+    ABG_ASSERT(canonical_type);
 
   size_t canonical_ptr_value = reinterpret_cast<size_t>(canonical_type);
   priv_->visited_ir_nodes.insert(canonical_ptr_value);
@@ -27768,6 +30171,11 @@ ir_node_visitor::type_node_has_been_visited(type_base* p) const
     return false;
 
   type_base *canonical_type = p->get_naked_canonical_type();
+  if (is_non_canonicalized_type(p))
+    {
+      ABG_ASSERT(!canonical_type);
+      canonical_type = p;
+    }
   ABG_ASSERT(canonical_type);
 
   size_t ptr_value = reinterpret_cast<size_t>(canonical_type);
@@ -27848,6 +30256,14 @@ ir_node_visitor::visit_begin(reference_type_def* t)
 
 bool
 ir_node_visitor::visit_end(reference_type_def* t)
+{return visit_end(static_cast<type_base*>(t));}
+
+bool
+ir_node_visitor::visit_begin(ptr_to_mbr_type* t)
+{return visit_begin(static_cast<type_base*>(t));}
+
+bool
+ir_node_visitor::visit_end(ptr_to_mbr_type* t)
 {return visit_end(static_cast<type_base*>(t));}
 
 bool
@@ -27995,10 +30411,20 @@ get_next_string()
   return o.str();
 }
 
+/// A hashing functor for a @ref function_decl
+struct function_decl_hash
+{
+  size_t operator()(const function_decl* f) const
+  {return reinterpret_cast<size_t>(f);}
+
+  size_t operator()(const function_decl_sptr& f) const
+  {return operator()(f.get());}
+};
+
 /// Convenience typedef for a hash map of pointer to function_decl and
 /// string.
 typedef unordered_map<const function_decl*, string,
-		      function_decl::hash,
+		      function_decl_hash,
 		      function_decl::ptr_equal> fns_to_str_map_type;
 
 /// Return a string associated to a given function.  Two functions
@@ -28160,6 +30586,11 @@ qualified_name_setter::do_update(abigail::ir::decl_base* d)
 	  d->priv_->internal_qualified_name_ = env.intern(d->get_name());
 	}
     }
+  // Make sure the internal qualified name (used for type
+  // canonicalization puroses) is always the qualified name.  For
+  // integral/real types however, only the non qualified type is used.
+  if (!is_integral_type(d))
+    d->priv_->internal_qualified_name_ = d->priv_->qualified_name_;
 
   if (d->priv_->scoped_name_.empty())
     {

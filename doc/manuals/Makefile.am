@@ -7,10 +7,14 @@ abidiff.rst \
 abipkgdiff.rst \
 abicompat.rst \
 abidw.rst \
+abidb.rst \
 abilint.rst \
 conf.py \
 index.rst \
 libabigail-concepts.rst \
+abi-artifacts.rst \
+abi-changes.rst \
+suppression-specifications.rst \
 libabigail-overview.rst \
 libabigail-tools.rst \
 fedabipkgdiff.rst \
@@ -173,7 +177,7 @@ texinfodocs =
 
 if ENABLE_MANUAL
 
-section1_manpages += abipkgdiff.1 abidiff.1 abidw.1 abilint.1 abicompat.1
+section1_manpages += abipkgdiff.1 abidiff.1 abidw.1 abidb.1 abilint.1 abicompat.1
 section7_manpages += libabigail.7
 manpages +=  $(section1_manpages) $(section7_manpages)
 texinfodocs += abigail.info

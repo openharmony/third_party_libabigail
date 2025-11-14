@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -58,6 +58,9 @@ void
 set_write_elf_needed(write_context& ctxt, bool flag);
 
 void
+set_write_undefined_symbols(write_context& ctxt, bool flag);
+
+void
 set_write_default_sizes(write_context& ctxt, bool flag);
 
 void
@@ -88,6 +91,7 @@ set_common_options(write_context& ctxt, const OPTS& opts)
   set_write_corpus_path(ctxt, opts.write_corpus_path);
   set_write_comp_dir(ctxt, opts.write_comp_dir);
   set_write_elf_needed(ctxt, opts.write_elf_needed);
+  set_write_undefined_symbols(ctxt, opts.load_undefined_interfaces);
   set_write_parameter_names(ctxt, opts.write_parameter_names);
   set_short_locs(ctxt, opts.short_locs);
   set_write_default_sizes(ctxt, opts.default_sizes);
