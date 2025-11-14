@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2021-2023 Oracle, Inc.
+// Copyright (C) 2021-2025 Oracle, Inc.
 //
 // Author: Jose E. Marchesi
 
@@ -23,18 +23,20 @@
 
 namespace abigail
 {
+
+/// Namespace of the reader for the CTF debug information.
 namespace ctf
 {
 
 elf_based_reader_sptr
 create_reader(const std::string& elf_path,
-	      const vector<char**>& debug_info_root_paths,
+	      const vector<string>& debug_info_root_paths,
 	      environment& env);
 
 void
 reset_reader(elf_based_reader&		ctxt,
 	     const std::string&	elf_path,
-	     const vector<char**>&	debug_info_root_path);
+	     const vector<string>&	debug_info_root_path);
 } // end namespace ctf_reader
 } // end namespace abigail
 

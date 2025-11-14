@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2020-2023 Google, Inc.
+// Copyright (C) 2020-2025 Google, Inc.
 
 /// @file
 ///
@@ -285,6 +285,11 @@ e_machine_to_string(GElf_Half e_machine)
 #ifdef HAVE_EM_TILEGX_MACRO
     case EM_TILEGX:
       return "elf-tilera-tilegx";
+#endif
+
+#ifdef HAVE_EM_RISCV_MACRO
+    case EM_RISCV:
+      return "elf-riscv";
 #endif
 
     case EM_NUM:

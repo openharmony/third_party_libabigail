@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2017-2023 Red Hat, Inc.
+// Copyright (C) 2017-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -544,7 +544,7 @@ represent(const var_diff_sptr	&diff,
 
   if (!filtering::has_anonymous_data_member_change(diff) && o_name != n_name)
     {
-      if (filtering::has_harmless_name_change(o, n)
+      if (filtering::has_harmless_name_change(o, n, ctxt)
 	  && !(ctxt->get_allowed_category()
 	       & HARMLESS_DECL_NAME_CHANGE_CATEGORY))
 	;
@@ -746,7 +746,7 @@ represent(const subrange_diff&		d,
   int64_t oub = o->get_upper_bound();
   int64_t nub = n->get_upper_bound();
 
-    if (on != nn)
+  if (on != nn)
     {
       out << indent << "name of range changed from '"
 	  << on << "' to '" << nn << "'\n";
@@ -754,9 +754,7 @@ represent(const subrange_diff&		d,
 
   if (olb != nlb)
     {
-      out << indent << "lower bound of range '"
-	  << on
-	  << "' change from '";
+      out << indent << "lower bound of '" << oor << "' change from '";
       emit_num_value(olb, *ctxt, out);
       out << "' to '";
       emit_num_value(nlb, *ctxt, out);
@@ -765,13 +763,28 @@ represent(const subrange_diff&		d,
 
   if (oub != nub)
     {
-      out << indent << "upper bound of range '"
-	  << on
-	  << "' change from '";
+      out << indent << "upper bound of '" << oor  << "' change from '";
       emit_num_value(oub, *ctxt, out);
       out << "' to '";
       emit_num_value(nub, *ctxt, out);
       out << "'\n";
+    }
+
+  if (o->is_non_finite() != n->is_non_finite())
+    {
+      out << indent
+	  << (o->is_non_finite()
+	      ? string("unknown sized")
+	      : string("known sized"))
+	  << string(" range '")
+	  << oor
+	  << string("' changed to ")
+	  << (n->is_non_finite()
+	      ? string("unknown sized")
+	      : string("known sized"))
+	  << string(" range '")
+	  << nr
+	  << "'\n";
     }
 
   if (!local_only)
@@ -837,12 +850,12 @@ report_size_and_alignment_changes(type_or_decl_base_sptr	first,
 	      // We are looking at size or alignment changes between two
 	      // arrays ...
 	      out << indent << "array type size changed from ";
-	      if (first_array->is_infinite())
+	      if (first_array->is_non_finite())
 		out << "\'unknown\'";
 	      else
 		emit_num_value(first_array->get_size_in_bits(), *ctxt, out);
 	      out << " to ";
-	      if (second_array->is_infinite())
+	      if (second_array->is_non_finite())
 		out << "\'unknown\'";
 	      else
 		emit_num_value(second_array->get_size_in_bits(), *ctxt, out);
@@ -871,14 +884,14 @@ report_size_and_alignment_changes(type_or_decl_base_sptr	first,
 			  << i - first_array->get_subranges().begin() + 1
 			  << " changed length from ";
 
-		      if ((*i)->is_infinite())
+		      if ((*i)->is_non_finite())
 			out << "\'unknown\'";
 		      else
 			out << (*i)->get_length();
 
 		      out << " to ";
 
-		      if ((*j)->is_infinite())
+		      if ((*j)->is_non_finite())
 			out << "\'unknown\'";
 		      else
 			out << (*j)->get_length();
@@ -973,7 +986,7 @@ report_name_size_and_alignment_changes(decl_base_sptr		first,
       && fn != sn)
     {
       if (!(ctxt->get_allowed_category() & HARMLESS_DECL_NAME_CHANGE_CATEGORY)
-	  && filtering::has_harmless_name_change(first, second))
+	  && filtering::has_harmless_name_change(first, second, ctxt))
 	// This is a harmless name change.  but then
 	// HARMLESS_DECL_NAME_CHANGE_CATEGORY doesn't seem allowed.
 	;
@@ -1090,6 +1103,130 @@ report_mem_header(ostream& out,
     }
 
   out << indent << "there are " << section_name << " " << change << ":\n";
+}
+
+/// Emit a report about a changed function.
+///
+/// @param ctxt the diff context to use for the report.
+///
+/// @param fn_diff the function_diff node to emit the report for.
+///
+/// @param out the output stream to emit the report to.
+///
+/// @param indent the indentation string to use.
+///
+/// @param indirect_changed_subtypes if true, this means there are
+/// indirect sub-types changes.  Indirect means it's a pointed-to-type
+/// that changed.
+///
+/// @param emit_redundant_fn_changes if true, the function reports
+/// about changes carried by @fn_diff even if they are redundant.
+void
+emit_changed_fn_report(const diff_context_sptr& ctxt,
+		       const function_decl_diff_sptr& fn_diff,
+		       ostream& out, const string indent,
+		       bool indirect_changed_subtypes,
+		       bool emit_redundant_fn_changes)
+{
+  bool saved_show_redundant_changes = ctxt->show_redundant_changes();
+  ctxt->show_redundant_changes(emit_redundant_fn_changes);
+
+  if (fn_diff->to_be_reported())
+    {
+      function_decl_sptr fn = fn_diff->first_function_decl();
+      out << indent << "  [C] '"
+	  << fn->get_pretty_representation() << "'";
+      report_loc_info(fn_diff->first_function_decl(), *ctxt, out);
+
+      out << " has some";
+      if (indirect_changed_subtypes)
+	out << " indirect";
+      out << " sub-type changes:\n";
+
+      if ((fn->get_symbol()->has_aliases()
+	   && !(is_member_function(fn)
+		&& get_member_function_is_ctor(fn))
+	   && !(is_member_function(fn)
+		&& get_member_function_is_dtor(fn)))
+	  || (is_c_language(get_translation_unit(fn)->get_language())
+	      && fn->get_name() != fn->get_linkage_name()))
+	{
+	  int number_of_aliases =
+	    fn->get_symbol()->get_number_of_aliases();
+	  if (number_of_aliases == 0)
+	    {
+	      out << indent << "    "
+		  << "Please note that the exported symbol of "
+		"this function is "
+		  << fn->get_symbol()->get_id_string()
+		  << "\n";
+	    }
+	  else
+	    {
+	      out << indent << "    "
+		  << "Please note that the symbol of this function is "
+		  << fn->get_symbol()->get_id_string()
+		  << "\n     and it aliases symbol";
+	      if (number_of_aliases > 1)
+		out << "s";
+	      out << ": "
+		  << fn->get_symbol()->get_aliases_id_string(false)
+		  << "\n";
+	    }
+	}
+      fn_diff->report(out, indent + "    ");
+      // Extra spacing.
+      out << "\n";
+    }
+
+  ctxt->show_redundant_changes(saved_show_redundant_changes);
+}
+
+/// Emit a report about a changed variable.
+///
+/// @param ctxt the diff context to use for the report.
+///
+/// @param fn_diff the var_diff node to emit the report for.
+///
+/// @param out the output stream to emit the report to.
+///
+/// @param indent the indentation string to use.
+///
+/// @param indirect_changed_subtypes if true, this means there are
+/// indirect sub-types changes.  Indirect means it's a pointed-to-type
+/// that changed.
+///
+/// @param emit_redundant_var_changes if true, the function reports
+/// about changes carried by @fn_diff even if they are redundant.
+void
+emit_changed_var_report(const diff_context_sptr& ctxt,
+			const var_diff_sptr& var_diff,
+			ostream& out, const string indent,
+			bool emit_redundant_var_changes)
+{
+  diff_sptr diff = var_diff;
+  if (!diff)
+    return;
+
+  bool saved_show_redundant_changes = ctxt->show_redundant_changes();
+  ctxt->show_redundant_changes(emit_redundant_var_changes);
+
+  if (diff->to_be_reported())
+    {
+      string n1 = diff->first_subject()->get_pretty_representation();
+      string n2 = diff->second_subject()->get_pretty_representation();
+
+      out << indent << "  [C] '" << n1 << "' was changed";
+      if (n1 != n2)
+	out << " to '" << n2 << "'";
+      report_loc_info(diff->second_subject(), *ctxt, out);
+      out << ":\n";
+      diff->report(out, indent + "    ");
+      // Extra spacing.
+      out << "\n";
+    }
+
+  ctxt->show_redundant_changes(saved_show_redundant_changes);
 }
 
 /// Report the differences in access specifiers and static-ness for

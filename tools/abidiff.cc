@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -138,10 +138,8 @@ struct options
 #ifdef WITH_BTF
   bool			use_btf;
 #endif
-  vector<char*> di_root_paths1;
-  vector<char*> di_root_paths2;
-  vector<char**> prepared_di_root_paths1;
-  vector<char**> prepared_di_root_paths2;
+  vector<string> di_root_paths1;
+  vector<string> di_root_paths2;
   vector<string> added_bins_dirs1;
   vector<string> added_bins_dirs2;
   vector<string> added_bins1;
@@ -209,18 +207,6 @@ struct options
 
   ~options()
   {
-    for (vector<char*>::iterator i = di_root_paths1.begin();
-	 i != di_root_paths1.end();
-	 ++i)
-      free(*i);
-
-    for (vector<char*>::iterator i = di_root_paths2.begin();
-	 i != di_root_paths2.end();
-	 ++i)
-      free(*i);
-
-    prepared_di_root_paths1.clear();
-    prepared_di_root_paths2.clear();
   }
 };//end struct options;
 
@@ -249,8 +235,8 @@ display_usage(const string& prog_name, ostream& out)
     << " --list-dependencies|--ldeps show the dependencies of the input files\n"
     << " --drop-private-types  drop private types from "
     "internal representation\n"
-    << "  --exported-interfaces-only  analyze exported interfaces only\n"
-    << "  --allow-non-exported-interfaces  analyze interfaces that "
+    << " --exported-interfaces-only  analyze exported interfaces only\n"
+    << " --allow-non-exported-interfaces  analyze interfaces that "
     "might not be exported\n"
     << " --no-linux-kernel-mode  don't consider the input binaries as "
        "linux kernel binaries\n"
@@ -371,7 +357,7 @@ parse_command_line(int argc, char* argv[], options& opts)
 	  // elfutils wants the root path to the debug info to be
 	  // absolute.
 	  opts.di_root_paths1.push_back
-	    (abigail::tools_utils::make_path_absolute_to_be_freed(argv[j]));
+	    (abigail::tools_utils::make_path_absolute(string(argv[j])));
 	  ++i;
 	}
       else if (!strcmp(argv[i], "--debug-info-dir2")
@@ -1094,21 +1080,6 @@ adjust_diff_context_for_kmidiff(diff_context &ctxt)
   ctxt.show_linkage_names(false);
 }
 
-/// Convert options::di_root_paths{1,2} into
-/// options::prepared_di_root_paths{1,2} which is the suitable type
-/// format that the dwarf_reader expects.
-///
-/// @param o the options to consider.
-static void
-prepare_di_root_paths(options& o)
-{
-  abigail::tools_utils::convert_char_stars_to_char_star_stars
-    (o.di_root_paths1, o.prepared_di_root_paths1);
-
-  abigail::tools_utils::convert_char_stars_to_char_star_stars
-    (o.di_root_paths2, o.prepared_di_root_paths2);
-}
-
 /// Emit an appropriate error message if necessary, given an error
 /// code.
 ///
@@ -1156,7 +1127,7 @@ handle_error(abigail::fe_iface::status status_code,
 	  emit_prefix(prog_name, cerr) <<
 	    "could not find the debug info\n";
 	  {
-	    if (opts.prepared_di_root_paths1.empty() == 0)
+	    if (opts.di_root_paths1.empty() == 0)
 	      emit_prefix(prog_name, cerr)
 		<< "Maybe you should consider using the "
 		"--debug-info-dir1 option to tell me about the "
@@ -1166,21 +1137,21 @@ handle_error(abigail::fe_iface::status status_code,
 	      {
 		emit_prefix(prog_name, cerr)
 		  << "Maybe the root path to the debug information '";
-		for (vector<char**>::const_iterator i
-		       = opts.prepared_di_root_paths1.begin();
-		     i != opts.prepared_di_root_paths1.end();
+		for (vector<string>::const_iterator i
+		       = opts.di_root_paths1.begin();
+		     i != opts.di_root_paths1.end();
 		     ++i)
 		  {
-		    if (i != opts.prepared_di_root_paths1.end())
+		    if (i != opts.di_root_paths1.end())
 		      cerr << ", ";
-		    cerr << **i;
+		    cerr << *i;
 		  }
 		cerr << "' is wrong?\n";
 	      }
 	  }
 
 	  {
-	    if (opts.prepared_di_root_paths2.empty())
+	    if (opts.di_root_paths2.empty())
 	      emit_prefix(prog_name, cerr)
 		<< "Maybe you should consider using the "
 		"--debug-info-dir2 option to tell me about the "
@@ -1190,14 +1161,14 @@ handle_error(abigail::fe_iface::status status_code,
 	      {
 		emit_prefix(prog_name, cerr)
 		  << "Maybe the root path to the debug information '";
-		for (vector<char**>::const_iterator i
-		       = opts.prepared_di_root_paths2.begin();
-		     i != opts.prepared_di_root_paths2.end();
+		for (vector<string>::const_iterator i
+		       = opts.di_root_paths2.begin();
+		     i != opts.di_root_paths2.end();
 		     ++i)
 		  {
-		    if (i != opts.prepared_di_root_paths2.end())
+		    if (i != opts.di_root_paths2.end())
 		      cerr << ", ";
-		    cerr << **i;
+		    cerr << *i;
 		  }
 		  cerr << "' is wrong?\n";
 	      }
@@ -1313,6 +1284,8 @@ display_dependencies(const string& prog_name,
 int
 main(int argc, char* argv[])
 {
+  abigail::tools_utils::initialize();
+
   options opts;
   if (!parse_command_line(argc, argv, opts))
     {
@@ -1347,8 +1320,6 @@ main(int argc, char* argv[])
 	<< "\n";
       return 0;
     }
-
-  prepare_di_root_paths(opts);
 
   if (!maybe_check_suppression_files(opts))
     return (abigail::tools_utils::ABIDIFF_USAGE_ERROR
@@ -1425,7 +1396,7 @@ main(int argc, char* argv[])
 #endif
 	    abigail::elf_based_reader_sptr rdr =
 	      create_best_elf_based_reader(opts.file1,
-					   opts.prepared_di_root_paths1,
+					   opts.di_root_paths1,
 					   env, requested_fe_kind,
 					   opts.show_all_types,
 					   opts.linux_kernel_mode);
@@ -1487,6 +1458,7 @@ main(int argc, char* argv[])
 	case abigail::tools_utils::FILE_TYPE_DEB:
 	case abigail::tools_utils::FILE_TYPE_DIR:
 	case abigail::tools_utils::FILE_TYPE_TAR:
+	case abigail::tools_utils::FILE_TYPE_XZ:
 	  break;
 	}
 
@@ -1515,7 +1487,7 @@ main(int argc, char* argv[])
 #endif
             abigail::elf_based_reader_sptr rdr =
 	      create_best_elf_based_reader(opts.file2,
-					   opts.prepared_di_root_paths2,
+					   opts.di_root_paths2,
 					   env, requested_fe_kind,
 					   opts.show_all_types,
 					   opts.linux_kernel_mode);
@@ -1576,6 +1548,7 @@ main(int argc, char* argv[])
 	case abigail::tools_utils::FILE_TYPE_DEB:
 	case abigail::tools_utils::FILE_TYPE_DIR:
 	case abigail::tools_utils::FILE_TYPE_TAR:
+	case abigail::tools_utils::FILE_TYPE_XZ:
 	  break;
 	}
 

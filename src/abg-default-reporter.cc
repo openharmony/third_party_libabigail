@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2017-2023 Red Hat, Inc.
+// Copyright (C) 2017-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -203,14 +203,43 @@ default_reporter::report(const enum_diff& d, ostream& out,
 	   i != sorted_changed_enumerators.end();
 	   ++i)
 	{
-	  out << indent
-	      << "  '"
-	      << (first->get_is_anonymous()
-		  ? i->first.get_name()
-		  : i->first.get_qualified_name())
-	      << "' from value '"
-	      << i->first.get_value() << "' to '"
-	      << i->second.get_value() << "'";
+	  out << indent;
+	  if (i->first.get_value() != i->second.get_value())
+	    {
+	     out << "  '"
+		 << (first->get_is_anonymous()
+		     ? i->first.get_name()
+		     : i->first.get_qualified_name())
+		 << "' from value '"
+		 << i->first.get_value() << "' to '"
+		 << i->second.get_value() << "'";
+	    }
+	  else if (i->first.get_name() != i->second.get_name())
+	    {
+	      out << "from '"
+		  << (first->get_is_anonymous()
+		      ? i->first.get_name()
+		      : i->first.get_qualified_name())
+		  << " = " << i->first.get_value()
+		  << "' to '"
+		  << (second->get_is_anonymous()
+		  ? i->second.get_name()
+		  : i->second.get_qualified_name())
+		  << " = " << i->second.get_value()
+		  << "'";
+	    }
+	  else
+	    {
+	      out << "enumerator change from '"
+		  << i->first.get_name()
+		  << " = "
+		  << i->first.get_value()
+		  << "' to '"
+		  << i->second.get_name()
+		  << " = "
+		  << i->second.get_value()
+		  << "' could not be determined - please report as a bug";
+	    }
 	  report_loc_info(second, *ctxt, out);
 	  out << "\n";
 	}
@@ -245,7 +274,7 @@ default_reporter::report_non_type_typedef_changes(const typedef_diff &d,
 
   maybe_report_diff_for_member(f, s, d.context(), out, indent);
 
-  if ((filtering::has_harmless_name_change(f, s)
+  if ((filtering::has_harmless_name_change(f, s, d.context())
        && ((d.context()->get_allowed_category()
 	    & HARMLESS_DECL_NAME_CHANGE_CATEGORY)
 	   || d.context()->show_leaf_changes_only()))
@@ -522,6 +551,100 @@ default_reporter::report(const reference_diff& d, ostream& out,
       }
 }
 
+/// Report the local changes carried by a @ref ptr_to_mbr_diff diff
+/// node.
+///
+/// This is a subroutine of the method default_reporter::report() that
+/// emits change report for @ref ptr_to_mbr_diff node.
+///
+/// @param d the diff node to consider
+///
+/// @param out the output stream to emit the report to.
+///
+/// @param indent the indentation string (spaces) to use in the
+/// report.
+///
+/// @return truf iff a report was emitted to the output stream.
+bool
+default_reporter::report_local_ptr_to_mbr_type_changes(const ptr_to_mbr_diff& d,
+						       std::ostream& out,
+						       const std::string& indent) const
+{
+  if (!d.to_be_reported())
+    return false;
+
+  ptr_to_mbr_type_sptr f = d.first_ptr_to_mbr_type(),
+    s = d.second_ptr_to_mbr_type();
+
+  enum change_kind k = ir::NO_CHANGE_KIND;
+  equals(*d.first_ptr_to_mbr_type(), *d.second_ptr_to_mbr_type(), &k);
+
+  if (k & ALL_LOCAL_CHANGES_MASK)
+    {
+      string f_repr = f->get_pretty_representation(),
+	s_repr = s->get_pretty_representation();
+
+      out << indent;
+      out << "pointer-to-member type changed from: '"
+	  << f_repr << " to: '"<< s_repr << "'\n";
+      return true;
+    }
+  return false;
+}
+
+
+/// Emit a textual report about the changes carried by a @ref
+/// ptr_to_mbr_diff diff node.
+///
+/// @param out the output stream to emit the report to.
+///
+/// @param indent the indentation string to use for the report.
+void
+default_reporter::report(const ptr_to_mbr_diff& d,
+			 std::ostream& out,
+			 const std::string& indent) const
+{
+  if (!d.to_be_reported())
+    return;
+
+  report_local_ptr_to_mbr_type_changes(d, out, indent);
+
+  if (diff_sptr dif = d.member_type_diff())
+    {
+      RETURN_IF_BEING_REPORTED_OR_WAS_REPORTED_EARLIER2
+	(dif,"data member type of pointer-to-member");
+      if (dif->to_be_reported())
+	{
+	  out << indent
+	      << "in data member type '"
+	      << dif->first_subject()->get_pretty_representation()
+	      << "' of pointed-to-member type '"
+	      << d.first_ptr_to_mbr_type()->get_pretty_representation()
+	      << "'";
+	  report_loc_info(dif->second_subject(), *d.context(), out);
+	  out << ":\n";
+	  dif->report(out, indent + "  ");
+	}
+    }
+  if (diff_sptr dif = d.containing_type_diff())
+    {
+      RETURN_IF_BEING_REPORTED_OR_WAS_REPORTED_EARLIER2
+	(dif,"containing type of pointer-to-member");
+      if (dif->to_be_reported())
+	{
+	  out << indent
+	      << "in containing type '"
+	      << dif->first_subject()->get_pretty_representation()
+	      << "' of pointed-to-member type '"
+	      << d.first_ptr_to_mbr_type()->get_pretty_representation()
+	      << "'";
+	  report_loc_info(dif->second_subject(), *d.context(), out);
+	  out << ":\n";
+	  dif->report(out, indent + "  ");
+	}
+    }
+}
+
 /// Emit a textual report about the a @ref fn_parm_diff instance.
 ///
 /// @param d the @ref fn_parm_diff to consider.
@@ -735,6 +858,24 @@ default_reporter::report(const array_diff& d, ostream& out,
 					   d.second_array(),
 					   d.context(),
 					   out, indent);
+
+  if (d.any_subrange_diff_to_be_reported())
+    {
+      int subrange_index = 0;
+      for (const auto& subrange_diff : d.subrange_diffs())
+	{
+	  ++subrange_index;
+	  if (subrange_diff->to_be_reported())
+	    {
+	      out << indent << "array subrange ";
+	      if (d.subrange_diffs().size() > 1)
+		out << subrange_index << " ";
+	      out  << "changed: \n";
+	      subrange_diff->report(out, indent + "  ");
+	    }
+	}
+    }
+
 }
 
 /// Generates a report for an intance of @ref base_diff.
@@ -1440,7 +1581,7 @@ default_reporter::report(const union_diff& d, ostream& out,
 
   d.class_or_union_diff::report(out, indent);
 
-  if (d.context()->get_allowed_category() & HARMLESS_UNION_CHANGE_CATEGORY
+  if (d.context()->get_allowed_category() & HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY
       && filtering::union_diff_has_harmless_changes(&d))
     {
       // The user wants to see harmless changes and the union diff we
@@ -1497,10 +1638,7 @@ default_reporter::report(const distinct_diff& d, ostream& out,
   type_base_sptr fs = strip_typedef(is_type(f)),
     ss = strip_typedef(is_type(s));
 
-  if (diff)
-    diff->report(out, indent + "  ");
-  else
-    report_size_and_alignment_changes(f, s, d.context(), out, indent);
+  report_size_and_alignment_changes(f, s, d.context(), out, indent);
 }
 
 /// Serialize a report of the changes encapsulated in the current
@@ -1792,32 +1930,29 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	out << indent << s.net_num_func_removed() << " Removed functions:\n\n";
 
       bool emitted = false;
-      vector<function_decl*>sorted_deleted_fns;
+      corpus::functions sorted_deleted_fns;
       sort_string_function_ptr_map(d.priv_->deleted_fns_, sorted_deleted_fns);
-      for (vector<function_decl*>::const_iterator i =
-	     sorted_deleted_fns.begin();
-	   i != sorted_deleted_fns.end();
-	   ++i)
+      for (auto f : sorted_deleted_fns)
 	{
-	  if (d.priv_->deleted_function_is_suppressed(*i))
+	  if (d.priv_->deleted_function_is_suppressed(f))
 	    continue;
 
 	  out << indent
 	      << "  ";
 	  out << "[D] ";
-	  out << "'" << (*i)->get_pretty_representation() << "'";
+	  out << "'" << (f)->get_pretty_representation() << "'";
 	  if (ctxt->show_linkage_names())
 	    {
 	      out << "    {";
-	      show_linkage_name_and_aliases(out, "", *(*i)->get_symbol(),
+	      show_linkage_name_and_aliases(out, "", *(f)->get_symbol(),
 					    d.first_corpus()->get_fun_symbol_map());
 	      out << "}";
 	    }
 	  out << "\n";
-	  if (is_member_function(*i) && get_member_function_is_virtual(*i))
+	  if (is_member_function(f) && get_member_function_is_virtual(f))
 	    {
 	      class_decl_sptr c =
-		is_class_type(is_method_type((*i)->get_type())->get_class_type());
+		is_class_type(is_method_type(f->get_type())->get_class_type());
 	      out << indent
 		  << "    "
 		  << "note that this removes an entry from the vtable of "
@@ -1830,6 +1965,21 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	out << "\n";
     }
 
+  if (size_t num_changed = s.num_func_with_incompatible_changes())
+    {
+      if (num_changed == 1)
+	out << indent << "1 function with incompatible sub-type changes:\n\n";
+      else if (num_changed > 1)
+	out << indent << num_changed
+	    << " functions with incompatible sub-type changes:\n\n";
+
+      sort_function_decl_diffs(const_cast<corpus_diff&>(d).
+			       incompatible_changed_functions());
+      for (auto& fn_diff : d.incompatible_changed_functions())
+	if (fn_diff)
+	  emit_changed_fn_report(ctxt, fn_diff, out, indent);
+    }
+
   if (ctxt->show_added_fns())
     {
       if (s.net_num_func_added() == 1)
@@ -1838,13 +1988,11 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	out << indent << s.net_num_func_added()
 	    << " Added functions:\n\n";
       bool emitted = false;
-      vector<function_decl*> sorted_added_fns;
+      corpus::functions sorted_added_fns;
       sort_string_function_ptr_map(d.priv_->added_fns_, sorted_added_fns);
-      for (vector<function_decl*>::const_iterator i = sorted_added_fns.begin();
-	   i != sorted_added_fns.end();
-	   ++i)
+      for (auto f : sorted_added_fns)
 	{
-	  if (d.priv_->added_function_is_suppressed(*i))
+	  if (d.priv_->added_function_is_suppressed(f))
 	    continue;
 
 	  out
@@ -1852,21 +2000,21 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	    << "  ";
 	  out << "[A] ";
 	  out << "'"
-	      << (*i)->get_pretty_representation()
+	      << f->get_pretty_representation()
 	      << "'";
 	  if (ctxt->show_linkage_names())
 	    {
 	      out << "    {";
 	      show_linkage_name_and_aliases
-		(out, "", *(*i)->get_symbol(),
+		(out, "", *f->get_symbol(),
 		 d.second_corpus()->get_fun_symbol_map());
 	      out << "}";
 	    }
 	  out << "\n";
-	  if (is_member_function(*i) && get_member_function_is_virtual(*i))
+	  if (is_member_function(f) && get_member_function_is_virtual(f))
 	    {
 	      class_decl_sptr c =
-		is_class_type(is_method_type((*i)->get_type())->get_class_type());
+		is_class_type(is_method_type(f->get_type())->get_class_type());
 	      out << indent
 		  << "    "
 		  << "note that this adds a new entry to the vtable of "
@@ -1880,8 +2028,8 @@ default_reporter::report(const corpus_diff& d, ostream& out,
     }
 
   if (ctxt->show_changed_fns())
+    if (size_t num_changed = s.net_num_non_incompatible_func_changed())
     {
-      size_t num_changed = s.num_func_changed() - s.num_changed_func_filtered_out();
       if (num_changed == 1)
 	out << indent << "1 function with some indirect sub-type change:\n\n";
       else if (num_changed > 1)
@@ -1891,71 +2039,11 @@ default_reporter::report(const corpus_diff& d, ostream& out,
       vector<function_decl_diff_sptr> sorted_changed_fns;
       sort_string_function_decl_diff_sptr_map(d.priv_->changed_fns_map_,
 					      sorted_changed_fns);
-      for (vector<function_decl_diff_sptr>::const_iterator i =
-	     sorted_changed_fns.begin();
-	   i != sorted_changed_fns.end();
-	   ++i)
-	{
-	  diff_sptr diff = *i;
-	  if (!diff)
-	    continue;
-
-	  if (diff->to_be_reported())
-	    {
-	      function_decl_sptr fn = (*i)->first_function_decl();
-	      out << indent << "  [C] '"
-		  << fn->get_pretty_representation() << "'";
-	      report_loc_info((*i)->first_function_decl(), *ctxt, out);
-	      out << " has some indirect sub-type changes:\n";
-	      if (// The symbol of the function has aliases and the
-		  // function is not a cdtor (yeah because c++ cdtors
-		  // usually have several aliases).
-		  (fn->get_symbol()->has_aliases()
-		   && !(is_member_function(fn)
-			&& get_member_function_is_ctor(fn))
-		   && !(is_member_function(fn)
-			&& get_member_function_is_dtor(fn)))
-		  || // We are in C and the name of the function is
-		     // different from the symbol name -- without
-		     // taking the possible symbol version into
-		     // account (this usually means the programmers
-		     // was playing tricks with symbol names and
-		     // versions).
-		  (is_c_language(get_translation_unit(fn)->get_language())
-		   && fn->get_name() != fn->get_symbol()->get_name()))
-		{
-		  // As the name of the symbol of the function doesn't
-		  // seem to be obvious here, make sure to tell the
-		  // user about the name of the (function) symbol she
-		  // is looking at here.
-		  int number_of_aliases =
-		    fn->get_symbol()->get_number_of_aliases();
-		  if (number_of_aliases == 0)
-		    {
-		      out << indent << "    "
-			  << "Please note that the exported symbol of "
-			"this function is "
-			  << fn->get_symbol()->get_id_string()
-			  << "\n";
-		    }
-		  else
-		    {
-		      out << indent << "    "
-			  << "Please note that the symbol of this function is "
-			  << fn->get_symbol()->get_id_string()
-			  << "\n     and it aliases symbol";
-		      if (number_of_aliases > 1)
-			out << "s";
-		      out << ": "
-			  << fn->get_symbol()->get_aliases_id_string(false)
-			  << "\n";
-		    }
-		}
-	      diff->report(out, indent + "    ");
-	      // Extra spacing.
-	      out << "\n";
-	    }
-	}
+      for (auto& fn_diff : sorted_changed_fns)
+	if (fn_diff && !filtering::has_incompatible_fn_or_var_change(fn_diff))
+	  emit_changed_fn_report(ctxt, fn_diff, out, indent,
+				 /*indirect_changed_subtypes=*/true,
+				 /*emit_redundant_fns=*/false);
       // Changed functions have extra spacing already. No new line here.
     }
 
@@ -1969,17 +2057,14 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	    << " Removed variables:\n\n";
       string n;
       bool emitted = false;
-      vector<var_decl*> sorted_deleted_vars;
+      corpus::variables sorted_deleted_vars;
       sort_string_var_ptr_map(d.priv_->deleted_vars_, sorted_deleted_vars);
-      for (vector<var_decl*>::const_iterator i =
-	     sorted_deleted_vars.begin();
-	   i != sorted_deleted_vars.end();
-	   ++i)
+      for (auto v : sorted_deleted_vars)
 	{
-	  if (d.priv_->deleted_variable_is_suppressed(*i))
+	  if (d.priv_->deleted_variable_is_suppressed(v))
 	    continue;
 
-	  n = (*i)->get_pretty_representation();
+	  n = v->get_pretty_representation();
 
 	  out << indent
 	      << "  ";
@@ -1990,7 +2075,7 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	  if (ctxt->show_linkage_names())
 	    {
 	      out << "    {";
-	      show_linkage_name_and_aliases(out, "", *(*i)->get_symbol(),
+	      show_linkage_name_and_aliases(out, "", *v->get_symbol(),
 					    d.first_corpus()->get_var_symbol_map());
 	      out << "}";
 	    }
@@ -1999,6 +2084,21 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	}
       if (emitted)
 	out << "\n";
+    }
+
+  if (size_t num_changed = s.num_var_with_incompatible_changes())
+    {
+      if (num_changed == 1)
+	out << indent << "1 variable with incompatible sub-type changes:\n\n";
+      else if (num_changed  > 1)
+	out << indent << num_changed
+	    << " variables with incompatible sub-type changes:\n\n";
+
+      sort_var_diffs(const_cast<corpus_diff&>(d).
+		     incompatible_changed_variables());
+      for (auto& var_diff : d.incompatible_changed_variables())
+	if (var_diff)
+	  emit_changed_var_report(ctxt, var_diff, out, indent);
     }
 
   if (ctxt->show_added_vars())
@@ -2010,17 +2110,14 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	    << " Added variables:\n\n";
       string n;
       bool emitted = false;
-      vector<var_decl*> sorted_added_vars;
+      corpus::variables sorted_added_vars;
       sort_string_var_ptr_map(d.priv_->added_vars_, sorted_added_vars);
-      for (vector<var_decl*>::const_iterator i =
-	     sorted_added_vars.begin();
-	   i != sorted_added_vars.end();
-	   ++i)
+      for (auto v : sorted_added_vars)
 	{
-	  if (d.priv_->added_variable_is_suppressed(*i))
+	  if (d.priv_->added_variable_is_suppressed(v))
 	    continue;
 
-	  n = (*i)->get_pretty_representation();
+	  n = v->get_pretty_representation();
 
 	  out << indent
 	      << "  ";
@@ -2029,7 +2126,7 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	  if (ctxt->show_linkage_names())
 	    {
 	      out << "    {";
-	      show_linkage_name_and_aliases(out, "", *(*i)->get_symbol(),
+	      show_linkage_name_and_aliases(out, "", *v->get_symbol(),
 					    d.second_corpus()->get_var_symbol_map());
 	      out << "}";
 	    }
@@ -2041,9 +2138,8 @@ default_reporter::report(const corpus_diff& d, ostream& out,
     }
 
   if (ctxt->show_changed_vars())
+    if (size_t num_changed = s.net_num_non_incompatible_var_changed())
     {
-      size_t num_changed =
-	s.num_vars_changed() - s.num_changed_vars_filtered_out();
       if (num_changed == 1)
 	out << indent << "1 Changed variable:\n\n";
       else if (num_changed > 1)
@@ -2051,31 +2147,10 @@ default_reporter::report(const corpus_diff& d, ostream& out,
 	    << " Changed variables:\n\n";
       string n1, n2;
 
-      for (var_diff_sptrs_type::const_iterator i =
-	     d.priv_->sorted_changed_vars_.begin();
-	   i != d.priv_->sorted_changed_vars_.end();
-	   ++i)
-	{
-	  diff_sptr diff = *i;
-
-	  if (!diff)
-	    continue;
-
-	  if (!diff->to_be_reported())
-	    continue;
-
-	  n1 = diff->first_subject()->get_pretty_representation();
-	  n2 = diff->second_subject()->get_pretty_representation();
-
-	  out << indent << "  [C] '" << n1 << "' was changed";
-	  if (n1 != n2)
-	    out << " to '" << n2 << "'";
-	  report_loc_info(diff->second_subject(), *ctxt, out);
-	  out << ":\n";
-	  diff->report(out, indent + "    ");
-	  // Extra spacing.
-	  out << "\n";
-	}
+      for (auto& var_diff : d.priv_->sorted_changed_vars_)
+	if (var_diff
+	    && !filtering::has_incompatible_fn_or_var_change(var_diff))
+	  emit_changed_var_report(ctxt, var_diff, out, indent);
       // Changed variables have extra spacing already. No new line here.
     }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -17,6 +17,8 @@ ABG_BEGIN_EXPORT_DECLARATIONS
 
 #include "abg-comp-filter.h"
 #include "abg-tools-utils.h"
+#include "abg-ir-priv.h"
+#include "abg-sptr-utils.h"
 
 ABG_END_EXPORT_DECLARATIONS
 // </headers defining libabigail's API>
@@ -27,6 +29,36 @@ namespace comparison
 {
 namespace filtering
 {
+
+static bool
+has_offset_changes(const string_decl_base_sptr_map& f_data_members,
+		   const string_decl_base_sptr_map& s_data_members);
+
+static bool
+type_diff_has_typedef_cv_qual_change_only(const diff *type_dif);
+
+static bool
+type_diff_has_typedef_cv_qual_change_only(const type_base_sptr& f,
+					  const type_base_sptr& s);
+
+static diff_category
+has_harmful_change(const diff* d);
+
+static bool
+has_harmful_enum_change(const diff* diff);
+
+static bool
+has_harmless_enum_change(const type_base_sptr& f,
+			 const type_base_sptr& s,
+			 const diff_context_sptr& ctxt);
+
+static bool
+type_size_changed_with_impact(const type_base* f,
+			      const type_base* s);
+
+static bool
+type_size_changed_with_impact(const decl_base* f,
+			      const decl_base* s);
 
 using std::dynamic_pointer_cast;
 
@@ -94,14 +126,27 @@ apply_filter(filter_base_sptr filter, diff_sptr d)
 /// @return true if either classes are declaration-only, false
 /// otherwise.
 static bool
-there_is_a_decl_only_class(const class_decl_sptr& class1,
-			   const class_decl_sptr& class2)
+there_is_a_decl_only_class(const class_decl* class1, const class_decl* class2)
 {
   if ((class1 && class1->get_is_declaration_only())
       || (class2 && class2->get_is_declaration_only()))
     return true;
   return false;
 }
+
+/// Test if there is a class that is declaration-only among the two
+/// classes in parameter.
+///
+/// @param class1 the first class to consider.
+///
+/// @param class2 the second class to consider.
+///
+/// @return true if either classes are declaration-only, false
+/// otherwise.
+static bool
+there_is_a_decl_only_class(const class_decl_sptr& class1,
+			   const class_decl_sptr& class2)
+{return there_is_a_decl_only_class(class1.get(), class2.get());}
 
 /// Test if there is a enum that is declaration-only among the two
 /// enums in parameter.
@@ -113,8 +158,8 @@ there_is_a_decl_only_class(const class_decl_sptr& class1,
 /// @return true if either enums are declaration-only, false
 /// otherwise.
 static bool
-there_is_a_decl_only_enum(const enum_type_decl_sptr& enum1,
-			  const enum_type_decl_sptr& enum2)
+there_is_a_decl_only_enum(const enum_type_decl* enum1,
+			  const enum_type_decl* enum2)
 {
   if ((enum1 && enum1->get_is_declaration_only())
       || (enum2 && enum2->get_is_declaration_only()))
@@ -144,7 +189,7 @@ diff_involves_decl_only_class(const class_diff* diff)
 ///
 /// @return true if the type size changed, false otherwise.
 static bool
-type_size_changed(const type_base_sptr f, const type_base_sptr s)
+type_size_changed(const type_base* f, const type_base* s)
 {
   if (!f || !s
       || f->get_size_in_bits() == 0
@@ -160,16 +205,83 @@ type_size_changed(const type_base_sptr f, const type_base_sptr s)
 
 /// Tests if the size of a given type changed.
 ///
-/// @param f the declaration of the first version of the type to
-/// consider.
+/// @param f the first version of the type to consider.
 ///
-/// @param s the declaration of the second version of the type to
-/// consider.
+/// @param s the second version of the type to consider.
 ///
 /// @return true if the type size changed, false otherwise.
 static bool
-type_size_changed(const decl_base_sptr f, const decl_base_sptr s)
-{return type_size_changed(is_type(f), is_type(s));}
+type_size_changed(const type_base_sptr f, const type_base_sptr s)
+{return type_size_changed(f.get(), s.get());}
+
+/// Detect if a type has offset changes.
+///
+/// The type must be either a class or a union.  This function returns
+/// true iff the type has a data member which has an offset change.
+///
+/// @param f the first version of the type to consider.
+///
+/// @param s the second version of the type to consider.
+///
+/// @return true iff the type has a data member which has an offset
+/// change.
+static bool
+type_has_offset_changes(const type_base_sptr f, const type_base_sptr s)
+{
+  if (!f || !s)
+    return false;
+
+  class_or_union_sptr first = is_class_or_union_type(f);
+  class_or_union_sptr second = is_class_or_union_type(s);
+  if (!first || !second)
+    return false;
+
+  // collect the data members
+  string_decl_base_sptr_map f_data_members, s_data_members;
+  collect_non_anonymous_data_members(first, f_data_members);
+  collect_non_anonymous_data_members(second, s_data_members);
+
+    // detect offset changes
+  if (has_offset_changes(f_data_members, s_data_members))
+    return true;
+
+  return false;
+}
+
+/// Detect if a type has offset changes.
+///
+/// The type must be either a class or a union.  This function returns
+/// true iff the type has a data member which has an offset change.
+///
+/// @param f the first version of the type to consider.
+///
+/// @param s the second version of the type to consider.
+///
+/// @return true iff the type has a data member which has an offset
+/// change.
+static bool
+type_has_offset_changes(const type_base* f, const type_base* s)
+{
+  type_base_sptr first(const_cast<type_base*>(f), sptr_utils::noop_deleter());
+  type_base_sptr second(const_cast<type_base*>(s), sptr_utils::noop_deleter());
+
+  return type_has_offset_changes(first, second);
+}
+
+/// Detect if a type has offset changes.
+///
+/// The type must be either a class or a union.  This function returns
+/// true iff the type has a data member which has an offset change.
+///
+/// @param f the first version of the type to consider.
+///
+/// @param s the second version of the type to consider.
+///
+/// @return true iff the type has a data member which has an offset
+/// change.
+static bool
+type_has_offset_changes(const decl_base_sptr f, const decl_base_sptr s)
+{return type_has_offset_changes(is_type(f), is_type(s));}
 
 /// Test if a given type diff node carries a type size change.
 ///
@@ -193,6 +305,320 @@ has_type_size_change(const diff* diff)
 
   return type_size_changed(f, s);
 }
+
+/// Tests if the size of a given type changed and if its containing
+/// type (if any) has a size change too, possibly as a consequence.
+///
+/// Please note that the function also tests if the cause of the size
+/// change does have an impact on the type itself in terms of data
+/// member offset change.
+///
+/// @param f the first version of the type to consider.
+///
+/// @param s the second version of the type to consider.
+///
+/// @param fs the scope of @p f.
+///
+/// @param ss the scope of @p s.
+///
+/// @return true if the type size changed and if that change did
+/// impact the containing scope, false otherwise.
+static bool
+type_size_changed_with_impact(const type_base* f, const type_base *s,
+			      const scope_decl* fs, const scope_decl* ss)
+{
+  bool result = false;
+  if (type_size_changed(f, s))
+    {// Let's see if the type size has an impact on its scope.
+      if (is_type(ss))
+	// The scope is itself a type.  Let's see if that type scope
+	// itself has a type size with an impact to its scope.
+	result = type_size_changed_with_impact (is_type(fs), is_type(ss));
+      else
+	{// The scope is not a type.  So let's look at things in a
+	 // more subtle way.
+	  if (type_has_offset_changes(f, s))
+	    // The type has an offset change so it looks like the size
+	    // change is caused by something that did have an impact
+	    // (in terms of ABI) on the type anyway.
+	    result = true;
+
+	  if (// If the type itself is anonymous (and not named by a
+	      // typedef), its size impact is going to be seen on the
+	      // declaration of that type.  And that would be tested
+	      // separately anyway, for instance by
+	      // has_harmful_change.  So let's not consider that case
+	      // here.
+	      !is_anonymous_type(f)
+	      && !is_anonymous_type(s)
+	      && type_size_changed(f, s))
+	    result = true;
+	}
+    }
+  return result;
+}
+
+/// Tests if the size of a given type changed and if its containing
+/// type (if any) has a size change too, possibly as a consequence.
+///
+/// Please note that the function also tests if the cause of the size
+/// change does have an impact on the type itself in terms of data
+/// member offset change.
+///
+/// @param f the first version of the type to consider.
+///
+/// @param s the second version of the type to consider.
+///
+/// @return true if the type size changed and if that change did
+/// impact the containing scope, false otherwise.
+static bool
+type_size_changed_with_impact(const type_base* f, const type_base *s)
+{
+  const decl_base* first_type = get_type_declaration(f),
+    *second_type = get_type_declaration(s);
+
+  if (!first_type || !second_type)
+    return false;
+
+  scope_decl* fs = first_type->get_scope();
+  scope_decl* ss = second_type->get_scope();
+
+  return type_size_changed_with_impact(f, s, fs, ss);
+}
+
+/// Tests if the size of the type of a given decl changed and if its
+/// containing type (if any) has a size change too, possibly as a
+/// consequence.
+///
+/// Please note that the function also tests if the cause of the size
+/// change does have an impact on the type itself in terms of data
+/// member offset change.
+///
+/// Also, if we are looking at a type then test for the type directly.
+///
+/// @param f the first declaration to consider.
+///
+/// @param s the second declaration to consider.
+///
+/// @return true if the type size changed and if that change did
+/// impact the containing scope, false otherwise.
+static bool
+type_size_changed_with_impact(const decl_base* f, const decl_base *s)
+{
+  if (!f || !s)
+    return false;
+
+  if (is_type(f) && is_type(s))
+    return type_size_changed_with_impact(is_type(f), is_type(s));
+
+  var_decl* f_var = is_var_decl(f);
+  var_decl* s_var = is_var_decl(s);
+
+  if (!f_var || !s_var)
+    return false;
+
+  scope_decl* fs = f->get_scope();
+  scope_decl* ss = s->get_scope();
+
+  const type_base* first_type = f_var->get_type().get();
+  const type_base* second_type = s_var->get_type().get();
+
+  return type_size_changed_with_impact(first_type, second_type, fs, ss);
+}
+
+/// Tests if the size of a given type changed and if its containing
+/// type (if any) has a size change too, possibly as a consequence.
+///
+/// Please note that the function also tests if the cause of the size
+/// change does have an impact on the type itself in terms of data
+/// member offset change.
+///
+/// @param f the first version of the type to consider.
+///
+/// @param s the second version of the type to consider.
+///
+/// @return true if the type size changed and if that change did
+/// impact the containing scope, false otherwise.
+static bool
+type_size_changed_with_impact(const type_base_sptr& f, const type_base_sptr& s)
+{return type_size_changed_with_impact(f.get(), s.get());}
+
+/// Tests if the size of a given type changed and if its containing
+/// type (if any) has a size change too, possibly as a consequence.
+///
+/// Please note that the function also tests if the cause of the size
+/// change does have an impact on the type itself in terms of data
+/// member offset change.
+///
+/// @param f the declaration of the first version of the type to
+/// consider.
+///
+/// @param s the declaration of the second version of the type to
+/// consider.
+///
+/// @return true if the type size changed and if that change did
+/// impact the containing scope, false otherwise.
+static bool
+type_size_changed_with_impact(const decl_base_sptr& f, const decl_base_sptr& s)
+{return type_size_changed_with_impact(f.get(), s.get());}
+
+/// Tests if the diff node carries a type change in which the size
+/// changed and the containing type (if any) has a size change too,
+/// possibly as a consequence.
+///
+/// Please note that the function also tests if the cause of the size
+/// change does have an impact on the type itself in terms of data
+/// member offset change.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff the diff node carries a type change in which the
+/// size changed and containing type (if any) has a size change too,
+/// possibly as a consequence.
+static bool
+has_type_size_change_with_impact(const diff* d)
+{
+  if (!d)
+    return false;
+
+  if (const fn_parm_diff* fn_parm_d = is_fn_parm_diff(d))
+    d = fn_parm_d->type_diff().get();
+
+  if (is_type(d->first_subject()) || is_type(d->second_subject()))
+    return type_size_changed_with_impact(is_type(d->first_subject()),
+					 is_type(d->second_subject()));
+
+  return type_size_changed_with_impact(is_decl(d->first_subject()),
+				       is_decl(d->second_subject()));
+}
+
+/// Find a data member that is at a given offset.
+///
+/// @param data_members the set of data member to consider.
+///
+/// @param the offset to consider.
+///
+/// @return the data member found at offset @p offset of nil if none
+/// was found with that offset;
+static var_decl_sptr
+find_data_member_at_offset(const string_decl_base_sptr_map& data_members,
+			   unsigned offset)
+{
+  for (auto e : data_members)
+    {
+      var_decl_sptr dm = is_var_decl(e.second);
+      ABG_ASSERT(dm);
+      unsigned off = get_absolute_data_member_offset(dm);
+      if (offset == off)
+	return dm;
+    }
+  return var_decl_sptr();
+}
+
+/// Test if a set of data members contains at least one data member
+/// that has an offset change.
+///
+/// @param f_data_members the first version of data members to
+/// consider.
+///
+/// @param s_data_members the second version of data members to
+/// consider.
+///
+/// @return true iff there is at least one data member which has an
+/// offset change between the first version of data members and the
+/// second version.
+static bool
+has_offset_changes(const string_decl_base_sptr_map& f_data_members,
+		   const string_decl_base_sptr_map& s_data_members)
+{
+  // Compare the offsets of the data members
+  for (auto entry : f_data_members)
+    {
+      var_decl_sptr f_member = is_var_decl(entry.second);
+      ABG_ASSERT(f_member);
+      unsigned f_offset = get_absolute_data_member_offset(f_member);
+      auto i = s_data_members.find(entry.first);
+      var_decl_sptr s_member;
+      if (i == s_data_members.end())
+	{
+	  s_member = find_data_member_at_offset(s_data_members, f_offset);
+	  if (!s_member)
+	    // A data member was suppressed; that's bad; let's consider
+	    // that as an offset change.
+	    return true;
+	}
+
+      if (!s_member)
+	s_member = is_var_decl(i->second);
+      ABG_ASSERT(s_member);
+      unsigned s_offset = get_absolute_data_member_offset(s_member);
+      if (f_offset != s_offset)
+	return true;
+    }
+  return false;
+}
+
+/// Test if the local changes of a @ref class_diff are harmless.
+///
+/// Harmful changes are basically:
+///   1/ name change (that changes the type altogether)
+///   2/ size change
+///   3/ offset change of any data member
+///
+///
+/// Thus, this function tests that the class_diff carries none of the
+/// 3 kinds of changes above.
+///
+/// @param d the @ref class_diff to consider.
+///
+/// @return true iff @p d has only harmless changes.
+static bool
+class_diff_has_only_harmless_changes(const class_diff* d)
+{
+  if (!d || !d->has_changes())
+    return true;
+
+  class_decl_sptr f = d->first_class_decl(), s = d->second_class_decl();
+
+  if (f->get_qualified_name() != s->get_qualified_name())
+    return false;
+
+  if (f->get_size_in_bits() != s->get_size_in_bits())
+    return false;
+
+  // collect the data members
+  string_decl_base_sptr_map f_data_members, s_data_members;
+  collect_non_anonymous_data_members(f, f_data_members);
+  collect_non_anonymous_data_members(s, s_data_members);
+
+  // detect offset changes
+  if (has_offset_changes(f_data_members, s_data_members))
+    return false;
+
+  return true;
+}
+
+/// Test if the local changes of a @ref class_diff are harmless.
+///
+/// Harmful changes are basically:
+///   1/ name change (that changes the type altogether)
+///   2/ size change
+///   3/ offset change of any data member
+///
+/// Thus, this function tests that the class_diff carries none of the
+/// 3 kinds of changes above.
+///
+/// @param d the @ref class_diff to consider.
+///
+/// @return true iff @p d has only harmless changes.
+static bool
+class_diff_has_only_harmless_changes(diff* d)
+{
+  if (const class_diff* class_dif = is_class_diff(d))
+    return class_diff_has_only_harmless_changes(class_dif);
+  return false;
+}
+
 /// Tests if the access specifiers for a member declaration changed.
 ///
 /// @param f the declaration for the first version of the member
@@ -380,7 +806,7 @@ data_member_offset_changed(decl_base_sptr f, decl_base_sptr s)
 ///
 /// @param s the second version of the non-static data member.
 static bool
-non_static_data_member_type_size_changed(const decl_base_sptr& f,
+non_static_data_member_type_size_changed_with_impact(const decl_base_sptr& f,
 					 const decl_base_sptr& s)
 {
   if (!is_member_decl(f)
@@ -395,7 +821,7 @@ non_static_data_member_type_size_changed(const decl_base_sptr& f,
       || get_member_is_static(sv))
     return false;
 
-  return type_size_changed(fv->get_type(), sv->get_type());
+  return type_size_changed_with_impact(fv, sv);
 }
 
 /// Test if the size of a static data member changed accross two
@@ -440,52 +866,62 @@ is_compatible_change(const decl_base_sptr& d1, const decl_base_sptr& d2)
   return false;
 }
 
-/// Test if two decls have different names.
+/// Test if a diff node carries a compatible type change.
 ///
-/// @param d1 the first declaration to consider.
+/// @param d the diff node to consider.
 ///
-/// @param d2 the second declaration to consider.
-///
-/// @return true if d1 and d2 have different names.
+/// @return true iff @p carries a compatible type change.
 static bool
-decl_name_changed(const type_or_decl_base* a1, const type_or_decl_base *a2)
+is_compatible_type_change(const diff* d)
 {
-  string d1_name, d2_name;
-
-  const decl_base *d1 = dynamic_cast<const decl_base*>(a1);
-  if (d1 == 0)
+  if (!d)
     return false;
 
-  const decl_base *d2 = dynamic_cast<const decl_base*>(a2);
-  if (d2 == 0)
-    return false;
+  if (type_base_sptr t1 = is_type(d->first_subject()))
+    if (type_base_sptr t2 = is_type(d->second_subject()))
+      return types_are_compatible(t1, t2);
 
-  if (d1)
-    d1_name = d1->get_qualified_name();
-  if (d2)
-    d2_name = d2->get_qualified_name();
-
-  return d1_name != d2_name;
+  return false;
 }
 
-/// Test if two decls have different names.
+/// Test if a diff node carries a non-compatible change between two
+/// types of different kinds.
 ///
-/// @param d1 the first declaration to consider.
+/// Note that a compatible change is a change whereby two types are
+/// equal modulo a typedef.  Said otherwise, a compatible change is a
+/// change whereby one type is a typedef of the other.
 ///
-/// @param d2 the second declaration to consider.
+/// @param d the diff node to consider.
 ///
-/// @return true if d1 and d2 have different names.
+/// @return true iff the diff node carries a non-compatible change
+/// between two types of different kinds.
 static bool
-decl_name_changed(const type_or_decl_base_sptr& d1,
-		  const type_or_decl_base_sptr& d2)
-{return decl_name_changed(d1.get(), d2.get());}
+is_non_compatible_distinct_change(const diff *d)
+{
+  if (const distinct_diff* dd = is_distinct_diff(d))
+    {
+      if (dd->compatible_child_diff()
+	  || is_compatible_type_change(d)
+	  || is_type_to_compatible_anonymous_type_change(d)
+	  || (!dd->first_subject() || !dd->second_subject()))
+	// The distinct diff node carries a compatible or benign
+	// change
+	return false;
 
-/// Test if a diff nodes carries a changes in which two decls have
+      // If we reached this point, then the distinct diff node is
+      // likely to carry a non-compatible change.
+      return true;
+    }
+
+  return false;
+}
+
+/// Test if a diff node carries a changes in which two decls have
 /// different names.
 ///
 /// @param d the diff node to consider.
 ///
-/// @return true iff d carries a changes in which two decls have
+/// @return true iff d carries a change in which two decls have
 /// different names.
 static bool
 decl_name_changed(const diff *d)
@@ -500,9 +936,14 @@ decl_name_changed(const diff *d)
 ///
 /// @param s the second decl to consider in the comparison.
 ///
+/// @param ctxt the diff context to use for fine grained comparison of
+/// @p f and @p s.
+///
 /// @return true iff decl @p s represents a harmless change over @p f.
 bool
-has_harmless_name_change(const decl_base_sptr& f, const decl_base_sptr& s)
+has_harmless_name_change(const decl_base_sptr& f,
+			 const decl_base_sptr& s,
+			 const diff_context_sptr& ctxt)
 {
   // So, a harmless name change is either ...
   return (decl_name_changed(f, s)
@@ -516,28 +957,32 @@ has_harmless_name_change(const decl_base_sptr& f, const decl_base_sptr& s)
 		&& s->get_is_anonymous_or_has_anonymous_parent())
 	       && tools_utils::decl_names_equal(f->get_qualified_name(),
 						s->get_qualified_name()))
-	      // ... a typedef name change, without having the
-	      // underlying type changed ...
-	      || (is_typedef(f)
-		  && is_typedef(s)
-		  && (is_typedef(f)->get_underlying_type()
-		   == is_typedef(s)->get_underlying_type()))
-	      // .. or a data member name change, without having its
+	      // ... Types are compatible (equal modulo a typedef or
+	      // cv quals) ...
+	      || (is_type(f)
+		  && is_type(s)
+		  && types_are_compatible(is_type(f), is_type(s)))
+	      // ... a harmless enum change ...
+	      || has_harmless_enum_change(is_type(f), is_type(s), ctxt)
+	      // ... a type replaced by a compatible anonymous union
+	      // or struct ...
+	      || (is_type(f) && is_type(s)
+		  && is_type_to_compatible_anonymous_type_change(is_type(f),
+								 is_type(s)))
+	      // ... a data member replaced by a compatible anonymous
+	      // data member ...
+	      || (is_data_member(f) && is_data_member(s)
+		  && is_data_member_to_compatible_anonymous_dm_change(is_decl(f),
+								      is_decl(s)))
+	      // ... or a data member name change, without having its
 	      // type changed ...
 	      || (is_data_member(f)
 		  && is_data_member(s)
 		  && (is_var_decl(f)->get_type()
-		      == is_var_decl(s)->get_type()))
-	      // .. an enum name change without having any other part
-	      // of the enum to change.
-	      || (is_enum_type(f)
-		  && is_enum_type(s)
-		  && !enum_has_non_name_change(*is_enum_type(f),
-					       *is_enum_type(s),
-					       0))));
+		      == is_var_decl(s)->get_type()))));
 }
 
-/// Test if two decls represents a harmful name change.
+/// Test if two decls represent a harmful name change.
 ///
 /// A harmful name change is a name change that is not harmless, so
 /// this function uses the function has_harmless_name_change.
@@ -546,11 +991,15 @@ has_harmless_name_change(const decl_base_sptr& f, const decl_base_sptr& s)
 ///
 /// @param s the second decl to consider in the comparison.
 ///
+/// @param ctxt the diff context to use for comparison.
+///
 /// @return true iff decl @p s represents a harmful name change over
 /// @p f.
 bool
-has_harmful_name_change(const decl_base_sptr& f, const decl_base_sptr& s)
-{return decl_name_changed(f, s) && ! has_harmless_name_change(f, s);}
+has_harmful_name_change(const decl_base_sptr& f,
+			const decl_base_sptr& s,
+			const diff_context_sptr& ctxt)
+{return decl_name_changed(f, s) && ! has_harmless_name_change(f, s, ctxt);}
 
 /// Test if a diff node represents a harmful name change.
 ///
@@ -569,18 +1018,18 @@ has_harmful_name_change(const diff* dif)
   decl_base_sptr f = is_decl(dif->first_subject()),
     s = is_decl(dif->second_subject());
 
-  return has_harmful_name_change(f, s);
+  return has_harmful_name_change(f, s, dif->context());
 }
 
-/// Test if a class_diff node has non-static members added or
-/// removed.
+/// Test if a class_diff node has non-static members added or removed,
+/// with a possible impact on (type) scopes using the class.
 ///
 /// @param diff the diff node to consider.
 ///
 /// @return true iff the class_diff node has non-static members added
 /// or removed.
 static bool
-non_static_data_member_added_or_removed(const class_diff* diff)
+non_static_data_member_added_or_removed_with_impact(const class_diff* diff)
 {
   if (diff && !diff_involves_decl_only_class(diff))
     {
@@ -589,7 +1038,17 @@ non_static_data_member_added_or_removed(const class_diff* diff)
 	   i != diff->inserted_data_members().end();
 	   ++i)
 	if (!get_member_is_static(i->second))
-	  return true;
+	  {
+	    class_decl_sptr second_class = diff->second_class_decl();
+	    ABG_ASSERT(second_class);
+	    if (!is_anonymous_type(second_class))
+	      // The class that has data member added somewhere is
+	      // *NOT* anonymous so it means it can be reused
+	      // somewhere else but where it's currently declared.  So
+	      // the data member addition might have a visible
+	      // external impact.
+	      return true;
+	  }
 
       for (string_decl_base_sptr_map::const_iterator i =
 	     diff->deleted_data_members().begin();
@@ -602,16 +1061,17 @@ non_static_data_member_added_or_removed(const class_diff* diff)
   return false;
 }
 
-/// Test if a class_diff node has members added or removed.
+/// Test if a class_diff node has non-static members added or removed,
+/// with a possible impact on (type) scopes using the class.
 ///
 /// @param diff the diff node to consider.
 ///
 /// @return true iff the class_diff node has members added or removed.
 static bool
-non_static_data_member_added_or_removed(const diff* diff)
+non_static_data_member_added_or_removed_with_impact(const diff* diff)
 {
-  return non_static_data_member_added_or_removed
-    (dynamic_cast<const class_diff*>(diff));
+  return non_static_data_member_added_or_removed_with_impact
+    (is_class_diff(diff));
 }
 
 /// Test if a @ref class_or_union_diff has a data member replaced by
@@ -667,7 +1127,7 @@ is_var_1_dim_unknown_size_array_change(const var_decl_sptr& var1,
   // be of unknown size.
   if (fat->get_subranges().size() != 1
       || sat->get_subranges().size() != 1
-      || (!fat->is_infinite() && !sat->is_infinite()))
+      || (!fat->is_non_finite() && !sat->is_non_finite()))
     return false;
 
   // The variables must be equal modulo their type.
@@ -710,6 +1170,75 @@ is_var_1_dim_unknown_size_array_change(const diff* diff)
   var_decl_sptr f = d->first_var(), s = d->second_var();
 
   return is_var_1_dim_unknown_size_array_change(f, s);
+}
+
+/// Test if a class with a fake flexible data member got changed into
+/// a class with a real fexible data member.
+///
+/// A fake flexible array data member is a data member that is the
+/// last of the class/struct which type is an array of one element.
+/// This was used before C99 standardized flexible array data members.
+///
+/// @param first the first version of the class to consider.
+///
+/// @param second the second version of the class to consider.
+///
+/// @return true iff @p first has a fake flexible array data member
+/// that got changed into @p second with a real flexible array data
+/// member.
+bool
+has_strict_fam_conversion(const class_decl_sptr& first,
+			  const class_decl_sptr& second)
+{
+  if (has_fake_flexible_array_data_member(first)
+      && has_flexible_array_data_member(second))
+    // A fake flexible array member has been changed into
+    // a real flexible array ...
+    return true;
+  return false;
+}
+
+/// Test if a diff node carries a change from class with a fake
+/// flexible data member into a class with a real fexible data member.
+///
+/// A fake flexible array data member is a data member that is the
+/// last of the class/struct which type is an array of one element.
+/// This was used before C99 standardized flexible array data members.
+///
+/// @param the diff node to consider.
+///
+/// @return true iff @p dif carries a change from class with a fake
+/// flexible data member into a class with a real fexible data member.
+/// member.
+bool
+has_strict_fam_conversion(const diff *dif)
+{
+  const class_diff* d = is_class_diff(dif);
+  if (!d)
+    return false;
+
+  return has_strict_fam_conversion(d->first_class_decl(),
+				   d->second_class_decl());
+}
+
+/// Test if a diff node carries a change where an lvalue reference
+/// changed into a rvalue reference, or vice versa.
+///
+/// @param dif the diff node to consider.
+///
+/// @return true iff @p dif carries a change where an lvalue reference
+/// changed into a rvalue reference, or vice versa.
+bool
+has_lvalue_reference_ness_change(const diff *dif)
+{
+  const reference_diff* d = is_reference_diff(dif);
+  if (!d)
+    return false;
+
+  if (d->first_reference()->is_lvalue() == d->second_reference()->is_lvalue())
+    return false;
+
+  return true;
 }
 
 /// Test if a class_diff node has static members added or removed.
@@ -976,27 +1505,27 @@ static bool
 has_non_virtual_mem_fn_change(const diff* diff)
 {return has_non_virtual_mem_fn_change(dynamic_cast<const class_diff*>(diff));}
 
-/// Test if a class_diff carries base classes adding or removals.
+/// Test if a class_diff carries a base class removal.
 ///
 /// @param diff the class_diff to consider.
 ///
-/// @return true iff @p diff carries base classes adding or removals.
+/// @return true iff @p diff carries a base classe removal.
 static bool
-base_classes_added_or_removed(const class_diff* diff)
+base_classes_removed(const class_diff* diff)
 {
   if (!diff)
     return false;
-  return diff->deleted_bases().size() || diff->inserted_bases().size();
+  return diff->deleted_bases().size();
 }
 
-/// Test if a class_diff carries base classes adding or removals.
+/// Test if a class_diff carries a base classes removal.
 ///
 /// @param diff the class_diff to consider.
 ///
-/// @return true iff @p diff carries base classes adding or removals.
+/// @return true iff @p diff carries a base class removal.
 static bool
-base_classes_added_or_removed(const diff* diff)
-{return base_classes_added_or_removed(dynamic_cast<const class_diff*>(diff));}
+base_classes_removed(const diff* diff)
+{return base_classes_removed(dynamic_cast<const class_diff*>(diff));}
 
 /// Test if two classes that are decl-only (have the decl-only flag
 /// and carry no data members) but are different just by their size.
@@ -1336,8 +1865,10 @@ is_mostly_distinct_diff(const diff *d)
 bool
 has_anonymous_data_member_change(const diff *d)
 {
-  if (is_anonymous_data_member(d->first_subject())
-      || is_anonymous_data_member(d->second_subject()))
+  if ((is_anonymous_data_member(d->first_subject())
+       && !is_anonymous_data_member(d->second_subject()))
+      || (is_anonymous_data_member(d->second_subject())
+	  && !is_anonymous_data_member(d->first_subject())))
     return true;
   return false;
 }
@@ -1366,21 +1897,51 @@ has_enumerator_insertion(const diff* diff)
   return false;
 }
 
-/// Test if an enum_diff carries an enumerator removal.
+/// Test if an enum_diff carries an enumerator removal or an
+/// enumerator value change.
 ///
 /// @param diff the enum_diff to consider.
 ///
 /// @return true iff @p diff carries an enumerator removal or change.
 static bool
-has_enumerator_removal_or_change(const diff* diff)
+has_enumerator_removal_or_value_change(const diff* diff)
 {
   if (const enum_diff* d = dynamic_cast<const enum_diff*>(diff))
-    return (!d->deleted_enumerators().empty()
-	    || !d->changed_enumerators().empty());
+    {
+      if (!d->deleted_enumerators().empty())
+	return true;
+
+      for (auto& entry : d->changed_enumerators())
+	{
+	  const changed_enumerator& change = entry.second;
+	  if (change.first.get_value() != change.second.get_value())
+	    return true;
+	}
+    }
+  return false;
+}
+
+/// Test if a diff node carries an enumerator name or value change.
+///
+/// @param diff the diff node to consider.
+///
+/// @return true iff the diff node @p diff carries an enumerator name
+/// or value change.
+static bool
+has_enumerator_change(const diff* diff)
+{
+  if (const enum_diff* d = dynamic_cast<const enum_diff*>(diff))
+    return !d->changed_enumerators().empty();
   return false;
 }
 
 /// Test if an enum_diff carries a harmful change.
+///
+/// For now, a harmful enum change is either a change that:
+///
+///   - changes the size of the enum type
+///
+///   - or removes (or changes) an existing enumerator value.
 ///
 /// @param diff the enum_diff to consider.
 ///
@@ -1389,8 +1950,9 @@ static bool
 has_harmful_enum_change(const diff* diff)
 {
   if (const enum_diff* d = dynamic_cast<const enum_diff*>(diff))
-    return (has_enumerator_removal_or_change(d)
-	    || has_type_size_change(d));
+    if (has_type_size_change(d) || has_enumerator_removal_or_value_change(d))
+      return true;
+
   return false;
 }
 
@@ -1403,7 +1965,7 @@ has_harmful_enum_change(const diff* diff)
 /// @param diff the diff node to consider.
 ///
 /// @return true if @p diff is a harmless enum to integer change.
-static bool
+bool
 has_harmless_enum_to_int_change(const diff* diff)
 {
   if (!diff)
@@ -1438,6 +2000,77 @@ has_harmless_enum_to_int_change(const diff* diff)
     }
 
   return false;
+}
+
+/// Test if two types represent a harmless (that can be filtered out
+/// by default) enum type change.
+///
+/// A harmless enum type change is either an enumerator insertion or
+/// an enumerator change that doesn't represents a harmful enum change
+/// at the same time.  Note that a harmless enum to int change is a
+/// harmless enum change too.
+///
+/// @param t1 the first version of the type to consider.
+///
+/// @param t2 the second version of the type to consider.
+///
+/// @param ctxt the diff context to use to compare @p t1 and @p t2.
+///
+/// @return true iff {t1, t2} represents a harmless enum change.
+static bool
+has_harmless_enum_change(const type_base_sptr& t1,
+			 const type_base_sptr& t2,
+			 const diff_context_sptr& ctxt)
+{
+  type_base_sptr f = peel_typedef_type(t1);
+  type_base_sptr s = peel_typedef_type(t2);
+  enum_type_decl_sptr e1 = is_enum_type(f);
+  enum_type_decl_sptr e2 = is_enum_type(s);
+
+  if (!e1 || !e2)
+    return false;
+
+  enum_diff_sptr dyf = compute_diff(e1, e2, ctxt);
+  if (((has_enumerator_insertion(dyf.get()) || has_enumerator_change(dyf.get()))
+       && !has_harmful_enum_change(dyf.get()))
+      || has_harmless_enum_to_int_change(dyf.get()))
+    return true;
+
+  return false;
+}
+
+/// Test if two types represent a harmless (that can be filtered out
+/// by default) enum type change.
+///
+/// A harmless enum type change is either an enumerator insertion or
+/// an enumerator change that doesn't represents a harmful enum change
+/// at the same time.  Note that a harmless enum to int change is a
+/// harmless enum change too.
+///
+/// @param t1 the first version of the type to consider.
+///
+/// @param t2 the second version of the type to consider.
+///
+/// @param ctxt the diff context to use to compare @p t1 and @p t2.
+///
+/// @return true iff {t1, t2} represents a harmless enum change.
+static bool
+has_harmless_enum_change(const diff* d)
+{
+  if (!d)
+    return false;
+
+  if (((has_enumerator_insertion(d) || has_enumerator_change(d))
+       && !has_harmful_enum_change(d))
+      || has_harmless_enum_to_int_change(d))
+    return true;
+
+  type_base_sptr f = is_type(d->first_subject());
+  type_base_sptr s = is_type(d->second_subject());
+  if (!f || !s)
+    return false;
+
+  return has_harmless_enum_change(f, s, d->context());
 }
 
 /// Test if an @ref fn_parm_diff node has a top cv qualifier change on
@@ -1506,48 +2139,52 @@ has_fn_parm_type_top_cv_qual_change(const diff* diff)
 ///
 /// @return true iff the type_diff carries a CV qualifier only change.
 static bool
-type_diff_has_cv_qual_change_only(const diff *type_dif)
+type_diff_has_typedef_cv_qual_change_only(const diff *type_dif)
 {
-  if (!is_type_diff(type_dif))
+  if (!type_dif)
     return false;
 
-  if (is_pointer_diff(type_dif))
-    type_dif = peel_pointer_diff(type_dif);
-  else if (is_reference_diff(type_dif))
-    type_dif = peel_reference_diff(type_dif);
+  type_base_sptr f = is_type(type_dif->first_subject());
+  type_base_sptr s = is_type(type_dif->second_subject());
 
-  const type_base *f = 0;
-  const type_base *s = 0;
-  if (const distinct_diff *d = is_distinct_diff(type_dif))
-    {
-      if (is_qualified_type(d->first()) == is_qualified_type(d->second()))
-	return false;
-      else
-	{
-	  f = is_type(d->first()).get();
-	  s = is_type(d->second()).get();
-	}
-    }
-  else if (const qualified_type_diff *d = is_qualified_type_diff(type_dif))
-    {
-      f = is_type(d->first_qualified_type()).get();
-      s = is_type(d->second_qualified_type()).get();
-    }
-  else
-    return false;
+  return type_diff_has_typedef_cv_qual_change_only(f, s);
+}
 
-  f = peel_qualified_type(f);
-  s = peel_qualified_type(s);
+/// Test if a type only carries a CV qualifier-only change.
+///
+/// Note that for pointers and array types, the functions look at
+/// pointed-to types for comparison.
+///
+/// @param f the first version of the type.
+///
+/// @param s the second version of the type.
+///
+/// @return true iff the change is only a qualifier change.
+static bool
+type_diff_has_typedef_cv_qual_change_only(const type_base_sptr& f,
+					  const type_base_sptr& s)
+{
+  type_base_sptr a = f;
+  type_base_sptr b = s;
+
+  a = peel_qualified_or_typedef_type(a);
+  b = peel_qualified_or_typedef_type(b);
+
+  if (a && b && *a == *b)
+    return true;
+
+  if (is_pointer_type(a) && is_pointer_type(b))
+    return equals_modulo_cv_qualifier(is_pointer_type(a), is_pointer_type(b));
 
   // If f and s are arrays, note that they can differ only by the cv
   // qualifier of the array element type.  That cv qualifier is not
   // removed by peel_qualified_type.  So we need to test this case
   // specifically.
-  if (array_type_def *f_a = is_array_type(f))
-    if (array_type_def *s_a = is_array_type(s))
+  if (array_type_def_sptr f_a = is_array_type(a))
+    if (array_type_def_sptr s_a = is_array_type(b))
       return equals_modulo_cv_qualifier(f_a, s_a);
 
-  return *f == *s;
+  return false;
 }
 
 /// Test if an @ref fn_parm_diff node has a cv qualifier change on the
@@ -1571,7 +2208,7 @@ has_fn_parm_type_cv_qual_change(const diff* dif)
     return false;
 
   const diff *type_dif = parm_diff->type_diff().get();
-  return type_diff_has_cv_qual_change_only(type_dif);
+  return type_diff_has_typedef_cv_qual_change_only(type_dif);
 }
 
 /// Test if a function type or decl diff node carries a CV
@@ -1595,7 +2232,7 @@ has_fn_return_type_cv_qual_change(const diff* dif)
     return false;
 
   const diff* return_type_diff = fn_type_diff->return_type_diff().get();
-  return type_diff_has_cv_qual_change_only(return_type_diff);
+  return type_diff_has_typedef_cv_qual_change_only(return_type_diff);
 }
 
 /// Test if a function type or decl diff node carries a function
@@ -1611,7 +2248,7 @@ static bool
 has_added_or_removed_function_parameters(const diff *dif)
 {
   const function_type_diff *fn_type_diff = is_function_type_diff(dif);
-    if (!fn_type_diff)
+  if (!fn_type_diff)
     if (const function_decl_diff* fn_decl_diff = is_function_decl_diff(dif))
       fn_type_diff = fn_decl_diff->type_diff().get();
 
@@ -1621,6 +2258,306 @@ has_added_or_removed_function_parameters(const diff *dif)
   if (!(fn_type_diff->sorted_deleted_parms().empty()
 	&& fn_type_diff->sorted_added_parms().empty()))
     return true;
+
+  return false;
+}
+
+/// Test if a diff node is a function diff node that carries either a
+/// return or a parameter type change that is deemed harmful.
+///
+/// @param d the diff node to consider.
+///
+/// @return the category of the change carried by @p or zero if
+/// doesn't carry any change.
+diff_category
+has_fn_return_or_parm_harmful_change(const diff* d)
+{
+  const function_decl_diff* fn_decl_diff = nullptr;
+  const function_type_diff* fn_type_diff = is_function_type_diff(d);
+
+  if (!fn_type_diff)
+    fn_decl_diff = is_function_decl_diff(d);
+
+  if (!fn_decl_diff && !fn_type_diff)
+    return NO_CHANGE_CATEGORY;
+
+  diff_category category = NO_CHANGE_CATEGORY;
+  if (fn_decl_diff)
+    category = fn_decl_diff->get_local_category();
+
+  if (is_harmful_category(category))
+    return category;
+
+  if (fn_decl_diff)
+    fn_type_diff = fn_decl_diff->type_diff().get();
+
+  if (!fn_type_diff)
+    return NO_CHANGE_CATEGORY;
+
+  diff_sptr return_type_diff = fn_type_diff->return_type_diff();
+  if (return_type_diff && !has_void_to_non_void_change(return_type_diff))
+    category = return_type_diff->get_local_category();
+
+  if (is_harmful_category(category))
+    return category;
+
+  for (const auto& entry : fn_type_diff->subtype_changed_parms())
+    {
+      category = entry.second->get_local_category();
+      if (is_harmful_category(category))
+	return category;
+    }
+
+  return NO_CHANGE_CATEGORY;
+}
+
+/// Test if a diff node carries a change to the offset of a virtual
+/// function.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p carries a change to the offset of a virtual
+/// function.
+bool
+has_fn_with_virtual_offset_change(const diff* d)
+{
+  const function_decl_diff* fn_diff = is_function_decl_diff(d);
+  if (!fn_diff)
+    return false;
+
+  if (fn_diff->get_local_category() & VIRTUAL_MEMBER_CHANGE_CATEGORY)
+    return true;
+
+  return false;
+}
+
+/// Test if a diff node carries a change to the offset of a virtual
+/// function.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p carries a change to the offset of a virtual
+/// function.
+bool
+has_fn_with_virtual_offset_change(const diff_sptr& d)
+{return has_fn_with_virtual_offset_change(d.get());}
+
+
+/// Test if a diff node carries a harmful local change to a variable.
+///
+/// @param d the diff node to consider.
+///
+/// @return the @ref diff_category of the harmful local change or zero
+/// if the diff node carries no harmful local change.
+diff_category
+has_var_harmful_local_change(const diff* d)
+{
+  const var_diff* vd = is_var_diff(d);
+  diff_category cat = NO_CHANGE_CATEGORY;
+
+  if (!vd || has_benign_array_of_unknown_size_change(d))
+    return cat;
+
+  cat = vd->get_local_category();
+  if (is_harmful_category(cat))
+    return cat;
+
+  diff_sptr type_diff = vd->type_diff();
+
+  cat = type_diff->get_local_category();
+  if (is_harmful_category(cat))
+    return cat;
+
+  return NO_CHANGE_CATEGORY;
+}
+
+/// Test if diff node carries a harmful local change to a variable.
+///
+/// @param d the diff node to consider.
+///
+/// @return the @ref diff_category of the harmful local change or zero
+/// if the diff node carries no harmful local change.
+diff_category
+has_var_harmful_local_change(const diff_sptr& d)
+{return has_var_harmful_local_change(d.get());}
+
+/// Test if a diff node carries an incompatible ABI change.
+///
+/// An incompatible ABI change is a harmful ABI change (i.e, one that
+/// cannot be filtered out) that definitely makes the new ABI
+/// incompatible with the previous one.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p d carries an incompatible ABI change.
+bool
+has_incompatible_fn_or_var_change(const diff* d)
+{
+  return (has_fn_return_or_parm_harmful_change(d)
+	  || has_fn_with_virtual_offset_change(d)
+	  || has_var_harmful_local_change(d));
+}
+
+/// Test if a diff node carries an incompatible ABI change.
+///
+/// An incompatible ABI change is a harmful ABI change (i.e, one that
+/// cannot be filtered out) that definitely makes the new ABI
+/// incompatible with the previous one.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p d carries an incompatible ABI change.
+bool
+has_incompatible_fn_or_var_change(const diff_sptr& d)
+{return has_incompatible_fn_or_var_change(d.get());}
+
+/// Test if a diff node carries a change where a type T is modified
+/// into an anonymous type T' of the same size which contains a data
+/// member of the same type as T.
+///
+/// T and T' are thus said to be compatible.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p d carriesa change where a type T is modified
+/// into an anonymous type T' of the same size which contains a data
+/// member of the same type as T.
+bool
+is_type_to_compatible_anonymous_type_change(const diff_sptr& d)
+{return is_type_to_compatible_anonymous_type_change(d.get());}
+
+/// Test if a diff node carries a change where a type T is modified
+/// into an anonymous type T' of the same size which contains a data
+/// member of the same type as T.
+///
+/// T and T' are thus said to be compatible.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p d carriesa change where a type T is modified
+/// into an anonymous type T' of the same size which contains a data
+/// member of the same type as T.
+bool
+is_type_to_compatible_anonymous_type_change(const diff* d)
+{
+  type_base_sptr fs = is_type(d->first_subject());
+  type_base_sptr ss = is_type(d->second_subject());
+
+  return is_type_to_compatible_anonymous_type_change(fs, ss);
+}
+
+/// Test if a type 'F' is modified into an anonymous type 'S' of the
+/// same size which contains a data member of the same type as 'F'.
+///
+/// F and S are thus said to be compatible.
+///
+/// @param F the first type to consider.
+///
+/// @param S the second version of type @p S to consider.
+///
+/// @return true iff @p 'F' is modified into an anonymous type 'S' of
+/// the same size which contains a data member of the same type as
+/// 'F'.
+bool
+is_type_to_compatible_anonymous_type_change(const type_base_sptr& f,
+					    const type_base_sptr& s)
+
+{
+  if (!f || !s)
+    return false;
+
+  if (is_anonymous_type(f) || !is_anonymous_type(s))
+    return false;
+
+  class_or_union_sptr second_cou = is_class_or_union_type(s);
+  if (!second_cou)
+    return false;
+
+  if (f->get_size_in_bits() != second_cou->get_size_in_bits()
+      || f->get_alignment_in_bits() != second_cou->get_alignment_in_bits())
+    return false;
+
+  string_decl_base_sptr_map non_anonymous_dms_in_second_class;
+  collect_non_anonymous_data_members(second_cou,
+				       non_anonymous_dms_in_second_class);
+  for (const auto& entry : non_anonymous_dms_in_second_class)
+    if (var_decl_sptr dm = is_data_member(entry.second))
+      if (type_base_sptr t = dm->get_type())
+	if (types_are_compatible(f, t))
+	return true;
+
+  return false;
+}
+
+/// Test if a diff node carries a change where a data member F is
+/// modified into an anonymous data member S that contains F at the
+/// same offset.
+///
+/// F and S are thus said to be compatible.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p d carries a change where a data member F is
+/// modified into an anonymous data member S that contains F at the
+/// same offset.
+bool
+is_data_member_to_compatible_anonymous_dm_change(const diff* d)
+{
+  var_decl_sptr f_dm = is_data_member(d->first_subject());
+  var_decl_sptr s_dm = is_data_member(d->second_subject());
+  return is_data_member_to_compatible_anonymous_dm_change(f_dm, s_dm);
+}
+
+/// Test if a diff node carries a change where a data member F is
+/// modified into an anonymous data member S that contains F at the
+/// same offset.
+///
+/// F and S are thus said to be compatible.
+///
+/// @param d the diff node to consider.
+///
+/// @return true iff @p d carries a change where a data member F is
+/// modified into an anonymous data member S that contains F at the
+/// same offset.
+bool
+is_data_member_to_compatible_anonymous_dm_change(const diff_sptr& d)
+{return is_data_member_to_compatible_anonymous_dm_change(d.get());}
+
+/// Test if a data member F is modified into an anonymous data member
+/// S that contains F at the same offset.
+///
+/// F and S are thus said to be compatible.
+///
+/// @param f the first data member to consider.
+///
+/// @param s the second data member to consider.
+///
+/// @return true iff @p f is modified into @p s that contains F at the
+/// same offset.
+bool
+is_data_member_to_compatible_anonymous_dm_change(const decl_base_sptr& f,
+						 const decl_base_sptr& s)
+{
+  var_decl_sptr f_dm = is_data_member(f);
+  var_decl_sptr s_dm = is_data_member(s);
+
+  if (!f_dm || !s_dm)
+    return false;
+
+  if (is_anonymous_data_member(f_dm)
+      || !is_anonymous_data_member(s_dm)
+      || get_data_member_offset(f_dm) != get_data_member_offset(s_dm))
+    return false;
+
+  string_decl_base_sptr_map non_anonymous_dms_in_second_dm;
+  class_or_union_sptr cou = anonymous_data_member_to_class_or_union(s_dm);
+  ABG_ASSERT(cou);
+  collect_non_anonymous_data_members(cou, non_anonymous_dms_in_second_dm);
+
+  for (const auto& entry : non_anonymous_dms_in_second_dm)
+    if (var_decl_sptr dm = is_data_member(entry.second))
+      if (types_are_compatible(f_dm->get_type(), dm->get_type()))
+	return true;
 
   return false;
 }
@@ -1643,8 +2580,102 @@ has_var_type_cv_qual_change(const diff* dif)
   if (!type_dif)
     return false;
 
-  return type_diff_has_cv_qual_change_only(type_dif);
+  return type_diff_has_typedef_cv_qual_change_only(type_dif);
 }
+
+/// Test if a type change is a "void pointer to pointer" change.
+///
+/// @param f the first version of the type.
+///
+/// @param s the second version of the type.
+///
+/// @return true iff the type change is a "void pointer to pointer"
+/// change.
+static bool
+is_void_ptr_to_ptr(const type_base* f, const type_base* s)
+{
+  if (is_void_pointer_type_equivalent(f)
+      && is_pointer_type(s)
+      && !is_void_pointer_type_equivalent(s)
+      && ((f->get_size_in_bits() == 0)
+	  || (f->get_size_in_bits() == s->get_size_in_bits())))
+    return true;
+
+  return false;
+}
+
+/// Test if a pair of types represents a "void-to-non-void" change.
+///
+/// The test looks through potential typedefs.
+///
+/// @param f the first type to consider.
+///
+/// @param s the second type to consider.
+///
+/// @return true iff the pair of types represents a void-to-non-void
+/// type change.
+static bool
+is_void_to_non_void(const type_base* f, const type_base* s)
+{
+  f = peel_typedef_type(f);
+  s = peel_typedef_type(s);
+
+  if (!f || !s)
+    return false;
+
+  const environment& env = f->get_environment();
+  if (env.is_void_type(f) &&  !env.is_void_type(s))
+    return true;
+
+  return false;
+}
+
+/// Test if a pair of types represents a "void-to-non-void" change.
+///
+/// The test looks through potential typedefs.
+///
+/// @param f the first type to consider.
+///
+/// @param s the second type to consider.
+///
+/// @return true iff the pair of types represents a void-to-non-void
+/// type change.
+static bool
+is_void_to_non_void(const type_base_sptr& f, const type_base_sptr s)
+{return is_void_to_non_void(f.get(), s.get());}
+
+/// Test if a diff node carries a "void-to-non-void" type change
+///
+/// The test looks through potential typedefs.
+///
+/// @param f the first type to consider.
+///
+/// @param s the second type to consider.
+///
+/// @return true iff the pair of types represents a void-to-non-void
+/// type change.
+bool
+has_void_to_non_void_change(const diff* d)
+{
+  type_base_sptr f = is_type(d->first_subject());
+  type_base_sptr s = is_type(d->second_subject());
+
+  return is_void_to_non_void(f, s);
+}
+
+/// Test if a diff node carries a "void-to-non-void" type change
+///
+/// The test looks through potential typedefs.
+///
+/// @param f the first type to consider.
+///
+/// @param s the second type to consider.
+///
+/// @return true iff the pair of types represents a void-to-non-void
+/// type change.
+bool
+has_void_to_non_void_change(const diff_sptr& d)
+{return has_void_to_non_void_change(d.get());}
 
 /// Test if a diff node carries a void* to pointer type change.
 ///
@@ -1654,7 +2685,7 @@ has_var_type_cv_qual_change(const diff* dif)
 /// @param dif the diff node to consider.
 ///
 /// @return true iff @p dif carries a void* to pointer type change.
-static bool
+bool
 has_void_ptr_to_ptr_change(const diff* dif)
 {
   dif = peel_typedef_diff(dif);
@@ -1667,10 +2698,7 @@ has_void_ptr_to_ptr_change(const diff* dif)
       f = peel_qualified_or_typedef_type(f);
       s = peel_qualified_or_typedef_type(s);
 
-      if (is_void_pointer_type_equivalent(f)
-	  && is_pointer_type(s)
-	  && !is_void_pointer_type_equivalent(s)
-	  && f->get_size_in_bits() == s->get_size_in_bits())
+      if (is_void_ptr_to_ptr(f, s) || is_void_ptr_to_ptr(s, f))
 	return true;
     }
   else if (const pointer_diff *d = is_pointer_diff(dif))
@@ -1681,10 +2709,7 @@ has_void_ptr_to_ptr_change(const diff* dif)
       f = peel_qualified_or_typedef_type(f);
       s = peel_qualified_or_typedef_type(s);
 
-      if (is_void_pointer_type_equivalent(f)
-	  && is_pointer_type(s)
-	  && !is_void_pointer_type_equivalent(s)
-	  && f->get_size_in_bits() == s->get_size_in_bits())
+      if (is_void_ptr_to_ptr(f, s) || is_void_ptr_to_ptr(s, f))
 	return true;
     }
   else if (const qualified_type_diff *d = is_qualified_type_diff(dif))
@@ -1695,10 +2720,7 @@ has_void_ptr_to_ptr_change(const diff* dif)
       f = peel_qualified_or_typedef_type(f);
       s = peel_qualified_or_typedef_type(s);
 
-      if (is_void_pointer_type_equivalent(f)
-	  && is_pointer_type(s)
-	  && !is_void_pointer_type_equivalent(s)
-	  && f->get_size_in_bits() == s->get_size_in_bits())
+      if (is_void_ptr_to_ptr(f, s) || is_void_ptr_to_ptr(s, f))
 	return true;
     }
 
@@ -1717,7 +2739,7 @@ has_void_ptr_to_ptr_change(const diff* dif)
 /// @param dif the diff node to consider.
 ///
 /// @return true iff @p dif contains the benign array type size change.
-static bool
+bool
 has_benign_array_of_unknown_size_change(const diff* dif)
 {
   return is_var_1_dim_unknown_size_array_change(dif);
@@ -1741,8 +2763,72 @@ union_diff_has_harmless_changes(const diff *d)
   return false;
 }
 
+/// Test if a diff node carries a change that is categorized as
+/// "harmful".
+///
+/// A harmful change is a change that is not harmless.  OK, that
+/// smells bit like a tasteless tautology, but bear with me please.
+///
+/// A harmless change is a change that should be filtered out by
+/// default to avoid unnecessarily cluttering the change report.
+///
+/// A harmful change is thus a change that SHOULD NOT be filtered out
+/// by default because it CAN represent an incompatible ABI change.
+///
+/// An incompatbile ABI change is a harmful change that makes the new
+/// ABI incompatible with the previous one.
+///
+/// @return the category of the harmful changes carried by the diff
+/// node or zero if the change carries no harmful change.
+static diff_category
+has_harmful_change(const diff* d)
+{
+  diff_category category = NO_CHANGE_CATEGORY;
+  decl_base_sptr f = is_decl(d->first_subject()),
+    s = is_decl(d->second_subject());
+
+  // Detect size or offset changes as well as data member addition
+  // or removal.
+  if (!has_class_decl_only_def_change(d)
+      && !has_enum_decl_only_def_change(d)
+      && (has_type_size_change_with_impact(d)
+	  || type_has_offset_changes(f, s)
+	  || data_member_offset_changed(f, s)
+	  || non_static_data_member_type_size_changed_with_impact(f, s)
+	  || non_static_data_member_added_or_removed_with_impact(d)
+	  || base_classes_removed(d)
+	  || has_harmful_enum_change(d)
+	  || crc_changed(d)
+	  || namespace_changed(d)))
+    category |= SIZE_OR_OFFSET_CHANGE_CATEGORY;
+
+  if (has_virtual_mem_fn_change(d))
+    category |= VIRTUAL_MEMBER_CHANGE_CATEGORY;
+
+  if (has_lvalue_reference_ness_change(d))
+    category |= REFERENCE_LVALUENESS_CHANGE_CATEGORY;
+
+  if (has_added_or_removed_function_parameters(d))
+    category |= FN_PARM_ADD_REMOVE_CHANGE_CATEGORY;
+
+  if (is_non_compatible_distinct_change(d))
+    category |= NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY;
+
+  if (has_harmful_name_change(d))
+    category |= NON_COMPATIBLE_NAME_CHANGE_CATEGORY;
+
+  return category;
+}
+
 /// Detect if the changes carried by a given diff node are deemed
 /// harmless and do categorize the diff node accordingly.
+///
+/// A harmless change is a change that ought to be filtered out by
+/// default from the change report.  Filtering out harmless changes is
+/// to avoid unnecessarily cluttering the change report.
+///
+/// A change is not harmless is a harmful node.  Note that harmful
+/// diff nodes are categorized by @ref categorize_harmful_diff_node.
 ///
 /// @param d the diff node being visited.
 ///
@@ -1774,12 +2860,13 @@ categorize_harmless_diff_node(diff *d, bool pre)
       if (is_compatible_change(f, s))
 	category |= COMPATIBLE_TYPE_CHANGE_CATEGORY;
 
-      if (has_harmless_name_change(f, s)
+      if (has_harmless_name_change(f, s, d->context())
 	  || class_diff_has_harmless_odr_violation_change(d))
 	category |= HARMLESS_DECL_NAME_CHANGE_CATEGORY;
 
-      if (union_diff_has_harmless_changes(d))
-	category |= HARMLESS_UNION_CHANGE_CATEGORY;
+      if (union_diff_has_harmless_changes(d)
+	  || class_diff_has_only_harmless_changes(d))
+	category |= HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY;
 
       if (has_non_virtual_mem_fn_change(d))
 	category |= NON_VIRT_MEM_FUN_CHANGE_CATEGORY;
@@ -1791,9 +2878,7 @@ categorize_harmless_diff_node(diff *d, bool pre)
       if (has_data_member_replaced_by_anon_dm(d))
 	category |= HARMLESS_DATA_MEMBER_CHANGE_CATEGORY;
 
-      if ((has_enumerator_insertion(d)
-	   && !has_harmful_enum_change(d))
-	  || has_harmless_enum_to_int_change(d))
+      if (has_harmless_enum_change(d))
 	category |= HARMLESS_ENUM_CHANGE_CATEGORY;
 
       if (function_name_changed_but_not_symbol(d))
@@ -1832,6 +2917,21 @@ categorize_harmless_diff_node(diff *d, bool pre)
 /// Detect if the changes carried by a given diff node are deemed
 /// harmful and do categorize the diff node accordingly.
 ///
+/// A harmful change is a change that is not harmless.  OK, that
+/// smells bit like a tasteless tautology, but bear with me please.
+///
+/// A harmless change is a change that should be filtered out by
+/// default to avoid unnecessarily cluttering the change report.
+///
+/// A harmful change is thus a change that SHOULD NOT be filtered out
+/// by default because it CAN represent an incompatible ABI change.
+///
+/// An incompatbile ABI change is a harmful change that makes the new
+/// ABI incompatible with the previous one.
+///
+/// Note that harmless diff nodes are categorized by
+/// @ref categorize_harmless_diff_node.
+///
 /// @param d the diff node being visited.
 ///
 /// @param pre this is true iff the node is being visited *before* the
@@ -1848,30 +2948,7 @@ categorize_harmful_diff_node(diff *d, bool pre)
   if (pre)
     {
       diff_category category = NO_CHANGE_CATEGORY;
-      decl_base_sptr f = is_decl(d->first_subject()),
-	s = is_decl(d->second_subject());
-
-      // Detect size or offset changes as well as data member addition
-      // or removal.
-      //
-      // TODO: be more specific -- not all size changes are harmful.
-      if (!has_class_decl_only_def_change(d)
-	  && !has_enum_decl_only_def_change(d)
-	  && (type_size_changed(f, s)
-	      || data_member_offset_changed(f, s)
-	      || non_static_data_member_type_size_changed(f, s)
-	      || non_static_data_member_added_or_removed(d)
-	      || base_classes_added_or_removed(d)
-	      || has_harmful_enum_change(d)
-	      || crc_changed(d)
-	      || namespace_changed(d)))
-	category |= SIZE_OR_OFFSET_CHANGE_CATEGORY;
-
-      if (has_virtual_mem_fn_change(d))
-	category |= VIRTUAL_MEMBER_CHANGE_CATEGORY;
-
-      if (has_added_or_removed_function_parameters(d))
-	category |= FN_PARM_ADD_REMOVE_CHANGE_CATEGORY;
+      category = has_harmful_change(d);
 
       if (category)
 	{

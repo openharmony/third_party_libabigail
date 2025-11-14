@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -23,7 +23,6 @@
 #include <unordered_map>
 #include "abg-cxx-compat.h"
 #include "abg-fwd.h"
-#include "abg-hash.h"
 #include "abg-traverse.h"
 #include "abg-config.h"
 
@@ -98,6 +97,15 @@ using std::unordered_map;
 
 /// A convenience typedef for an unordered set of pointer values
 typedef unordered_set<uintptr_t> pointer_set;
+
+/// The abstraction for an 8 bytes hash value.
+///
+/// As this is an optional uint64_t value, it allows the represent
+/// empty hash values.
+typedef abg_compat::optional<uint64_t> hash_t;
+
+hash_t
+peek_hash_value(const type_or_decl_base&);
 
 /// Functor to hash a canonical type by using its pointer value.
 struct canonical_type_hash
@@ -178,10 +186,10 @@ public:
   canonicalization_is_done(bool);
 
   bool
-  do_on_the_fly_canonicalization() const;
+  canonicalization_started() const;
 
   void
-  do_on_the_fly_canonicalization(bool f);
+  canonicalization_started(bool);
 
   bool
   decl_only_class_equals_definition() const;
@@ -251,7 +259,7 @@ public:
   debug_die_canonicalization_is_on() const;
 #endif
 
-  vector<type_base_sptr>* get_canonical_types(const char* name);
+  const vector<type_base_sptr>* get_canonical_types(const char* name) const;
 
   type_base* get_canonical_type(const char* name, unsigned index);
 
@@ -470,38 +478,6 @@ struct ir_traversable_base : public traversable_base
   traverse(ir_node_visitor& v);
 }; // end class ir_traversable_base
 
-/// The hashing functor for using instances of @ref type_or_decl_base
-/// as values in a hash map or set.
-struct type_or_decl_hash
-{
-
-  /// Function-call Operator to hash the string representation of an
-  /// ABI artifact.
-  ///
-  /// @param artifact the ABI artifact to hash.
-  ///
-  /// @return the hash value of the string representation of @p
-  /// artifact.
-  size_t
-  operator()(const type_or_decl_base *artifact) const
-  {
-    string repr =  get_pretty_representation(artifact);
-    std::hash<string> do_hash;
-    return do_hash(repr);
-  }
-
-  /// Function-call Operator to hash the string representation of an
-  /// ABI artifact.
-  ///
-  /// @param artifact the ABI artifact to hash.
-  ///
-  /// @return the hash value of the string representation of @p
-  /// artifact.
-  size_t
-  operator()(const type_or_decl_base_sptr& artifact) const
-  {return operator()(artifact.get());}
-}; // end struct type_or_decl_hash
-
 /// The comparison functor for using instances of @ref
 /// type_or_decl_base as values in a hash map or set.
 struct type_or_decl_equal
@@ -544,6 +520,39 @@ struct type_or_decl_equal
   {return operator()(l.get(), r.get());}
 }; // end type_or_decl_equal
 
+/// The hashing functor for using instances of @ref type_or_decl_base
+/// as values in a hash map or set.
+struct type_or_decl_hash
+{
+
+  /// Function-call Operator to hash the string representation of an
+  /// ABI artifact.
+  ///
+  /// @param artifact the ABI artifact to hash.
+  ///
+  /// @return the hash value of the string representation of @p
+  /// artifact.
+  size_t
+  operator()(const type_or_decl_base *artifact) const
+  {
+    string repr =  get_pretty_representation(artifact);
+    std::hash<string> do_hash;
+    return do_hash(repr);
+  }
+
+  /// Function-call Operator to hash the string representation of an
+  /// ABI artifact.
+  ///
+  /// @param artifact the ABI artifact to hash.
+  ///
+  /// @return the hash value of the string representation of @p
+  /// artifact.
+  size_t
+  operator()(const type_or_decl_base_sptr& artifact) const
+  {return operator()(artifact.get());}
+}; // end struct type_or_decl_hash
+
+
 /// A convenience typedef for a hash set of type_or_decl_base_sptr
 typedef unordered_set<type_or_decl_base_sptr,
 		      type_or_decl_hash,
@@ -573,6 +582,14 @@ typedef unordered_map<interned_string,
 		      type_or_decl_base_sptr,
 		      hash_interned_string>
 istring_type_or_decl_base_sptr_map_type;
+
+typedef unordered_map<interned_string,
+		      const function_decl*,
+		      hash_interned_string> istring_function_decl_ptr_map_type;
+
+typedef unordered_map<interned_string,
+		      var_decl_sptr,
+		      hash_interned_string> istring_var_decl_ptr_map_type;
 
 /// This is a type that aggregates maps of all the kinds of types that
 /// are supported by libabigail.
@@ -638,6 +655,12 @@ public:
   pointer_types() const;
 
   istring_type_base_wptrs_map_type&
+  ptr_to_mbr_types();
+
+  const istring_type_base_wptrs_map_type&
+  ptr_to_mbr_types() const;
+
+  istring_type_base_wptrs_map_type&
   reference_types();
 
   const istring_type_base_wptrs_map_type&
@@ -689,28 +712,57 @@ public:
     LANG_C89,
     LANG_C99,
     LANG_C11,
+    LANG_C17,
+    LANG_C23,
     LANG_C,
     LANG_C_plus_plus_03,
     LANG_C_plus_plus_11,
     LANG_C_plus_plus_14,
+    LANG_C_plus_plus_17,
+    LANG_C_plus_plus_20,
+    LANG_C_plus_plus_23,
     LANG_C_plus_plus,
     LANG_ObjC,
     LANG_ObjC_plus_plus,
+    LANG_OCaml,
+    LANG_D,
+    LANG_Go,
+    LANG_Rust,
+    LANG_Zig,
+    LANG_Metal,
     LANG_Fortran77,
     LANG_Fortran90,
     LANG_Fortran95,
+    LANG_Fortran18,
+    LANG_Fortran23,
     LANG_Ada83,
     LANG_Ada95,
+    LANG_Ada2005,
+    LANG_Ada2012,
     LANG_Pascal83,
     LANG_Modula2,
     LANG_Java,
+    LANG_Kotlin,
+    LANG_C_sharp,
+    LANG_Python,
+    LANG_Ruby,
     LANG_PLI,
     LANG_UPC,
-    LANG_D,
-    LANG_Python,
-    LANG_Go,
-    LANG_Rust,
-    LANG_Mips_Assembler
+    LANG_Mips_Assembler,
+    LANG_Assembly,
+    LANG_Crystal,
+    LANG_HIP,
+    LANG_Mojo,
+    LANG_GLSL,
+    LANG_GLSL_ES,
+    LANG_HLSL,
+    LANG_OpenCL_CPP,
+    LANG_CPP_for_OpenCL,
+    LANG_SYCL,
+    LANG_Odin,
+    LANG_P4,
+    LANG_Move,
+    LANG_Hylo
   };
 
 public:
@@ -1310,12 +1362,12 @@ enum change_kind
   NO_CHANGE_KIND = 0,
 
   /// This means that a given IR artifact has a local type change.
-  LOCAL_TYPE_CHANGE_KIND = 1 << 0,
+  LOCAL_TYPE_CHANGE_KIND = 1 << 1,
 
   /// This means that a given IR artifact has a local non-type change.
   /// That is a change that is carried by the artifact itself, not by
   /// its type.
-  LOCAL_NON_TYPE_CHANGE_KIND = 1 << 1,
+  LOCAL_NON_TYPE_CHANGE_KIND = 1 << 2,
 
   /// Testing (anding) against this mask means that a given IR artifact has
   /// local differences, with respect to the other artifact it was compared
@@ -1326,7 +1378,7 @@ enum change_kind
   /// This means that a given IR artifact has changes in some of its
   /// sub-types, with respect to the other artifact it was compared
   /// against.
-  SUBTYPE_CHANGE_KIND = 1 << 2,
+  SUBTYPE_CHANGE_KIND = 1 << 3,
 };// end enum change_kind
 
 change_kind
@@ -1353,12 +1405,10 @@ equals(const decl_base&, const decl_base&, change_kind*);
 class type_or_decl_base : public ir_traversable_base
 {
   struct priv;
-  mutable std::unique_ptr<priv> priv_;
-
   type_or_decl_base();
   type_or_decl_base(const type_or_decl_base&);
 
-protected:
+public:
 
   /// This is a bitmap type which instance is meant to contain the
   /// runtime type of a given ABI artifact.  Bits of the identifiers
@@ -1379,21 +1429,24 @@ protected:
     ABSTRACT_TYPE_BASE = 1 << 9,
     ABSTRACT_SCOPE_TYPE_DECL = 1 << 10,
     BASIC_TYPE = 1 << 11,
-    QUALIFIED_TYPE = 1 << 12,
-    POINTER_TYPE = 1 << 13,
-    REFERENCE_TYPE = 1 << 14,
-    ARRAY_TYPE = 1 << 15,
-    ENUM_TYPE = 1 << 16,
-    TYPEDEF_TYPE = 1 << 17,
-    CLASS_TYPE = 1 << 18,
-    UNION_TYPE = 1 << 19,
-    FUNCTION_TYPE = 1 << 20,
-    METHOD_TYPE = 1 << 21,
+    SUBRANGE_TYPE = 1 << 12,
+    QUALIFIED_TYPE = 1 << 13,
+    POINTER_TYPE = 1 << 14,
+    REFERENCE_TYPE = 1 << 15,
+    POINTER_TO_MEMBER_TYPE = 1 << 16,
+    ARRAY_TYPE = 1 << 17,
+    ENUM_TYPE = 1 << 18,
+    TYPEDEF_TYPE = 1 << 19,
+    CLASS_TYPE = 1 << 20,
+    UNION_TYPE = 1 << 21,
+    FUNCTION_TYPE = 1 << 22,
+    METHOD_TYPE = 1 << 23,
   }; // end enum type_or_decl_kind
 
   enum type_or_decl_kind
   kind() const;
 
+protected:
   void
   kind(enum type_or_decl_kind);
 
@@ -1412,14 +1465,17 @@ protected:
   void*
   type_or_decl_base_pointer();
 
-  bool hashing_started() const;
+  virtual hash_t
+  hash_value() const;
 
-  void hashing_started(bool) const;
+  void
+  set_hash_value(hash_t) const;
 
   type_or_decl_base&
   operator=(const type_or_decl_base&);
 
 public:
+  mutable std::unique_ptr<priv> priv_;
 
   type_or_decl_base(const environment&,
 		    enum type_or_decl_kind k = ABSTRACT_TYPE_OR_DECL);
@@ -1485,14 +1541,18 @@ public:
   friend class_decl*
   is_class_type(const type_or_decl_base*);
 
-  friend pointer_type_def*
-  is_pointer_type(type_or_decl_base*);
-
   friend type_base*
   is_type(const type_or_decl_base*);
 
   friend decl_base*
   is_decl(const type_or_decl_base* d);
+
+  friend hash_t
+  peek_hash_value(const type_or_decl_base&);
+
+ template<typename T>
+ friend hash_t
+ set_or_get_cached_hash_value(const T& type_or_decl);
 }; // end class type_or_decl_base
 
 type_or_decl_base::type_or_decl_kind
@@ -1584,12 +1644,6 @@ public:
   set_scope(scope_decl*);
 
 protected:
-  const context_rel*
-  get_context_rel() const;
-
-  context_rel*
-  get_context_rel();
-
   void
   set_context_rel(context_rel *c);
   decl_base(const decl_base&);
@@ -1609,6 +1663,15 @@ public:
 
   decl_base(const environment&, const location&);
 
+  const context_rel*
+  get_context_rel() const;
+
+  context_rel*
+  get_context_rel();
+
+  const interned_string&
+  get_cached_pretty_representation(bool internal = false) const;
+
   virtual bool
   operator==(const decl_base&) const;
 
@@ -1619,9 +1682,6 @@ public:
   traverse(ir_node_visitor& v);
 
   virtual ~decl_base();
-
-  virtual size_t
-  get_hash() const;
 
   virtual string
   get_pretty_representation(bool internal = false,
@@ -1649,13 +1709,13 @@ public:
   void
   set_location(const location& l);
 
-  const interned_string&
+  virtual const interned_string&
   get_name() const;
 
   const interned_string&
   get_qualified_parent_name() const;
 
-  void
+  virtual void
   set_name(const string& n);
 
   bool
@@ -1762,9 +1822,6 @@ public:
   friend bool
   get_member_function_is_virtual(const function_decl& f);
 
-  friend void
-  set_member_function_is_virtual(function_decl&, bool);
-
   friend class class_or_union;
   friend class class_decl;
   friend class scope_decl;
@@ -1819,16 +1876,12 @@ protected:
   remove_member_decl(decl_base_sptr member);
 
 public:
-  struct hash;
 
   scope_decl(const environment& env,
 	     const string& name, const location& locus,
 	     visibility	vis = VISIBILITY_DEFAULT);
 
   scope_decl(const environment& env, location& l);
-
-  virtual size_t
-  get_hash() const;
 
   virtual bool
   operator==(const decl_base&) const;
@@ -1920,16 +1973,6 @@ operator==(const scope_decl_sptr&, const scope_decl_sptr&);
 bool
 operator!=(const scope_decl_sptr&, const scope_decl_sptr&);
 
-/// Hasher for the @ref scope_decl type.
-struct scope_decl::hash
-{
-  size_t
-  operator()(const scope_decl& d) const;
-
-  size_t
-  operator()(const scope_decl* d) const;
-};
-
 /// This abstracts the global scope of a given translation unit.
 ///
 /// Only one instance of this class must be present in a given
@@ -1984,22 +2027,14 @@ protected:
 
 public:
 
-  /// A hasher for type_base types.
   struct hash;
-
-  /// A hasher for types.  It gets the dynamic type of the current
-  /// instance of type and hashes it accordingly.  Note that the hashing
-  /// function of this hasher must be updated each time a new kind of
-  /// type is added to the IR.
-  struct dynamic_hash;
-
-  /// A hasher for shared_ptr<type_base> that will hash it based on the
-  /// runtime type of the type pointed to.
-  struct shared_ptr_hash;
 
   type_base(const environment& e, size_t s, size_t a);
 
-  friend type_base_sptr canonicalize(type_base_sptr);
+  virtual hash_t
+  hash_value() const;
+
+  friend type_base_sptr canonicalize(type_base_sptr, bool, bool);
 
   type_base_sptr
   get_canonical_type() const;
@@ -2034,18 +2069,6 @@ public:
   get_alignment_in_bits() const;
 };//end class type_base
 
-/// Hash functor for instances of @ref type_base.
-struct type_base::hash
-{
-  size_t
-  operator()(const type_base& t) const;
-
-  size_t
-  operator()(const type_base* t) const;
-
-  size_t
-  operator()(const type_base_sptr t) const;
-}; // end struct type_base::hash
 
 /// A predicate for deep equality of instances of
 /// type_base*
@@ -2109,6 +2132,9 @@ public:
 	    const string&	mangled_name = "",
 	    visibility		vis = VISIBILITY_DEFAULT);
 
+  virtual hash_t
+  hash_value() const;
+
   virtual bool
   operator==(const type_base&) const;
 
@@ -2159,9 +2185,6 @@ class scope_type_decl : public scope_decl, public virtual type_base
   scope_type_decl();
 
 public:
-
-  /// Hasher for instances of scope_type_decl
-  struct hash;
 
   scope_type_decl(const environment& env, const string& name,
 		  size_t size_in_bits, size_t alignment_in_bits,
@@ -2239,6 +2262,9 @@ public:
   qualified_type_def(type_base_sptr type, CV quals, const location& locus);
 
   qualified_type_def(const environment& env, CV quals, const location& locus);
+
+  virtual hash_t
+  hash_value() const;
 
   virtual size_t
   get_size_in_bits() const;
@@ -2342,6 +2368,9 @@ public:
   pointer_type_def(const environment& env, size_t size_in_bits,
 		   size_t alignment_in_bits, const location& locus);
 
+  virtual hash_t
+  hash_value() const;
+
   void
   set_pointed_to_type(const type_base_sptr&);
 
@@ -2406,6 +2435,9 @@ public:
   reference_type_def(const environment& env, bool lvalue, size_t size_in_bits,
 		     size_t alignment_in_bits, const location& locus);
 
+  virtual hash_t
+  hash_value() const;
+
   void
   set_pointed_to_type(type_base_sptr& pointed_to_type);
 
@@ -2446,6 +2478,67 @@ operator==(const reference_type_def_sptr&, const reference_type_def_sptr&);
 
 bool
 operator!=(const reference_type_def_sptr&, const reference_type_def_sptr&);
+
+/// The abstraction of a pointer-to-member type.
+class ptr_to_mbr_type : public virtual type_base,
+			public virtual decl_base
+{
+  struct priv;
+  std::unique_ptr<priv> priv_;
+
+  // Forbidden
+  ptr_to_mbr_type() = delete;
+
+  public:
+
+  /// Hasher for instances of @ref ptr_to_mbr_type;
+  struct hash;
+
+  ptr_to_mbr_type(const environment&		env,
+		  const type_base_sptr&	member_type,
+		  const type_base_sptr&	containing_type,
+		  size_t			size_in_bits,
+		  size_t			alignment_in_bits,
+		  const location&		locus);
+
+  virtual const interned_string&
+  get_name() const;
+
+  virtual hash_t
+  hash_value() const;
+
+  const type_base_sptr&
+  get_member_type() const;
+
+  const type_base_sptr&
+  get_containing_type() const;
+
+  bool
+  operator==(const ptr_to_mbr_type&) const;
+
+  virtual bool
+  operator==(const type_base&) const;
+
+  virtual bool
+  operator==(const decl_base&) const;
+
+  virtual void
+  get_qualified_name(interned_string& qualified_name,
+		     bool internal = false) const;
+
+  virtual const interned_string&
+  get_qualified_name(bool internal = false) const;
+
+  virtual bool
+  traverse(ir_node_visitor& v);
+
+  virtual ~ptr_to_mbr_type();
+}; // end class ptr_to_mbr_type
+
+bool
+equals(const ptr_to_mbr_type&,
+       const ptr_to_mbr_type&,
+       change_kind*);
 
 bool
 equals(const array_type_def&, const array_type_def&, change_kind*);
@@ -2546,6 +2639,9 @@ public:
 		  const location& loc,
 		  translation_unit::language l = translation_unit::LANG_C11);
 
+    virtual hash_t
+    hash_value() const;
+
     type_base_sptr
     get_underlying_type() const;
 
@@ -2568,10 +2664,10 @@ public:
     get_length() const;
 
     bool
-    is_infinite() const;
+    is_non_finite() const;
 
     void
-    is_infinite(bool);
+    is_non_finite(bool);
 
     translation_unit::language
     get_language() const;
@@ -2616,6 +2712,9 @@ public:
 		 const std::vector<subrange_sptr>& subs,
 		 const location& locus);
 
+  virtual hash_t
+  hash_value() const;
+
   translation_unit::language
   get_language() const;
 
@@ -2645,7 +2744,7 @@ public:
   get_dimension_count() const;
 
   virtual bool
-  is_infinite() const;
+  is_non_finite() const;
 
   virtual string
   get_pretty_representation(bool internal = false,
@@ -2722,6 +2821,9 @@ public:
 		 const string&		mangled_name = "",
 		 visibility		vis = VISIBILITY_DEFAULT);
 
+  virtual hash_t
+  hash_value() const;
+
   type_base_sptr
   get_underlying_type() const;
 
@@ -2733,6 +2835,14 @@ public:
 
   enumerators&
   get_enumerators();
+
+  bool
+  find_enumerator_by_value(int64_t value,
+			   enum_type_decl::enumerator& result);
+
+  bool
+  find_enumerator_by_name(const string& name,
+			  enum_type_decl::enumerator& result);
 
   virtual string
   get_pretty_representation(bool internal = false,
@@ -2846,6 +2956,9 @@ public:
 	       const string& mangled_name = "",
 	       visibility vis = VISIBILITY_DEFAULT);
 
+  virtual hash_t
+  hash_value() const;
+
   virtual size_t
   get_size_in_bits() const;
 
@@ -2939,6 +3052,17 @@ var_equals_modulo_types(const var_decl&, const var_decl&, change_kind*);
 bool
 equals_modulo_cv_qualifier(const array_type_def*, const array_type_def*);
 
+bool
+equals_modulo_cv_qualifier(const array_type_def_sptr& l,
+			   const array_type_def_sptr& r);
+
+bool
+equals_modulo_cv_qualifier(const pointer_type_def*, const pointer_type_def*);
+
+bool
+equals_modulo_cv_qualifier(const pointer_type_def_sptr&,
+			   const pointer_type_def_sptr&);
+
 /// Abstracts a variable declaration.
 class var_decl : public virtual decl_base
 {
@@ -2952,9 +3076,6 @@ class var_decl : public virtual decl_base
   set_scope(scope_decl*);
 
 public:
-
-  /// Hasher for a var_decl type.
-  struct hash;
 
   /// Equality functor to compare pointers to variable_decl.
   struct ptr_equal;
@@ -2998,9 +3119,6 @@ public:
 
   virtual const interned_string&
   get_qualified_name(bool internal = false) const;
-
-  virtual size_t
-  get_hash() const;
 
   virtual string
   get_pretty_representation(bool internal = false,
@@ -3057,8 +3175,6 @@ class function_decl : public virtual decl_base
   priv* priv_;
 
 public:
-  /// Hasher for function_decl
-  struct hash;
 
   /// Equality functor to compare pointers to function_decl
   struct ptr_equal;
@@ -3129,6 +3245,9 @@ public:
   bool
   is_declared_inline() const;
 
+  void
+  is_declared_inline(bool);
+
   binding
   get_binding() const;
 
@@ -3145,9 +3264,6 @@ public:
   /// of parameters.
   bool
   is_variadic() const;
-
-  virtual size_t
-  get_hash() const;
 
   interned_string
   get_id() const;
@@ -3222,9 +3338,6 @@ class function_decl::parameter : public decl_base
 
 public:
 
-  /// Hasher for an instance of function::parameter
-  struct hash;
-
   parameter(const type_base_sptr	type,
 	    unsigned			index,
 	    const string&		name,
@@ -3280,9 +3393,6 @@ public:
   virtual bool
   traverse(ir_node_visitor& v);
 
-  virtual size_t
-  get_hash() const;
-
   virtual void
   get_qualified_name(interned_string& qualified_name,
 		     bool internal = false) const;
@@ -3295,19 +3405,6 @@ public:
 bool
 operator==(const function_decl::parameter_sptr&,
 	   const function_decl::parameter_sptr&);
-
-/// A hashing functor for a function_decl::parameter.
-struct function_decl::parameter::hash
-{
-  size_t
-  operator()(const function_decl::parameter&) const;
-
-  size_t
-  operator()(const function_decl::parameter*) const;
-
-  size_t
-  operator()(const function_decl::parameter_sptr) const;
-}; // end struct function_decl::parameter::hash
 
 function_decl::parameter*
 is_function_parameter(const type_or_decl_base*);
@@ -3355,6 +3452,9 @@ public:
 		size_t		size_in_bits,
 		size_t		alignment_in_bits);
 
+  virtual hash_t
+  hash_value() const;
+
   type_base_sptr
   get_return_type() const;
 
@@ -3401,19 +3501,6 @@ public:
   equals(const function_type&, const function_type&, change_kind*);
 };//end class function_type
 
-/// The hashing functor for @ref function_type.
-struct function_type::hash
-{
-  size_t
-  operator()(const function_type& t) const;
-
-  size_t
-  operator()(const function_type* t) const;
-
-  size_t
-  operator()(const function_type_sptr t) const;
-};// end struct function_type::hash
-
 /// Abstracts the type of a class member function.
 class method_type : public function_type
 {
@@ -3450,6 +3537,9 @@ public:
 	      size_t size_in_bits,
 	      size_t alignment_in_bits);
 
+  virtual hash_t
+  hash_value() const;
+
   class_or_union_sptr
   get_class_type() const;
 
@@ -3459,6 +3549,8 @@ public:
   void set_is_const(bool);
 
   bool get_is_const() const;
+
+  bool get_is_for_static_method() const;
 
   virtual ~method_type();
 
@@ -3479,9 +3571,6 @@ class template_decl : public virtual decl_base
   template_decl();
 
 public:
-
-  /// Hasher.
-  struct hash;
 
   template_decl(const environment&	env,
 		const string&		name,
@@ -3516,11 +3605,6 @@ class template_parameter
 
  public:
 
-  /// Hashers.
-  struct hash;
-  struct dynamic_hash;
-  struct shared_ptr_hash;
-
   template_parameter(unsigned			index,
 		     template_decl_sptr	enclosing_tdecl);
 
@@ -3536,20 +3620,8 @@ class template_parameter
   const template_decl_sptr
   get_enclosing_template_decl() const;
 
-  bool
-  get_hashing_has_started() const;
-
-  void
-  set_hashing_has_started(bool f) const;
-
   virtual ~template_parameter();
 };//end class template_parameter
-
-struct template_decl::hash
-{
-    size_t
-    operator()(const template_decl& t) const;
-};// end struct template_decl::hash
 
 /// Abstracts a type template parameter.
 class type_tparameter : public template_parameter, public virtual type_decl
@@ -3561,9 +3633,6 @@ class type_tparameter : public template_parameter, public virtual type_decl
   type_tparameter();
 
 public:
-
-  /// Hasher.
-  struct hash;
 
   type_tparameter(unsigned		index,
 		  template_decl_sptr	enclosing_tdecl,
@@ -3600,17 +3669,12 @@ class non_type_tparameter : public template_parameter, public virtual decl_base
   non_type_tparameter();
 
 public:
-  /// Hasher.
-  struct hash;
 
   non_type_tparameter(unsigned			index,
 		      template_decl_sptr	enclosing_tdecl,
 		      const string&		name,
 		      type_base_sptr		type,
 		      const location&		locus);
-  virtual size_t
-  get_hash() const;
-
   virtual bool
   operator==(const decl_base&) const;
 
@@ -3623,15 +3687,6 @@ public:
   virtual ~non_type_tparameter();
 };// end class non_type_tparameter
 
-/// Hasher for the @ref non_type_tparameter type.
-struct non_type_tparameter::hash
-{
-  size_t
-  operator()(const non_type_tparameter& t) const;
-
-  size_t
-  operator()(const non_type_tparameter* t) const;
-};
 
 class template_tparameter;
 
@@ -3645,9 +3700,6 @@ class template_tparameter : public type_tparameter, public template_decl
   template_tparameter();
 
 public:
-
-  /// A hasher for instances of template_tparameter
-  struct hash;
 
   template_tparameter(unsigned			index,
 		      template_decl_sptr	enclosing_tdecl,
@@ -3682,8 +3734,6 @@ class type_composition : public template_parameter, public virtual decl_base
   type_composition();
 
 public:
-  struct hash;
-
   type_composition(unsigned		index,
 		   template_decl_sptr	tdecl,
 		   type_base_sptr	composed_type);
@@ -3694,22 +3744,8 @@ public:
   void
   set_composed_type(type_base_sptr t);
 
-  virtual size_t
-  get_hash() const;
-
   virtual ~type_composition();
 };
-
-/// Hasher for the @ref type_composition type.
-struct type_composition::hash
-{
-  size_t
-  operator()(const type_composition& t) const;
-
-  size_t
-  operator()(const type_composition* t) const;
-
-}; //struct type_composition::hash
 
 /// Abstract a function template declaration.
 class function_tdecl : public template_decl, public scope_decl
@@ -3721,10 +3757,6 @@ class function_tdecl : public template_decl, public scope_decl
   function_tdecl();
 
 public:
-
-  /// Hash functor for function templates.
-  struct hash;
-  struct shared_ptr_hash;
 
   function_tdecl(const environment&	env,
 		 const location&	locus,
@@ -3771,10 +3803,6 @@ class class_tdecl : public template_decl, public scope_decl
 
 public:
 
-  /// Hashers.
-  struct hash;
-  struct shared_ptr_hash;
-
   class_tdecl(const environment& env, const location& locus,
 	      visibility vis = VISIBILITY_DEFAULT);
 
@@ -3818,7 +3846,6 @@ private:
   member_base();
 
 public:
-  /// Hasher.
   struct hash;
 
   member_base(access_specifier a, bool is_static = false)
@@ -3936,18 +3963,6 @@ public:
   friend ssize_t
   get_member_function_vtable_offset(const function_decl&);
 
-  friend void
-  set_member_function_vtable_offset(function_decl&, ssize_t);
-
-  friend void
-  set_member_function_vtable_offset(const function_decl_sptr&, ssize_t);
-
-  friend bool
-  get_member_function_is_virtual(const function_decl&);
-
-  friend void
-  set_member_function_is_virtual(function_decl&, bool);
-
   virtual ~method_decl();
 };// end class method_decl
 
@@ -4009,6 +4024,9 @@ public:
   class_or_union(const environment& env, const string& name,
 		 bool is_declaration_only = true);
 
+  virtual hash_t
+  hash_value() const;
+
   virtual void
   set_size_in_bits(size_t);
 
@@ -4049,6 +4067,9 @@ public:
 
   const data_members&
   get_non_static_data_members() const;
+
+  const data_members&
+  get_static_data_members() const;
 
   void
   add_member_function(method_decl_sptr f,
@@ -4149,16 +4170,6 @@ operator==(const class_or_union_sptr& l, const class_or_union_sptr& r);
 bool
 operator!=(const class_or_union_sptr& l, const class_or_union_sptr& r);
 
-/// Hasher for the @ref class_or_union type
-struct class_or_union::hash
-{
-  size_t
-  operator()(const class_or_union& t) const;
-
-  size_t
-  operator()(const class_or_union* t) const;
-}; // end struct class_decl::hash
-
 /// Abstracts a class declaration.
 class class_decl : public class_or_union
 {
@@ -4228,6 +4239,9 @@ public:
   class_decl(const environment& env, const string& name, bool is_struct,
 	     bool is_declaration_only = true);
 
+  virtual hash_t
+  hash_value() const;
+
   virtual string
   get_pretty_representation(bool internal = false,
 			    bool qualified_name = true) const;
@@ -4245,7 +4259,7 @@ public:
   get_base_specifiers() const;
 
   class_decl_sptr
-  find_base_class(const string&) const;
+  find_base_class(const string& qualified_name) const;
 
   const member_functions&
   get_virtual_mem_fns() const;
@@ -4270,9 +4284,6 @@ public:
 
   ssize_t
   get_biggest_vtable_offset() const;
-
-  virtual size_t
-  get_hash() const;
 
   virtual bool
   operator==(const decl_base&) const;
@@ -4316,16 +4327,6 @@ copy_member_function(const class_decl_sptr& clazz,
 		     const method_decl* f);
 void
 fixup_virtual_member_function(method_decl_sptr method);
-
-/// Hasher for the @ref class_decl type
-struct class_decl::hash
-{
-  size_t
-  operator()(const class_decl& t) const;
-
-  size_t
-  operator()(const class_decl* t) const;
-}; // end struct class_decl::hash
 
 enum access_specifier
 get_member_access_specifier(const decl_base&);
@@ -4376,6 +4377,9 @@ public:
   base_spec(const type_base_sptr& base, access_specifier a,
 	    long offset_in_bits = -1, bool is_virtual = false);
 
+  virtual hash_t
+  hash_value() const;
+
   virtual ~base_spec();
 
   class_decl_sptr
@@ -4392,9 +4396,6 @@ public:
 
   virtual bool
   operator==(const member_base&) const;
-
-  virtual size_t
-  get_hash() const;
 
   virtual bool
   traverse(ir_node_visitor&);
@@ -4422,6 +4423,8 @@ class union_decl : public class_or_union
 
 public:
 
+  struct hash;
+
   union_decl(const environment& env, const string& name,
 	     size_t size_in_bits, const location& locus,
 	     visibility vis, member_types& mbrs,
@@ -4443,6 +4446,9 @@ public:
 
   union_decl(const environment& env, const string& name,
 	     bool is_declaration_only = true);
+
+  virtual hash_t
+  hash_value() const;
 
   virtual string
   get_pretty_representation(bool internal = false,
@@ -4738,29 +4744,6 @@ bool
 operator!=(const member_class_template_sptr& l,
 	   const member_class_template_sptr& r);
 
-// Forward declarations for select nested hashers.
-struct type_base::shared_ptr_hash
-{
-  size_t
-  operator()(const shared_ptr<type_base> t) const;
-};
-
-struct type_base::dynamic_hash
-{
-  size_t
-  operator()(const type_base* t) const;
-};
-
-/// A hashing functor for instances and pointers of @ref var_decl.
-struct var_decl::hash
-{
-  size_t
-  operator()(const var_decl& t) const;
-
-  size_t
-  operator()(const var_decl* t) const;
-}; //end struct var_decl::hash
-
 /// A comparison functor for pointers to @ref var_decl.
 struct var_decl::ptr_equal
 {
@@ -4781,16 +4764,6 @@ struct var_decl::ptr_equal
     return (*l == *r);
   }
 };// end struct var_decl::ptr_equal
-
-/// A hashing functor fo instances and pointers of @ref function_decl.
-struct function_decl::hash
-{
-  size_t
-  operator()(const function_decl& t) const;
-
-  size_t
-  operator()(const function_decl* t) const;
-};//end struct function_decl::hash
 
 /// Equality functor for instances of @ref function_decl
 struct function_decl::ptr_equal
@@ -4815,58 +4788,6 @@ struct function_decl::ptr_equal
     return (*l == *r);
   }
 };// function_decl::ptr_equal
-
-/// The hashing functor for class_decl::base_spec.
-struct class_decl::base_spec::hash
-{
-  size_t
-  operator()(const base_spec& t) const;
-};
-
-/// The hashing functor for member_base.
-struct member_base::hash
-{
-  size_t
-  operator()(const member_base& m) const;
-};
-
-/// The hashing functor for member_function_template.
-struct member_function_template::hash
-{
-  size_t
-  operator()(const member_function_template& t) const;
-};
-
-/// The hashing functor for member_class_template
-struct member_class_template::hash
-{
-  size_t
-  operator()(const member_class_template& t) const;
-};
-
-struct function_tdecl::hash
-{
-  size_t
-  operator()(const function_tdecl& t) const;
-};
-
-struct function_tdecl::shared_ptr_hash
-{
-  size_t
-  operator()(const shared_ptr<function_tdecl> f) const;
-};
-
-struct class_tdecl::hash
-{
-  size_t
-  operator()(const class_tdecl& t) const;
-};
-
-struct class_tdecl::shared_ptr_hash
-{
-  size_t
-  operator()(const shared_ptr<class_tdecl> t) const;
-};
 
 /// The base class for the visitor type hierarchy used for traversing
 /// a translation unit.
@@ -4927,6 +4848,9 @@ public:
 
   virtual bool visit_begin(reference_type_def*);
   virtual bool visit_end(reference_type_def*);
+
+  virtual bool visit_begin(ptr_to_mbr_type*);
+  virtual bool visit_end(ptr_to_mbr_type*);
 
   virtual bool visit_begin(array_type_def*);
   virtual bool visit_end(array_type_def*);

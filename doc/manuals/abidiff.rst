@@ -63,9 +63,152 @@ change reports that might be considered as false positives to users.
 Options
 =======
 
-  * ``--help | -h``
+  * ``--add-binaries1`` <*bin1,bin2,bin3,..*>
 
-    Display a short help about the command and exit.
+    For each of the comma-separated binaries given in argument to this
+    option, if the binary is found in the directory specified by the
+    ``--added-binaries-dir1`` option, then ``abidiff`` loads the ABI
+    corpus of the binary and adds it to a set of corpora (called an
+    ABI Corpus Group) that includes the first argument of ``abidiff``.
+
+    That ABI corpus group is then compared against the second corpus
+    group given in argument to ``abidiff``.
+
+
+  * ``--add-binaries2`` <*bin1,bin2,bin3,..*>
+
+    For each of the comma-separated binaries given in argument to this
+    option, if the binary is found in the directory specified by the
+    ``--added-binaries-dir2`` option, then ``abidiff`` loads the ABI
+    corpus of the binary and adds it to a set of corpora(called an ABI
+    Corpus Group) that includes the second argument of ``abidiff``.
+
+    That ABI corpus group is then compared against the first corpus
+    group given in argument to ``abidiff``.
+
+
+  * ``--added-binaries-dir1 | --abd1`` <added-binaries-directory-1>
+
+    This option is to be used in conjunction with the
+    ``--add-binaries1``, ``--follow-dependencies`` and
+    ``--list-dependencies`` options.  Binaries referred to by these
+    options, if found in the directory `added-binaries-directory-1`,
+    are loaded as ABI corpus and are added to the first ABI corpus group
+    that is to be used in the comparison.
+
+
+  * ``--added-binaries-dir2 | --abd2`` <added-binaries-directory-2>
+
+    This option is to be used in conjunction with the
+    ``--add-binaries2``, ``--follow-dependencies`` and
+    ``--list-dependencies`` options.  Binaries referred to by these
+    options, if found in the directory `added-binaries-directory-2`,
+    are loaded as ABI corpus and are added to the second ABI corpus
+    group to be used in the comparison.
+
+
+  * ``--added-fns``
+
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, only display
+    the globally defined functions that were added to
+    *second-shared-library*.
+
+
+  * ``--added-vars``
+
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, only display
+    the global variables that were added (defined) to
+    *second-shared-library*.
+
+
+  * ``--allow-non-exported-interfaces``
+
+    When looking at the debug information accompanying a binary, this
+    tool analyzes the descriptions of the types reachable by the
+    interfaces (functions and variables) that are visible outside of
+    their translation unit.  Once that analysis is done, an ABI corpus
+    is constructed by only considering the subset of types reachable
+    from interfaces associated to `ELF`_ symbols that are defined and
+    exported by the binary.  It's those final ABI Corpora that are
+    compared by this tool.
+
+    The problem with that approach however is that analyzing all the
+    interfaces that are visible from outside their translation unit
+    can amount to a lot of data, especially when those binaries are
+    applications, as opposed to shared libraries.  One example of such
+    applications is the `Linux Kernel`_.  Analyzing massive ABI
+    Corpora like these can be extremely slow.
+
+    In the presence of an "average sized" binary however one can
+    afford having libabigail analyze all interfaces that are visible
+    outside of their translation unit, using this option.
+
+    Note that this option is turned on by default, unless we are in
+    the presence of the `Linux Kernel`_.
+
+
+  * ``--btf``
+
+    When comparing binaries, extract ABI information from `BTF`_ debug
+    information, if present.
+
+
+  * ``--changed-fns``
+
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, only display
+    the changes in sub-types of the global functions defined in
+    *first-shared-library*.
+
+
+  * ``--changed-vars``
+
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, only display
+    the changes in the sub-types of the global variables defined in
+    *first-shared-library*
+
+
+  * ``--ctf``
+
+    When comparing binaries, extract ABI information from `CTF`_ debug
+    information, if present.
+
+
+  * ``--debug-info-dir1 | --d1`` <*di-path1*>
+
+    For cases where the debug information for *first-shared-library*
+    is split out into a separate file, tells ``abidiff`` where to find
+    that separate debug information file.
+
+    Note that *di-path* must point to the root directory under which
+    the debug information is arranged in a tree-like manner.  Under
+    Red Hat based systems, that directory is usually
+    ``<root>/usr/lib/debug``.
+
+    This option can be provided several times with different root
+    directories.  In that case, ``abidiff`` will potentially look into
+    all those root directories to find the split debug info for
+    *first-shared-library*.
+
+    Note also that this option is not mandatory for split debug
+    information installed by your system's package manager because
+    then ``abidiff`` knows where to find it.
+
+
+  * ``--debug-info-dir2 | --d2`` <*di-path2*>
+
+    Like ``--debug-info-dir1``, this options tells ``abidiff`` where
+    to find the split debug information for the
+    *second-shared-library* file.
+
+    This option can be provided several times with different root
+    directories.  In that case, ``abidiff`` will potentially look into
+    all those root directories to find the split debug info for
+    *second-shared-library*.
+
 
   * ``--debug-self-comparison``
 
@@ -99,178 +242,47 @@ Options
     it the libabigail package needs to be configured with
     the --enable-debug-type-canonicalization configure option.
 
-  * ``--version | -v``
 
-    Display the version of the program and exit.
+  * ``--deleted-fns``
 
-  * ``--debug-info-dir1 | --d1`` <*di-path1*>
-
-    For cases where the debug information for *first-shared-library*
-    is split out into a separate file, tells ``abidiff`` where to find
-    that separate debug information file.
-
-    Note that *di-path* must point to the root directory under which
-    the debug information is arranged in a tree-like manner.  Under
-    Red Hat based systems, that directory is usually
-    ``<root>/usr/lib/debug``.
-
-    This option can be provided several times with different root
-    directories.  In that case, ``abidiff`` will potentially look into
-    all those root directories to find the split debug info for
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, only display
+    the globally defined functions that got deleted from
     *first-shared-library*.
 
-    Note also that this option is not mandatory for split debug
-    information installed by your system's package manager because
-    then ``abidiff`` knows where to find it.
 
-  * ``--debug-info-dir2 | --d2`` <*di-path2*>
+  * ``--deleted-vars``
 
-    Like ``--debug-info-dir1``, this options tells ``abidiff`` where
-    to find the split debug information for the
-    *second-shared-library* file.
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, only display
+    the globally defined variables that were deleted from
+    *first-shared-library*.
 
-    This option can be provided several times with different root
-    directories.  In that case, ``abidiff`` will potentially look into
-    all those root directories to find the split debug info for
-    *second-shared-library*.
 
-  * ``--headers-dir1 | --hd1`` <headers-directory-path-1>
+  * ``--drop`` <*regex*>
 
-    Specifies where to find the public headers of the first shared
-    library (or binary in general) that the tool has to consider.  The
-    tool will thus filter out ABI changes on types that are not
-    defined in public headers.
+    When reading the *first-shared-library* and
+    *second-shared-library* ELF input files, drop the globally defined
+    functions and variables which name match the regular expression
+    *regex*.  As a result, no change involving these functions or
+    variables will be emitted in the diff report.
 
-    Note that several public header directories can be specified for
-    the first shared library.  In that case the ``--headers-dir1``
-    option should be present several times on the command line, like
-    in the following example: ::
 
-      $ abidiff --headers-dir1 /some/path       \
-                --headers-dir1 /some/other/path \
-		binary-version-1 binary-version-2
+  * ``--drop-fn`` <*regex*>
 
-  * ``--header-file1 | --hf1`` <header-file-path-1>
+    When reading the *first-shared-library* and
+    *second-shared-library* ELF input files, drop the globally defined
+    functions which name match the regular expression *regex*.  As a
+    result, no change involving these functions will be emitted in the
+    diff report.
 
-    Specifies where to find one public header of the first shared
-    library that the tool has to consider.  The tool will thus filter
-    out ABI changes on types that are not defined in public headers.
 
-  * ``--headers-dir2 | --hd2`` <headers-directory-path-2>
+  * ``--drop-var`` <*regex*>
 
-    Specifies where to find the public headers of the second shared
-    library that the tool has to consider.  The tool will thus filter
-    out ABI changes on types that are not defined in public headers.
+    When reading the *first-shared-library* and
+    *second-shared-library* ELF input files, drop the globally defined
+    variables matching a the regular expression *regex*.
 
-    Note that several public header directories can be specified for
-    the second shared library.  In that case the ``--headers-dir2``
-    option should be present several times like in the following
-    example: ::
-
-      $ abidiff --headers-dir2 /some/path       \
-                --headers-dir2 /some/other/path \
-		binary-version-1 binary-version-2
-
-  * ``--header-file2 | --hf2`` <header-file-path-2>
-
-    Specifies where to find one public header of the second shared
-    library that the tool has to consider.  The tool will thus filter
-    out ABI changes on types that are not defined in public headers.
-
-  * ``--add-binaries1`` <*bin1,bin2,bin3,..*>
-
-    For each of the comma-separated binaries given in argument to this
-    option, if the binary is found in the directory specified by the
-    ``--added-binaries-dir1`` option, then ``abidiff`` loads the ABI
-    corpus of the binary and adds it to a set of corpora (called an
-    ABI Corpus Group) that includes the first argument of ``abidiff``.
-
-    That ABI corpus group is then compared against the second corpus
-    group given in argument to ``abidiff``.
-
-  * ``--add-binaries2`` <*bin1,bin2,bin3,..*>
-
-    For each of the comma-separated binaries given in argument to this
-    option, if the binary is found in the directory specified by the
-    ``--added-binaries-dir2`` option, then ``abidiff`` loads the ABI
-    corpus of the binary and adds it to a set of corpora(called an ABI
-    Corpus Group) that includes the second argument of ``abidiff``.
-
-    That ABI corpus group is then compared against the first corpus
-    group given in argument to ``abidiff``.
-
-  * ``--follow-dependencies | --fdeps``
-
-    For each dependency of the first argument of ``abidiff``, if it's
-    found in the directory specified by the ``--added-binaries-dir1``
-    option, then construct an ABI corpus out of the dependency, add it
-    to a set of corpora (called an ABI Corpus Group) that includes the
-    first argument of ``abidiff``.
-
-    Similarly, for each dependency of the second argument of
-    ``abidiff``, if it's found in the directory specified by the
-    ``--added-binaries-dir2`` option, then construct an ABI corpus out
-    of the dependency, add it to an ABI corpus group that includes the
-    second argument of ``abidiff``.
-
-    These two ABI corpus groups are then compared against each other.
-
-    Said otherwise, this makes ``abidiff`` compare the set of its
-    first input and its dependencies against the set of its second
-    input and its dependencies.
-
-  * ``list-dependencies | --ldeps``
-
-    This option lists all the dependencies of the input arguments of
-    ``abidiff`` that are found in the directories specified by the
-    options ``--added-binaries-dir1`` and ``--added-binaries-dir2``
-
-  * ``--added-binaries-dir1 | --abd1`` <added-binaries-directory-1>
-
-    This option is to be used in conjunction with the
-    ``--add-binaries1``, ``--follow-dependencies`` and
-    ``--list-dependencies`` options.  Binaries referred to by these
-    options, if found in the directory `added-binaries-directory-1`,
-    are loaded as ABI corpus and are added to the first ABI corpus group
-    that is to be used in the comparison.
-
-  * ``--added-binaries-dir2 | --abd2`` <added-binaries-directory-2>
-
-    This option is to be used in conjunction with the
-    ``--add-binaries2``, ``--follow-dependencies`` and
-    ``--list-dependencies`` options.  Binaries referred to by these
-    options, if found in the directory `added-binaries-directory-2`,
-    are loaded as ABI corpus and are added to the second ABI corpus
-    group to be used in the comparison.
-
-  * ``--no-linux-kernel-mode``
-
-    Without this option, if abidiff detects that the binaries it is
-    looking at are Linux Kernel binaries (either vmlinux or modules)
-    then it only considers functions and variables which ELF symbols
-    are listed in the __ksymtab and __ksymtab_gpl sections.
-
-    With this option, abidiff considers the binary as a non-special
-    ELF binary.  It thus considers functions and variables which are
-    defined and exported in the ELF sense.
-
-  * ``--kmi-whitelist | -kaw`` <*path-to-whitelist*>
-
-    When analyzing a Linux kernel binary, this option points to the
-    white list of names of ELF symbols of functions and variables
-    which ABI must be considered.  That white list is called a "Kernel
-    Module Interface white list".  This is because for the Kernel, we
-    don't talk about ``ABI``; we rather talk about the interface
-    between the Kernel and its module. Hence the term ``KMI`` rather
-    than ``ABI``.
-
-    Any other function or variable which ELF symbol are not present in
-    that white list will not be considered by this tool.
-
-    If this option is not provided -- thus if no white list is
-    provided -- then the entire KMI, that is, the set of all publicly
-    defined and exported functions and global variables by the Linux
-    Kernel binaries, is considered.
 
   * ``--drop-private-types``
 
@@ -289,6 +301,18 @@ Options
     memory.  It's meant to be mainly used to optimize the memory
     consumption of the tool on binaries with a lot of publicly defined
     and exported types.
+
+
+  *  ``--dump-diff-tree``
+
+    After the diff report, emit a textual representation of the diff
+    nodes tree used by the comparison engine to represent the changed
+    functions and variables.  That representation is emitted to the
+    error output for debugging purposes.  Note that this diff tree is
+    relevant only to functions and variables that have some sub-type
+    changes.  Added or removed functions and variables do not have any
+    diff nodes tree associated to them.
+
 
   * ``--exported-interfaces-only``
 
@@ -315,201 +339,110 @@ Options
     Note that this option is turned on by default when analyzing the
     `Linux Kernel`_.  Otherwise, it's turned off by default.
 
-  * ``--allow-non-exported-interfaces``
 
-    When looking at the debug information accompanying a binary, this
-    tool analyzes the descriptions of the types reachable by the
-    interfaces (functions and variables) that are visible outside of
-    their translation unit.  Once that analysis is done, an ABI corpus
-    is constructed by only considering the subset of types reachable
-    from interfaces associated to `ELF`_ symbols that are defined and
-    exported by the binary.  It's those final ABI Corpora that are
-    compared by this tool.
+  * ``--fail-no-debug-info``
 
-    The problem with that approach however is that analyzing all the
-    interfaces that are visible from outside their translation unit
-    can amount to a lot of data, especially when those binaries are
-    applications, as opposed to shared libraries.  One example of such
-    applications is the `Linux Kernel`_.  Analyzing massive ABI
-    Corpora like these can be extremely slow.
+    If no debug info was found, then this option makes the program to
+    fail.  Otherwise, without this option, the program will attempt to
+    compare properties of the binaries that are not related to debug
+    info, like pure ELF properties.
 
-    In the presence of an "average sized" binary however one can
-    afford having libabigail analyze all interfaces that are visible
-    outside of their translation unit, using this option.
 
-    Note that this option is turned on by default, unless we are in
-    the presence of the `Linux Kernel`_.
+  * ``--follow-dependencies | --fdeps``
 
-  * ``--stat``
+    For each dependency of the first argument of ``abidiff``, if it's
+    found in the directory specified by the ``--added-binaries-dir1``
+    option, then construct an ABI corpus out of the dependency, add it
+    to a set of corpora (called an ABI Corpus Group) that includes the
+    first argument of ``abidiff``.
 
-    Rather than displaying the detailed ABI differences between
-    *first-shared-library* and *second-shared-library*, just display
-    some summary statistics about these differences.
+    Similarly, for each dependency of the second argument of
+    ``abidiff``, if it's found in the directory specified by the
+    ``--added-binaries-dir2`` option, then construct an ABI corpus out
+    of the dependency, add it to an ABI corpus group that includes the
+    second argument of ``abidiff``.
 
-  * ``--symtabs``
+    These two ABI corpus groups are then compared against each other.
 
-    Only display the symbol tables of the *first-shared-library* and
-    *second-shared-library*.
+    Said otherwise, this makes ``abidiff`` compare the set of its
+    first input and its dependencies against the set of its second
+    input and its dependencies.
 
-  * ``--deleted-fns``
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, only display
-    the globally defined functions that got deleted from
-    *first-shared-library*.
+  * ``--harmless``
 
-  * ``--changed-fns``
+    In the diff report, display only the :ref:`harmless
+    <harmlesschangeconcept_label>` changes.  By default, the harmless
+    changes are filtered out of the diff report keep the clutter to a
+    minimum and have a greater chance to spot real ABI issues.
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, only display
-    the changes in sub-types of the global functions defined in
-    *first-shared-library*.
 
-  * ``--added-fns``
+  * ``--headers-dir1 | --hd1`` <headers-directory-path-1>
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, only display
-    the globally defined functions that were added to
-    *second-shared-library*.
+    Specifies where to find the public headers of the first shared
+    library (or binary in general) that the tool has to consider.  The
+    tool will thus filter out ABI changes on types that are not
+    defined in public headers.
 
-  * ``--deleted-vars``
+    Note that several public header directories can be specified for
+    the first shared library.  In that case the ``--headers-dir1``
+    option should be present several times on the command line, like
+    in the following example: ::
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, only display
-    the globally defined variables that were deleted from
-    *first-shared-library*.
+      $ abidiff --headers-dir1 /some/path       \
+                --headers-dir1 /some/other/path \
+		binary-version-1 binary-version-2
 
-  * ``--changed-vars``
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, only display
-    the changes in the sub-types of the global variables defined in
-    *first-shared-library*
 
-  * ``--added-vars``
+  * ``--headers-dir2 | --hd2`` <headers-directory-path-2>
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, only display
-    the global variables that were added (defined) to
-    *second-shared-library*.
+    Specifies where to find the public headers of the second shared
+    library that the tool has to consider.  The tool will thus filter
+    out ABI changes on types that are not defined in public headers.
 
-  * ``--non-reachable-types|-t``
+    Note that several public header directories can be specified for
+    the second shared library.  In that case the ``--headers-dir2``
+    option should be present several times like in the following
+    example: ::
 
-    Analyze and emit change reports for all the types of the binary,
-    including those that are not reachable from global functions and
-    variables.
+      $ abidiff --headers-dir2 /some/path       \
+                --headers-dir2 /some/other/path \
+		binary-version-1 binary-version-2
 
-    This option might incur some serious performance degradation as
-    the number of types analyzed can be huge.  However, if paired with
-    the ``--headers-dir{1,2}`` and/or ``header-file{1,2}`` options,
-    the additional non-reachable types analyzed are restricted to
-    those defined in public headers files, thus hopefully making the
-    performance hit acceptable.
 
-    Also, using this option alongside suppression specifications (by
-    also using the ``--suppressions`` option) might help keep the number of
-    analyzed types (and the potential performance degradation) in
-    control.
 
-    Note that without this option, only types that are reachable from
-    global functions and variables are analyzed, so the tool detects
-    and reports changes on these reachable types only.
+  * ``--header-file1 | --hf1`` <header-file-path-1>
 
-  * ``--no-added-syms``
+    Specifies where to find one public header of the first shared
+    library that the tool has to consider.  The tool will thus filter
+    out ABI changes on types that are not defined in public headers.
 
-    In the resulting report about the differences between
-    *first-shared-library* and *second-shared-library*, do not display
-    added functions or variables.  Do not display added functions or
-    variables ELF symbols either.  All other kinds of changes are
-    displayed unless they are explicitely forbidden by other options
-    on the command line.
 
-  * ``--no-linkage-name``
+  * ``--header-file2 | --hf2`` <header-file-path-2>
 
-    In the resulting report, do not display the linkage names of
-    the added, removed, or changed functions or variables.
+    Specifies where to find one public header of the second shared
+    library that the tool has to consider.  The tool will thus filter
+    out ABI changes on types that are not defined in public headers.
 
-  * ``--no-show-locs``
 
-   Do not show information about where in the *second shared library*
-   the respective type was changed.
+  * ``--help | -h``
 
-  * ``--show-bytes``
+    Display a short help about the command and exit.
 
-    Show sizes and offsets in bytes, not bits.  By default, sizes and
-    offsets are shown in bits.
-
-  * ``--show-bits``
-
-    Show sizes and offsets in bits, not bytes.  This option is
-    activated by default.
-
-  * ``--show-hex``
-
-    Show sizes and offsets in hexadecimal base.
-
-  * ``--show-dec``
-
-    Show sizes and offsets in decimal base.  This option is activated
-    by default.
 
   * ``--ignore-soname``
 
     Ignore differences in the SONAME when doing a comparison
 
-  *  ``--no-show-relative-offset-changes``
 
-     Without this option, when the offset of a data member changes,
-     the change report not only mentions the older and newer offset,
-     but it also mentions by how many bits the data member changes.
-     With this option, the latter is not shown.
+  * ``--impacted-interfaces``
 
-  * ``--no-unreferenced-symbols``
+    When showing leaf changes, this option instructs abidiff to show
+    the list of impacted interfaces.  This option is thus to be used
+    in addition the ``--leaf-changes-only`` option, otherwise, it's
+    ignored.
 
-    In the resulting report, do not display change information about
-    function and variable symbols that are not referenced by any debug
-    information.  Note that for these symbols not referenced by any
-    debug information, the change information displayed is either
-    added or removed symbols.
-
-  * ``--no-default-suppression``
-
-    Do not load the :ref:`default suppression specification files
-    <abidiff_default_supprs_label>`.
-
-  * ``--suppressions | --suppr`` <*path-to-suppressions*>
-
-    Use a :ref:`suppression specification <suppr_spec_label>` file
-    located at *path-to-suppressions*.  Note that this option can
-    appear multiple times on the command line.  In that case, all of
-    the provided suppression specification files are taken into
-    account.
-
-    Please note that, by default, if this option is not provided, then
-    the :ref:`default suppression specification files
-    <abidiff_default_supprs_label>` are loaded .
-
-  * ``--drop`` <*regex*>
-
-    When reading the *first-shared-library* and
-    *second-shared-library* ELF input files, drop the globally defined
-    functions and variables which name match the regular expression
-    *regex*.  As a result, no change involving these functions or
-    variables will be emitted in the diff report.
-
-  * ``--drop-fn`` <*regex*>
-
-    When reading the *first-shared-library* and
-    *second-shared-library* ELF input files, drop the globally defined
-    functions which name match the regular expression *regex*.  As a
-    result, no change involving these functions will be emitted in the
-    diff report.
-
-  * ``--drop-var`` <*regex*>
-
-    When reading the *first-shared-library* and
-    *second-shared-library* ELF input files, drop the globally defined
-    variables matching a the regular expression *regex*.
 
   * ``--keep`` <*regex*>
 
@@ -519,6 +452,7 @@ Options
     *regex*.  All other functions and variables are dropped on the
     floor and will thus not appear in the resulting diff report.
 
+
   * ``--keep-fn`` <*regex*>
 
     When reading the *first-shared-library* and
@@ -526,6 +460,7 @@ Options
     functions which name match the regular expression *regex*.  All
     other functions are dropped on the floor and will thus not appear
     in the resulting diff report.
+
 
   * ``--keep-var`` <*regex*>
 
@@ -535,45 +470,25 @@ Options
     variables are dropped on the floor and will thus not appear in the
     resulting diff report.
 
-  * ``--harmless``
 
-    In the diff report, display only the :ref:`harmless
-    <harmlesschangeconcept_label>` changes.  By default, the harmless
-    changes are filtered out of the diff report keep the clutter to a
-    minimum and have a greater chance to spot real ABI issues.
+  * ``--kmi-whitelist | -w`` <*path-to-whitelist*>
 
-  * ``--no-harmful``
+    When analyzing a Linux kernel binary, this option points to the
+    white list of names of ELF symbols of functions and variables
+    which ABI must be considered.  That white list is called a "Kernel
+    Module Interface white list".  This is because for the Kernel, we
+    don't talk about ``ABI``; we rather talk about the interface
+    between the Kernel and its module. Hence the term ``KMI`` rather
+    than ``ABI``.
 
-    In the diff report, do not display the :ref:`harmful
-    <harmfulchangeconcept_label>` changes.  By default, only the
-    harmful changes are displayed in diff report.
+    Any other function or variable which ELF symbol are not present in
+    that white list will not be considered by this tool.
 
-  * ``--redundant``
+    If this option is not provided -- thus if no white list is
+    provided -- then the entire KMI, that is, the set of all publicly
+    defined and exported functions and global variables by the Linux
+    Kernel binaries, is considered.
 
-    In the diff report, do display redundant changes.  A redundant
-    change is a change that has been displayed elsewhere in the
-    report.
-
-  * ``--no-redundant``
-
-    In the diff report, do *NOT* display redundant changes.  A
-    redundant change is a change that has been displayed elsewhere in
-    the report.  This option is switched on by default.
-
-  * ``--no-architecture``
-
-    Do not take architecture in account when comparing ABIs.
-
-  * ``--no-corpus-path``
-
-    Do not emit the path attribute for the ABI corpus.
-
-  * ``--fail-no-debug-info``
-
-    If no debug info was found, then this option makes the program to
-    fail.  Otherwise, without this option, the program will attempt to
-    compare properties of the binaries that are not related to debug
-    info, like pure ELF properties.
 
   * ``--leaf-changes-only|-l`` only show leaf changes, so don't show
     impact analysis report.  This option implies ``--redundant``.
@@ -629,27 +544,26 @@ Options
     You can learn about that option below, in any case.
 
 
-  * ``--impacted-interfaces``
+  * ``--list-dependencies | --ldeps``
 
-    When showing leaf changes, this option instructs abidiff to show
-    the list of impacted interfaces.  This option is thus to be used
-    in addition the ``--leaf-changes-only`` option, otherwise, it's
-    ignored.
+    This option lists all the dependencies of the input arguments of
+    ``abidiff`` that are found in the directories specified by the
+    options ``--added-binaries-dir1`` and ``--added-binaries-dir2``
 
 
-  *  ``--dump-diff-tree``
+  * ``--no-added-syms``
 
-    After the diff report, emit a textual representation of the diff
-    nodes tree used by the comparison engine to represent the changed
-    functions and variables.  That representation is emitted to the
-    error output for debugging purposes.  Note that this diff tree is
-    relevant only to functions and variables that have some sub-type
-    changes.  Added or removed functions and variables do not have any
-    diff nodes tree associated to them.
+    In the resulting report about the differences between
+    *first-shared-library* and *second-shared-library*, do not display
+    added functions or variables.  Do not display added functions or
+    variables ELF symbols either.  All other kinds of changes are
+    displayed unless they are explicitely forbidden by other options
+    on the command line.
+
 
   * ``--no-assume-odr-for-cplusplus``
 
-    When analysing a binary originating from C++ code using `DWARF`_
+    When analyzing a binary originating from C++ code using `DWARF`_
     debug information, libabigail assumes the `One Definition Rule`_
     to speed-up the analysis.  In that case, when several types have
     the same name in the binary, they are assumed to all be equal.
@@ -658,14 +572,11 @@ Options
     actually actually compare the types to determine if they are
     equal.
 
-  * ``--no-leverage-dwarf-factorization``
 
-    When analysing a binary which `DWARF`_ debug information was
-    processed with the `DWZ`_ tool, the type information is supposed
-    to be already factorized.  That context is used by libabigail to
-    perform some speed optimizations.
+  * ``--no-architecture``
 
-    This option disables those optimizations.
+    Do not take architecture in account when comparing ABIs.
+
 
   * ``--no-change-categorization | -x``
 
@@ -679,24 +590,177 @@ Options
     impact on interfaces.  In that case, this option would be used
     along with the ``--leaf-changes-only`` one.
 
-  * ``--ctf``
 
-    When comparing binaries, extract ABI information from `CTF`_ debug
-    information, if present.
+  * ``--no-corpus-path``
 
-  * ``--btf``
+    Do not emit the path attribute for the ABI corpus.
 
-    When comparing binaries, extract ABI information from `BTF`_ debug
-    information, if present.
+
+  * ``--no-default-suppression``
+
+    Do not load the :ref:`default suppression specification files
+    <abidiff_default_supprs_label>`.
+
+
+  * ``--no-harmful``
+
+    In the diff report, do not display the :ref:`harmful
+    <harmfulchangeconcept_label>` changes.  By default, only the
+    harmful changes are displayed in diff report.
+
+
+  * ``--no-leverage-dwarf-factorization``
+
+    When analyzing a binary which `DWARF`_ debug information was
+    processed with the `DWZ`_ tool, the type information is supposed
+    to be already factorized.  That context is used by libabigail to
+    perform some speed optimizations.
+
+    This option disables those optimizations.
+
+
+  * ``--no-linkage-name``
+
+    In the resulting report, do not display the linkage names of
+    the added, removed, or changed functions or variables.
+
+
+  * ``--no-linux-kernel-mode``
+
+    Without this option, if abidiff detects that the binaries it is
+    looking at are Linux Kernel binaries (either vmlinux or modules)
+    then it only considers functions and variables which ELF symbols
+    are listed in the __ksymtab and __ksymtab_gpl sections.
+
+    With this option, abidiff considers the binary as a non-special
+    ELF binary.  It thus considers functions and variables which are
+    defined and exported in the ELF sense.
+
+
+  * ``--no-redundant``
+
+    In the diff report, do *NOT* display redundant changes.  A
+    redundant change is a change that has been displayed elsewhere in
+    the report.  This option is switched on by default.
+
+
+  * ``--no-show-locs``
+
+   Do not show information about where in the *second shared library*
+   the respective type was changed.
+
+
+  *  ``--no-show-relative-offset-changes``
+
+     Without this option, when the offset of a data member changes,
+     the change report not only mentions the older and newer offset,
+     but it also mentions by how many bits the data member changes.
+     With this option, the latter is not shown.
+
+
+  * ``--no-unreferenced-symbols``
+
+    In the resulting report, do not display change information about
+    function and variable symbols that are not referenced by any debug
+    information.  Note that for these symbols not referenced by any
+    debug information, the change information displayed is either
+    added or removed symbols.
+
+
+  * ``--non-reachable-types|-t``
+
+    Analyze and emit change reports for all the types of the binary,
+    including those that are not reachable from global functions and
+    variables.
+
+    This option might incur some serious performance degradation as
+    the number of types analyzed can be huge.  However, if paired with
+    the ``--headers-dir{1,2}`` and/or ``header-file{1,2}`` options,
+    the additional non-reachable types analyzed are restricted to
+    those defined in public headers files, thus hopefully making the
+    performance hit acceptable.
+
+    Also, using this option alongside suppression specifications (by
+    also using the ``--suppressions`` option) might help keep the number of
+    analyzed types (and the potential performance degradation) in
+    control.
+
+    Note that without this option, only types that are reachable from
+    global functions and variables are analyzed, so the tool detects
+    and reports changes on these reachable types only.
+
+
+  * ``--redundant``
+
+    In the diff report, do display redundant changes.  A redundant
+    change is a change that has been displayed elsewhere in the
+    report.
+
+
+  * ``--show-bits``
+
+    Show sizes and offsets in bits, not bytes.  This option is
+    activated by default.
+
+
+  * ``--show-bytes``
+
+    Show sizes and offsets in bytes, not bits.  By default, sizes and
+    offsets are shown in bits.
+
+
+  * ``--show-dec``
+
+    Show sizes and offsets in decimal base.  This option is activated
+    by default.
+
+
+  * ``--show-hex``
+
+    Show sizes and offsets in hexadecimal base.
+
+
+  * ``--stat``
+
+    Rather than displaying the detailed ABI differences between
+    *first-shared-library* and *second-shared-library*, just display
+    some summary statistics about these differences.
+
 
   * ``--stats``
 
     Emit statistics about various internal things.
 
+
+  * ``--suppressions | --suppr`` <*path-to-suppressions*>
+
+    Use a :ref:`suppression specification <suppr_spec_label>` file
+    located at *path-to-suppressions*.  Note that this option can
+    appear multiple times on the command line.  In that case, all of
+    the provided suppression specification files are taken into
+    account.
+
+    Please note that, by default, if this option is not provided, then
+    the :ref:`default suppression specification files
+    <abidiff_default_supprs_label>` are loaded .
+
+
+  * ``--symtabs``
+
+    Only display the symbol tables of the *first-shared-library* and
+    *second-shared-library*.
+
+
   * ``--verbose``
 
     Emit verbose logs about the progress of miscellaneous internal
     things.
+
+
+  * ``--version | -v``
+
+    Display the version of the program and exit.
+
 
 .. _abidiff_return_value_label:
 
@@ -752,7 +816,7 @@ The remaining bits are not used for the moment.
 Usage examples
 ==============
 
-  1. Detecting a change in a sub-type of a function: ::
+  1. Detecting an ABI change in a sub-type of a function: ::
 
 	$ cat -n test-v0.cc
 		 1	// Compile this with:
@@ -792,7 +856,7 @@ Usage examples
 	$ g++ -g -Wall -shared -o libtest-v0.so test-v0.cc
 	$ g++ -g -Wall -shared -o libtest-v1.so test-v1.cc
 	$ 
-	$ ../build/tools/abidiff libtest-v0.so libtest-v1.so
+	$ abidiff libtest-v0.so libtest-v1.so; echo "exit code: $?"
 	Functions changes summary: 0 Removed, 1 Changed, 0 Added function
 	Variables changes summary: 0 Removed, 0 Changed, 0 Added variable
 
@@ -806,10 +870,81 @@ Usage examples
 		      struct type_base
 		    1 data member change:
 		     'int S0::m0' offset changed from 0 to 32
+        exit code: 4
 	$
 
+Note how the exit code is 4, meaning the third bit ABIDIFF_ABI_CHANGE
+of value 4 is set to 1.  This means the tool categorizes the ABI
+change as :ref:`harmful <harmfulchangeconcept_label>` and thus
+requires a user review.
 
-  2. Detecting another change in a sub-type of a function: ::
+  2. Detecting an incompatible ABI change in the type of a function: ::
+
+	$ cat -n test-v0.cc
+	     1	// Compile this with:
+	     2	//   g++ -g -Wall -shared -o libtest-v0.so test-v0.cc
+	     3	
+	     4	struct S0
+	     5	{
+	     6	  int m0;
+	     7	};
+	     8	
+	     9	S0
+	    10	foo()
+	    11	{
+	    12	  S0 s = {};
+	    13	  return s;
+	    14	}
+	$
+	$ cat -n test-v1.cc
+	     1	// Compile this with:
+	     2	//   g++ -g -Wall -shared -o libtest-v1.so test-v1.cc
+	     3	
+	     4	struct type_base
+	     5	{
+	     6	  int inserted;
+	     7	};
+	     8	
+	     9	struct S0 : public type_base
+	    10	{
+	    11	  int m0;
+	    12	};
+	    13	
+	    14	S0
+	    15	foo()
+	    16	{
+	    17	  S0 s = {};
+	    18	  return s;
+	    19	}
+	$ 
+	$ g++ -g -Wall -shared -o libtest-v0.so test-v0.cc
+	$ g++ -g -Wall -shared -o libtest-v1.so test-v1.cc
+	$
+	$ abidiff libtest-v0.so libtest-v1.so; echo "exit code: $?"
+	Functions changes summary: 0 Removed, 1 Changed, 0 Added function
+	Variables changes summary: 0 Removed, 0 Changed, 0 Added variable
+
+	1 function with incompatible sub-type changes:
+
+	  [C] 'function S0 foo(void)' at test-v0.cc:10:1 has some sub-type changes:
+	    return type changed:
+	      type size changed from 32 to 64 (in bits)
+	      1 base class insertion:
+		struct type_base at test-v1.cc:4:1
+	      1 data member change:
+		'int m0' offset changed from 0 to 32 (in bits) (by +32 bits)
+
+	exit code: 12
+        $ 
+
+Note how the exit code is 12, meaning both the third bit
+ABIDIFF_ABI_CHANGE of value 4 and the fourth bit
+ABIDIFF_ABI_INCOMPATIBLE_CHANGE of value 8 are set to 1.  This means
+the tool categorizes the ABI change as :ref:`incompatible
+<incompatiblechangeconcept_label>`.  It's an ABI break.
+
+
+  3. Detecting another change in a sub-type of a function: ::
 
 	$ cat -n test-v0.cc
 		 1	// Compile this with:
@@ -845,7 +980,7 @@ Usage examples
 	$ g++ -g -Wall -shared -o libtest-v0.so test-v0.cc
 	$ g++ -g -Wall -shared -o libtest-v1.so test-v1.cc
 	$ 
-	$ ../build/tools/abidiff libtest-v0.so libtest-v1.so
+	$ abidiff libtest-v0.so libtest-v1.so; echo "exit code: $?"
 	Functions changes summary: 0 Removed, 1 Changed, 0 Added function
 	Variables changes summary: 0 Removed, 0 Changed, 0 Added variable
 
@@ -860,10 +995,10 @@ Usage examples
 		    1 data member change:
 		     'int S0::m0' offset changed from 0 to 32
 
-
+        exit code: 4
 	$
 
-  3. Detecting that functions got removed or added to a library: ::
+  4. Detecting that functions got removed or added to a library: ::
 
 	$ cat -n test-v0.cc
 		 1	// Compile this with:
@@ -899,7 +1034,7 @@ Usage examples
 	$ g++ -g -Wall -shared -o libtest-v0.so test-v0.cc
 	$ g++ -g -Wall -shared -o libtest-v1.so test-v1.cc
 	$ 
-	$ ../build/tools/abidiff libtest-v0.so libtest-v1.so
+	$ abidiff libtest-v0.so libtest-v1.so; echo "exit code: $?"
 	Functions changes summary: 1 Removed, 0 Changed, 1 Added functions
 	Variables changes summary: 0 Removed, 0 Changed, 0 Added variable
 
@@ -909,9 +1044,10 @@ Usage examples
 	1 Added function:
 	  'function void bar(S0&)'    {_Z3barR2S0}
 
+        exit code: 12
 	$
 
-  4. Comparing two sets of binaries that are passed on the command line: ::
+  5. Comparing two sets of binaries that are passed on the command line: ::
 
            $ abidiff --add-binaries1=file2-v1              \
                      --add-binaries2=file2-v2,file2-v1     \
@@ -923,7 +1059,7 @@ Usage examples
      found in ``dir1`` and ``dir2`` or in the current directory.
 
 
-  5. Compare two libraries and their dependencies: ::
+  6. Compare two libraries and their dependencies: ::
 
            $ abidiff --follow-dependencies			\
 	             --added-binaries-dir1 /some/where		\

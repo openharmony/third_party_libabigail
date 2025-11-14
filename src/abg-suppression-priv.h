@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2016-2023 Red Hat, Inc.
+// Copyright (C) 2016-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -586,6 +586,9 @@ class type_suppression::priv
   mutable regex::regex_t_sptr		source_location_to_keep_regex_;
   mutable vector<string>		changed_enumerator_names_;
   mutable vector<regex::regex_t_sptr>	changed_enumerators_regexp_;
+  // Whether the "has_strict_flexible_array_data_member_conversion"
+  // property was set.
+  bool					has_strict_fam_conv_;
 
   priv();
 
@@ -602,7 +605,8 @@ public:
       type_kind_(type_kind),
       consider_reach_kind_(consider_reach_kind),
       reach_kind_(reach_kind),
-      has_size_change_(false)
+      has_size_change_(false),
+      has_strict_fam_conv_(false)
   {}
 
   /// Get the regular expression object associated to the 'type_name_regex'

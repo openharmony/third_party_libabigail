@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -121,10 +121,6 @@ typedef shared_ptr<class_diff> class_diff_sptr;
 typedef unordered_map<size_t, size_t> pointer_map;
 
 /// Convenience typedef for a map which key is a string and which
-/// value is a @ref decl_base_sptr.
-typedef unordered_map<string, decl_base_sptr> string_decl_base_sptr_map;
-
-/// Convenience typedef for a map which key is a string and which
 /// value is a @ref type_base_sptr.
 typedef unordered_map<string, type_base_sptr> string_type_base_sptr_map;
 
@@ -204,7 +200,7 @@ typedef unordered_map<string, changed_enumerator> string_changed_enumerator_map;
 
 /// Convenience typedef for a map which key is a string and which
 /// value is a pointer to @ref decl_base.
-typedef unordered_map<string, function_decl*> string_function_ptr_map;
+typedef unordered_map<string, const function_decl*> string_function_ptr_map;
 
 /// Convenience typedef for a map which key is a string and which
 /// value is a @ref function_decl_diff_sptr.
@@ -229,7 +225,7 @@ typedef unordered_map<string, method_decl_sptr> string_member_function_sptr_map;
 
 /// Convenience typedef for a map which key is a string and which
 /// value is a point to @ref var_decl.
-typedef unordered_map<string, var_decl*> string_var_ptr_map;
+typedef unordered_map<string, var_decl_sptr> string_var_ptr_map;
 
 /// Convenience typedef for a pair of pointer to @ref var_decl
 /// representing a @ref var_decl change.  The first member of the pair
@@ -357,8 +353,8 @@ enum diff_category
   HARMLESS_SYMBOL_ALIAS_CHANGE_CATEGORY = 1 << 6,
 
   /// This means that a diff node in the sub-tree carries a harmless
-  /// union change.
-  HARMLESS_UNION_CHANGE_CATEGORY = 1 << 7,
+  /// union or class change.
+  HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY = 1 << 7,
 
   /// This means that a diff node in the sub-tree carries a harmless
   /// data member change.  An example of harmless data member change
@@ -386,61 +382,69 @@ enum diff_category
   /// incompatible change to a vtable.
   VIRTUAL_MEMBER_CHANGE_CATEGORY = 1 << 12,
 
+  REFERENCE_LVALUENESS_CHANGE_CATEGORY = 1 << 13,
+
+  /// A change between two non-compatible types of different kinds.
+  NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY = 1 << 14,
+
+  /// A non-compatible name change between two types.
+  NON_COMPATIBLE_NAME_CHANGE_CATEGORY = 1 << 15,
+
   /// A diff node in this category is redundant.  That means it's
   /// present as a child of a other nodes in the diff tree.
-  REDUNDANT_CATEGORY = 1 << 13,
+  REDUNDANT_CATEGORY = 1 << 16,
 
   /// This means that a diff node in the sub-tree carries a type that
   /// was declaration-only and that is now defined, or vice versa.
-  TYPE_DECL_ONLY_DEF_CHANGE_CATEGORY = 1 << 14,
+  TYPE_DECL_ONLY_DEF_CHANGE_CATEGORY = 1 << 17,
 
   /// A diff node in this category is a function parameter type which
   /// top cv-qualifiers change.
-  FN_PARM_TYPE_TOP_CV_CHANGE_CATEGORY = 1 << 15,
+  FN_PARM_TYPE_TOP_CV_CHANGE_CATEGORY = 1 << 18,
 
   /// A diff node in this category has a function parameter type with a
   /// cv-qualifiers change.
-  FN_PARM_TYPE_CV_CHANGE_CATEGORY = 1 << 16,
+  FN_PARM_TYPE_CV_CHANGE_CATEGORY = 1 << 19,
 
   /// A diff node in this category is a function return type with a
   /// cv-qualifier change.
-  FN_RETURN_TYPE_CV_CHANGE_CATEGORY = 1 << 17,
+  FN_RETURN_TYPE_CV_CHANGE_CATEGORY = 1 << 20,
 
   /// A diff node in this category is a function (or function type)
   /// with at least one parameter added or removed.
-  FN_PARM_ADD_REMOVE_CHANGE_CATEGORY = 1 << 18,
+  FN_PARM_ADD_REMOVE_CHANGE_CATEGORY = 1 << 21,
 
   /// A diff node in this category is for a variable which type holds
   /// a cv-qualifier change.
-  VAR_TYPE_CV_CHANGE_CATEGORY = 1 << 19,
+  VAR_TYPE_CV_CHANGE_CATEGORY = 1 << 22,
 
   /// A diff node in this category carries a change from void pointer
   /// to non-void pointer.
-  VOID_PTR_TO_PTR_CHANGE_CATEGORY = 1 << 20,
+  VOID_PTR_TO_PTR_CHANGE_CATEGORY = 1 << 23,
 
   /// A diff node in this category carries a change in the size of the
   /// array type of a global variable, but the ELF size of the
   /// variable didn't change.
-  BENIGN_INFINITE_ARRAY_CHANGE_CATEGORY = 1 << 21,
+  BENIGN_INFINITE_ARRAY_CHANGE_CATEGORY = 1 << 24,
 
   /// A diff node in this category carries a change that must be
   /// reported, even if the diff node is also in the
   /// SUPPRESSED_CATEGORY or PRIVATE_TYPE_CATEGORY categories.
   /// Typically, this node matches a suppression specification like
   /// the [allow_type] directive.
-  HAS_ALLOWED_CHANGE_CATEGORY = 1 << 22,
+  HAS_ALLOWED_CHANGE_CATEGORY = 1 << 25,
 
   /// A diff node in this category has a descendant node that is in
   /// the HAS_ALLOWED_CHANGE_CATEGORY category.  Nodes in this
   /// category must be reported, even if they are also in the
   /// SUPPRESSED_CATEGORY or PRIVATE_TYPE_CATEGORY categories.
-  HAS_DESCENDANT_WITH_ALLOWED_CHANGE_CATEGORY = 1 << 23,
+  HAS_DESCENDANT_WITH_ALLOWED_CHANGE_CATEGORY = 1 << 26,
 
   /// A diff node in this category has a parent node that is in the
   /// HAS_ALLOWED_CHANGE_CATEGORY category.  Nodes in this category
   /// must be reported, even if they are also in the
   /// SUPPRESSED_CATEGORY or PRIVATE_TYPE_CATEGORY categories.
-  HAS_PARENT_WITH_ALLOWED_CHANGE_CATEGORY = 1 << 24,
+  HAS_PARENT_WITH_ALLOWED_CHANGE_CATEGORY = 1 << 26,
 
   /// A special enumerator that is the logical 'or' all the
   /// enumerators above.
@@ -455,12 +459,15 @@ enum diff_category
   | STATIC_DATA_MEMBER_CHANGE_CATEGORY
   | HARMLESS_ENUM_CHANGE_CATEGORY
   | HARMLESS_SYMBOL_ALIAS_CHANGE_CATEGORY
-  | HARMLESS_UNION_CHANGE_CATEGORY
+  | HARMLESS_UNION_OR_CLASS_CHANGE_CATEGORY
   | HARMLESS_DATA_MEMBER_CHANGE_CATEGORY
   | SUPPRESSED_CATEGORY
   | PRIVATE_TYPE_CATEGORY
   | SIZE_OR_OFFSET_CHANGE_CATEGORY
   | VIRTUAL_MEMBER_CHANGE_CATEGORY
+  | REFERENCE_LVALUENESS_CHANGE_CATEGORY
+  | NON_COMPATIBLE_DISTINCT_CHANGE_CATEGORY
+  | NON_COMPATIBLE_NAME_CHANGE_CATEGORY
   | REDUNDANT_CATEGORY
   | TYPE_DECL_ONLY_DEF_CHANGE_CATEGORY
   | FN_PARM_TYPE_TOP_CV_CHANGE_CATEGORY
@@ -498,6 +505,9 @@ get_default_harmless_categories_bitmap();
 
 diff_category
 get_default_harmful_categories_bitmap();
+
+bool
+is_harmful_category(diff_category);
 
 ostream&
 operator<<(ostream& o, diff_category);
@@ -1087,6 +1097,9 @@ public:
   is_suppressed(bool &is_private_type) const;
 
   bool
+  is_categorized_as_suppressed() const;
+
+  bool
   to_be_reported() const;
 
   bool
@@ -1154,6 +1167,20 @@ diff_sptr
 compute_diff(const type_base_sptr,
 	     const type_base_sptr,
 	     diff_context_sptr ctxt);
+
+/// Convert the type of a particular diff node into the generic @ref
+/// diff_sptr type.
+///
+/// @tparam DiffNodePtr the specific type of the diff node to convert
+/// into @ref diff_sptr
+///
+/// @param n the diff node to consider.
+///
+/// @return the instance of @ref diff_sptr @p n was converted into.
+template <class DiffNodePtr>
+diff_sptr
+is_diff(DiffNodePtr& n)
+{return std::dynamic_pointer_cast<diff>(n);}
 
 /// The base class of diff between types.
 class type_diff_base : public diff
@@ -1416,6 +1443,68 @@ compute_diff(reference_type_def_sptr first,
 	     diff_context_sptr ctxt);
 
 
+class ptr_to_mbr_diff;
+
+/// Typedef of a shared_ptr to @ref ptr_to_mbr_diff
+typedef shared_ptr<ptr_to_mbr_diff> ptr_to_mbr_diff_sptr;
+
+/// The abstraction of a diff between two @ref ptr_to_mbr_type.
+class ptr_to_mbr_diff : public type_diff_base
+{
+  struct priv;
+  std::unique_ptr<priv> priv_;
+
+  ptr_to_mbr_diff()  = default;
+
+protected:
+  ptr_to_mbr_diff(const ptr_to_mbr_type_sptr& first,
+		  const ptr_to_mbr_type_sptr& second,
+		  const diff_sptr&	      member_type_diff,
+		  const diff_sptr&	      containing_type_diff,
+		  diff_context_sptr	      ctxt);
+
+public:
+
+  ptr_to_mbr_type_sptr
+  first_ptr_to_mbr_type() const;
+
+  ptr_to_mbr_type_sptr
+  second_ptr_to_mbr_type() const;
+
+  const diff_sptr
+  member_type_diff() const;
+
+  const diff_sptr
+  containing_type_diff() const;
+
+  virtual bool
+  has_changes() const;
+
+  virtual enum change_kind
+  has_local_changes() const;
+
+  virtual const string&
+  get_pretty_representation() const;
+
+  virtual void
+  report(ostream&, const string& indent = "") const;
+
+  virtual void
+  chain_into_hierarchy();
+
+  virtual ~ptr_to_mbr_diff();
+
+  friend ptr_to_mbr_diff_sptr
+  compute_diff(const ptr_to_mbr_type_sptr& first,
+	       const ptr_to_mbr_type_sptr& second,
+	       diff_context_sptr&		  ctxt);
+}; // end class ptr_to_mbr_diff
+
+ptr_to_mbr_diff_sptr
+compute_diff(const ptr_to_mbr_type_sptr& first,
+	     const ptr_to_mbr_type_sptr& second,
+	     diff_context_sptr&	 ctxt);
+
 class subrange_diff;
 
 /// A convenience typedef for a shared pointer to subrange_diff type.
@@ -1483,10 +1572,11 @@ class array_diff : public type_diff_base
   std::unique_ptr<priv> priv_;
 
 protected:
-  array_diff(const array_type_def_sptr	first,
-	     const array_type_def_sptr	second,
-	     diff_sptr			element_type_diff,
-	     diff_context_sptr		ctxt = diff_context_sptr());
+  array_diff(const array_type_def_sptr		first,
+	     const array_type_def_sptr		second,
+	     diff_sptr				element_type_diff,
+	     vector<subrange_diff_sptr>&	subrange_diffs,
+	     diff_context_sptr			ctxt = diff_context_sptr());
 
 public:
   const array_type_def_sptr
@@ -1498,8 +1588,17 @@ public:
   const diff_sptr&
   element_type_diff() const;
 
+  const vector<subrange_diff_sptr>&
+  subrange_diffs() const;
+
   void
   element_type_diff(diff_sptr);
+
+  void
+  subrange_diffs(const vector<subrange_diff_sptr>&);
+
+  bool
+  any_subrange_diff_to_be_reported() const;
 
   virtual const string&
   get_pretty_representation() const;
@@ -2456,10 +2555,16 @@ public:
   added_functions();
 
   const string_function_decl_diff_sptr_map&
-  changed_functions();
+  changed_functions() const;
 
   const function_decl_diff_sptrs_type&
-  changed_functions_sorted();
+  changed_functions_sorted() const;
+
+  const function_decl_diff_sptrs_type&
+  incompatible_changed_functions() const;
+
+  function_decl_diff_sptrs_type&
+  incompatible_changed_functions();
 
   const string_var_ptr_map&
   deleted_variables() const;
@@ -2472,6 +2577,12 @@ public:
 
   const var_diff_sptrs_type&
   changed_variables_sorted();
+
+  const var_diff_sptrs_type&
+  incompatible_changed_variables() const;
+
+  var_diff_sptrs_type&
+  incompatible_changed_variables();
 
   const string_elf_symbol_map&
   deleted_unrefed_function_symbols() const;
@@ -2611,7 +2722,21 @@ public:
   size_t num_func_with_virtual_offset_changes() const;
   void num_func_with_virtual_offset_changes(size_t);
 
+  size_t num_func_with_local_harmful_changes() const;
+  void num_func_with_local_harmful_changes(size_t);
+
+  size_t num_func_with_incompatible_changes() const;
+  void num_func_with_incompatible_changes(size_t);
+
+  size_t num_var_with_local_harmful_changes() const;
+  void num_var_with_local_harmful_changes(size_t);
+
+  size_t num_var_with_incompatible_changes() const;
+  void num_var_with_incompatible_changes(size_t);
+
   size_t net_num_func_changed() const;
+
+  size_t net_num_non_incompatible_func_changed() const;
 
   size_t num_vars_removed() const;
   void num_vars_removed(size_t);
@@ -2636,6 +2761,8 @@ public:
   void num_changed_vars_filtered_out(size_t);
 
   size_t net_num_vars_changed() const;
+
+  size_t net_num_non_incompatible_var_changed() const;
 
   size_t num_func_syms_removed() const;
   void num_func_syms_removed(size_t);
@@ -2685,16 +2812,24 @@ public:
   size_t num_leaf_func_changes() const;
   void num_leaf_func_changes(size_t);
 
+  size_t num_leaf_func_with_incompatible_changes() const;
+  void num_leaf_func_with_incompatible_changes(size_t);
+
   size_t num_leaf_func_changes_filtered_out() const;
   void num_leaf_func_changes_filtered_out(size_t);
   size_t net_num_leaf_func_changes() const;
+  size_t net_num_leaf_func_non_incompatible_changes() const;
 
   size_t num_leaf_var_changes() const;
   void num_leaf_var_changes(size_t);
 
+  size_t num_leaf_var_with_incompatible_changes() const;
+  void num_leaf_var_with_incompatible_changes(size_t);
+
   size_t num_leaf_var_changes_filtered_out() const;
   void num_leaf_var_changes_filtered_out(size_t);
   size_t net_num_leaf_var_changes() const;
+  size_t net_num_leaf_var_non_incompatible_changes() const;
 
   size_t num_added_unreachable_types() const;
   void num_added_unreachable_types(size_t);
@@ -2848,6 +2983,9 @@ print_diff_tree(corpus_diff_sptr diff_tree,
 		std::ostream&);
 
 void
+print_category(diff_category c);
+
+void
 categorize_redundancy(diff* diff_tree);
 
 void
@@ -2872,7 +3010,10 @@ void
 clear_redundancy_categorization(corpus_diff_sptr diff_tree);
 
 void
-apply_filters(corpus_diff_sptr diff_tree);
+apply_filters_and_categorize_diff_node_tree(diff_sptr& diff_tree);
+
+void
+apply_filters_and_categorize_diff_node_tree(corpus_diff_sptr& c);
 
 bool
 is_diff_of_variadic_parameter_type(const diff*);
@@ -2921,6 +3062,9 @@ is_anonymous_class_or_union_diff(const diff* d);
 
 const subrange_diff*
 is_subrange_diff(const diff* diff);
+
+const subrange_diff*
+is_anonymous_subrange_diff(const diff* d);
 
 const array_diff*
 is_array_diff(const diff* diff);

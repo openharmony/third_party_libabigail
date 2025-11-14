@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -100,151 +100,6 @@ find_alt_dwarf_debug_info_link(Dwfl_Module *elf_module,
   return false;
 }
 
-/// Find alternate debuginfo file of a given "link" under a set of
-/// root directories.
-///
-/// The link is a string that is read by the function
-/// find_alt_dwarf_debug_info_link().  That link is a path that is relative
-/// to a given debug info file, e.g, "../../../.dwz/something.debug".
-/// It designates the alternate debug info file associated to a given
-/// debug info file.
-///
-/// This function will thus try to find the .dwz/something.debug file
-/// under some given root directories.
-///
-/// @param root_dirs the set of root directories to look from.
-///
-/// @param alt_file_name a relative path to the alternate debug info
-/// file to look for.
-///
-/// @param alt_file_path the resulting absolute path to the alternate
-/// debuginfo path denoted by @p alt_file_name and found under one of
-/// the directories in @p root_dirs.  This is set iff the function
-/// returns true.
-///
-/// @return true iff the function found the alternate debuginfo file.
-static bool
-find_alt_dwarf_debug_info_path(const vector<char**> root_dirs,
-			       const string &alt_file_name,
-			       string &alt_file_path)
-{
-  if (alt_file_name.empty())
-    return false;
-
-  string altfile_name = tools_utils::trim_leading_string(alt_file_name, "../");
-  // In case the alt dwarf debug info file is to be found under
-  // "/usr/lib/debug", look for it under the provided root directories
-  // instead.
-  altfile_name = tools_utils::trim_leading_string(altfile_name,
-						  "/usr/lib/debug/");
-
-  for (vector<char**>::const_iterator i = root_dirs.begin();
-       i != root_dirs.end();
-       ++i)
-    if (tools_utils::find_file_under_dir(**i, altfile_name, alt_file_path))
-      return true;
-
-  return false;
-}
-
-/// Return the alternate debug info associated to a given main debug
-/// info file.
-///
-/// @param elf_module the elf module to consider.
-///
-/// @param debug_root_dirs a set of root debuginfo directories under
-/// which too look for the alternate debuginfo file.
-///
-/// @param alt_file_name output parameter.  This is set to the file
-/// path of the alternate debug info file associated to @p elf_module.
-/// This is set iff the function returns a non-null result.
-///
-/// @param alt_fd the file descriptor used to access the alternate
-/// debug info.  If this parameter is set by the function, then the
-/// caller needs to fclose it, otherwise the file descriptor is going
-/// to be leaked.  Note however that on recent versions of elfutils
-/// where libdw.h contains the function dwarf_getalt(), this parameter
-/// is set to 0, so it doesn't need to be fclosed.
-///
-/// Note that the alternate debug info file is a DWARF extension as of
-/// DWARF 4 ans is decribed at
-/// http://www.dwarfstd.org/ShowIssue.php?issue=120604.1.
-///
-/// @return the alternate debuginfo, or null.  If @p alt_fd is
-/// non-zero, then the caller of this function needs to call
-/// dwarf_end() on the returned alternate debuginfo pointer,
-/// otherwise, it's going to be leaked.
-static Dwarf*
-find_alt_dwarf_debug_info(Dwfl_Module *elf_module,
-			  const vector<char**> debug_root_dirs,
-			  string& alt_file_name,
-			  int& alt_fd)
-{
-  if (elf_module == 0)
-    return 0;
-
-  Dwarf* result = 0;
-  find_alt_dwarf_debug_info_link(elf_module, alt_file_name);
-
-#ifdef LIBDW_HAS_DWARF_GETALT
-  // We are on recent versions of elfutils where the function
-  // dwarf_getalt exists, so let's use it.
-  Dwarf_Addr bias = 0;
-  Dwarf* dwarf = dwfl_module_getdwarf(elf_module, &bias);
-  result = dwarf_getalt(dwarf);
-  alt_fd = 0;
-#else
-  // We are on an old version of elfutils where the function
-  // dwarf_getalt doesn't exist yet, so let's open code its
-  // functionality
-  char *alt_name = 0;
-  const char *file_name = 0;
-  void **user_data = 0;
-  Dwarf_Addr low_addr = 0;
-  char *alt_file = 0;
-
-  file_name = dwfl_module_info(elf_module, &user_data,
-			       &low_addr, 0, 0, 0, 0, 0);
-
-  alt_fd = dwfl_standard_find_debuginfo(elf_module, user_data,
-					file_name, low_addr,
-					alt_name, file_name,
-					0, &alt_file);
-
-  result = dwarf_begin(alt_fd, DWARF_C_READ);
-#endif
-
-  if (result == 0)
-    {
-      // So we didn't find the alternate debuginfo file from the
-      // information that is in the debuginfo file associated to
-      // elf_module.  Maybe the alternate debuginfo file is located
-      // under one of the directories in debug_root_dirs.  So let's
-      // look in there.
-      string alt_file_path;
-      if (!find_alt_dwarf_debug_info_path(debug_root_dirs,
-					  alt_file_name,
-					  alt_file_path))
-	return result;
-
-      // If we reach this point it means we have found the path to the
-      // alternate debuginfo file and it's in alt_file_path.  So let's
-      // open it and read it.
-      alt_fd = open(alt_file_path.c_str(), O_RDONLY);
-      if (alt_fd == -1)
-	return result;
-      result = dwarf_begin(alt_fd, DWARF_C_READ);
-
-#ifdef LIBDW_HAS_DWARF_GETALT
-      Dwarf_Addr bias = 0;
-      Dwarf* dwarf = dwfl_module_getdwarf(elf_module, &bias);
-      dwarf_setalt(dwarf, result);
-#endif
-    }
-
-  return result;
-}
-
 /// Private data of the @ref elf::reader type.
 struct reader::priv
 {
@@ -257,7 +112,15 @@ struct reader::priv
   // demand.
   mutable symtab_reader::symtab_sptr	symt;
   // Where split debug info is to be searched for on disk.
-  vector<char**>			debug_info_root_paths;
+  vector<string>			debug_info_root_paths;
+  // The formatted string version of debug_info_root_paths.  The
+  // format is according to what elfutils expects.  For the details of
+  // what elfutils expects, please read the comments of the function
+  // dwfl_build_id_find_elf in /usr/include/elfutils/libdwfl.h.
+  string				formated_di_root_paths;
+  // A pointer to where the string held by formated_di_root_paths is.
+  // This is fed to elfutils.
+  char*				raw_formated_di_root_paths = nullptr;
   // Some very useful callback functions that elfutils needs to
   // perform various tasks.
   Dwfl_Callbacks			offline_callbacks;
@@ -282,7 +145,7 @@ struct reader::priv
   Elf_Scn*				btf_section		= nullptr;
 
   priv(reader& reeder, const std::string& elf_path,
-       const vector<char**>& debug_info_roots)
+       const vector<string>& debug_info_roots)
     : rdr(reeder)
   {
     rdr.corpus_path(elf_path);
@@ -300,7 +163,7 @@ struct reader::priv
   /// @param debug_info_roots the vector of new directories where to
   /// look for split debug info file.
   void
-  initialize(const vector<char**>& debug_info_roots)
+  initialize(const vector<string>& debug_info_roots)
   {
     clear_alt_dwarf_debug_info_data();
     clear_alt_ctf_debug_info_data();
@@ -311,6 +174,8 @@ struct reader::priv
     dt_needed.clear();
     symt.reset();
     debug_info_root_paths = debug_info_roots;
+    formated_di_root_paths.clear();
+    raw_formated_di_root_paths = nullptr;
     memset(&offline_callbacks, 0, sizeof(offline_callbacks));
     dwfl_handle.reset();
     elf_module = nullptr;
@@ -324,6 +189,49 @@ struct reader::priv
     alt_ctf_fd = 0;
   }
 
+  /// Initialize the debug info root path.  The format of this path is
+  /// described in /usr/include/elfutils/libdwfl.h in the comment for
+  /// the function dwfl_build_id_find_elf.
+  ///
+  /// The string must start with '-' to disable CRC32 checksum
+  /// validation.  Directories must be separated by the ':' character.
+  /// The search order depends on if each path is absolute or relative
+  /// as described by that comment.
+  ///
+  /// In any case, let's format the debuginfo search path here for
+  /// elfutils consumption.
+  void
+  initialize_debug_info_root_paths()
+  {
+    vector<string> root_paths = debug_info_root_paths;
+
+    for (auto path : debug_info_root_paths)
+      if (tools_utils::string_begins_with(path, "/"))
+	{
+	  // For absolute root directories, let's add all the
+	  // sub-directories of these directories that contain a
+	  // (debug info) file.  This can be helpful to help elfutils
+	  // find alternate debuginfo files when the altdebuginfolink
+	  // is itself an absolute file path that is contained under
+	  // the root directory.  This what we see in PR30329 and its
+	  // associated regression test in test-abidiff-exit.cc
+	  vector<string> additional_subdirs;
+	  tools_utils::get_file_path_dirs_under_dir(path, additional_subdirs);
+	  for (auto& subdir : additional_subdirs)
+	    root_paths.push_back(subdir);
+	}
+
+    for (auto path : root_paths)
+      {
+	if (formated_di_root_paths.empty())
+	  formated_di_root_paths = "-";
+	if (!path.empty())
+	  formated_di_root_paths += path + ":";
+      }
+    raw_formated_di_root_paths =
+      const_cast<char*>(formated_di_root_paths.c_str());
+  }
+
   /// Setup the necessary plumbing to open the ELF file and find all
   /// the associated split debug info files.
   ///
@@ -333,10 +241,11 @@ struct reader::priv
   crack_open_elf_file()
   {
     // Initialize the callback functions used by elfutils.
+    initialize_debug_info_root_paths();
     elf_helpers::initialize_dwfl_callbacks(offline_callbacks,
-					   debug_info_root_paths.empty()
+					   formated_di_root_paths.empty()
 					   ? nullptr
-					   : debug_info_root_paths.front());
+					   : &raw_formated_di_root_paths);
 
     // Create a handle to the DWARF Front End Library that we'll need.
     dwfl_handle = elf_helpers::create_new_dwfl_handle(offline_callbacks);
@@ -356,25 +265,6 @@ struct reader::priv
     GElf_Addr bias = 0;
     elf_handle = dwfl_module_getelf(elf_module, &bias);
     ABG_ASSERT(elf_handle);
-  }
-
-  /// Find the alternate debuginfo file associated to a given elf file.
-  ///
-  /// @param elf_module represents the elf file to consider.
-  ///
-  /// @param alt_file_name the resulting path to the alternate
-  /// debuginfo file found.  This is set iff the function returns a
-  /// non-nil value.
-  Dwarf*
-  find_alt_dwarf_debug_info(Dwfl_Module*	elf_module,
-			    string&		alt_file_name,
-			    int&		alt_fd)
-  {
-    Dwarf *result = 0;
-    result = elf::find_alt_dwarf_debug_info(elf_module,
-					    debug_info_root_paths,
-					    alt_file_name, alt_fd);
-    return result;
   }
 
   /// Clear the resources related to the alternate DWARF data.
@@ -405,24 +295,10 @@ struct reader::priv
     if (dwarf_handle)
       return;
 
-    // First let's see if the ELF file that was cracked open does have
-    // some DWARF debug info embedded.
     Dwarf_Addr bias = 0;
     dwarf_handle = dwfl_module_getdwarf(elf_module, &bias);
-
-    // If no debug info was found in the binary itself, then look for
-    // split debuginfo files under multiple possible debuginfo roots.
-    for (vector<char**>::const_iterator i = debug_info_root_paths.begin();
-	 dwarf_handle == 0 && i != debug_info_root_paths.end();
-	 ++i)
-      {
-	offline_callbacks.debuginfo_path = *i;
-	dwarf_handle = dwfl_module_getdwarf(elf_module, &bias);
-      }
-
-    alt_dwarf_handle = find_alt_dwarf_debug_info(elf_module,
-						 alt_dwarf_path,
-						 alt_dwarf_fd);
+    alt_dwarf_handle = dwarf_getalt(dwarf_handle);
+    find_alt_dwarf_debug_info_link(elf_module, alt_dwarf_path);
   }
 
   /// Clear the resources related to the alternate CTF data.
@@ -467,7 +343,7 @@ struct reader::priv
       for (const auto& path : rdr.debug_info_root_paths())
 	{
 	  std::string file_path;
-	  if (!tools_utils::find_file_under_dir(*path, name, file_path))
+	  if (!tools_utils::find_file_under_dir(path, name, file_path))
 	    continue;
 
 	  if ((alt_ctf_fd = open(file_path.c_str(), O_RDONLY)) == -1)
@@ -513,7 +389,7 @@ struct reader::priv
 ///
 /// @param env the environment which the reader operates in.
 reader::reader(const string&		elf_path,
-	       const vector<char**>&	debug_info_roots,
+	       const vector<string>&	debug_info_roots,
 	       ir::environment&	env)
   : fe_iface(elf_path, env),
     priv_(new priv(*this, elf_path, debug_info_roots))
@@ -539,7 +415,7 @@ reader::~reader()
 /// for split debug information files.
 void
 reader::initialize(const std::string&		elf_path,
-		   const vector<char**>&	debug_info_roots)
+		   const vector<string>&	debug_info_roots)
 {
   fe_iface::initialize(elf_path);
   corpus_path(elf_path);
@@ -559,7 +435,7 @@ reader::initialize(const std::string&		elf_path,
 void
 reader::initialize(const std::string&	elf_path)
 {
-  vector<char**> v;
+  vector<string> v;
   initialize(elf_path, v);
 }
 
@@ -568,7 +444,7 @@ reader::initialize(const std::string&	elf_path)
 ///
 /// @return the vector of directory paths to look into for split
 /// debug information files.
-const vector<char**>&
+const vector<string>&
 reader::debug_info_root_paths() const
 {return priv_->debug_info_root_paths;}
 
@@ -769,7 +645,24 @@ reader::symtab() const
     priv_->symt = symtab_reader::symtab::load
       (elf_handle(), options().env,
        [&](const elf_symbol_sptr& symbol)
-       {return suppr::is_elf_symbol_suppressed(*this, symbol);});
+       {
+	 // This closure determines if a given symbol is suppressed by
+	 // taking into accont symbol aliases.  Basically, a symbol is
+	 // suppressed if all its aliases are suppressed.
+	 if (!symbol)
+	   return false;
+	 if (!suppr::is_elf_symbol_suppressed(*this, symbol))
+	   return false;
+	 for (elf_symbol_sptr a = symbol->get_next_alias();
+	      a && a.get() != symbol->get_main_symbol().get();
+	      a = a->get_next_alias())
+	   {
+	     if (!suppr::is_elf_symbol_suppressed(*this, a))
+	       return false;
+	   }
+	 return true;
+       }
+       );
 
   if (!priv_->symt)
     std::cerr << "Symbol table of '" << corpus_path()
@@ -788,12 +681,11 @@ reader::symtab() const
 elf_symbol_sptr
 reader::function_symbol_is_exported(GElf_Addr symbol_address) const
 {
-  elf_symbol_sptr symbol = symtab()->lookup_symbol(symbol_address);
+
+  elf_symbol_sptr symbol =
+    symtab()->function_symbol_is_exported(symbol_address);
   if (!symbol)
     return symbol;
-
-  if (!symbol->is_function() || !symbol->is_public())
-    return elf_symbol_sptr();
 
   address_set_sptr set;
   bool looking_at_linux_kernel_binary =
@@ -820,12 +712,10 @@ reader::function_symbol_is_exported(GElf_Addr symbol_address) const
 elf_symbol_sptr
 reader::variable_symbol_is_exported(GElf_Addr symbol_address) const
 {
-  elf_symbol_sptr symbol = symtab()->lookup_symbol(symbol_address);
+  elf_symbol_sptr symbol =
+    symtab()->variable_symbol_is_exported(symbol_address);
   if (!symbol)
     return symbol;
-
-  if (!symbol->is_variable() || !symbol->is_public())
-    return elf_symbol_sptr();
 
   address_set_sptr set;
   bool looking_at_linux_kernel_binary =
@@ -849,23 +739,20 @@ reader::variable_symbol_is_exported(GElf_Addr symbol_address) const
 elf_symbol_sptr
 reader::function_symbol_is_exported(const string& name) const
 {
-  const elf_symbols& syms = symtab()->lookup_symbol(name);
-  for (auto s : syms)
+  const elf_symbol_sptr s = symtab()->function_symbol_is_exported(name);
+  if (s && s->is_function() && s->is_public())
     {
-      if (s->is_function() && s->is_public())
-	{
-	  bool looking_at_linux_kernel_binary =
-	    (load_in_linux_kernel_mode()
-	     && elf_helpers::is_linux_kernel(elf_handle()));
+      bool looking_at_linux_kernel_binary =
+	(load_in_linux_kernel_mode()
+	 && elf_helpers::is_linux_kernel(elf_handle()));
 
-	  if (looking_at_linux_kernel_binary)
-	    {
-	      if (s->is_in_ksymtab())
-		return s;
-	    }
-	  else
+      if (looking_at_linux_kernel_binary)
+	{
+	  if (s->is_in_ksymtab())
 	    return s;
 	}
+      else
+	return s;
     }
   return elf_symbol_sptr();
 }
@@ -879,26 +766,42 @@ reader::function_symbol_is_exported(const string& name) const
 elf_symbol_sptr
 reader::variable_symbol_is_exported(const string& name) const
 {
-  const elf_symbols& syms = symtab()->lookup_symbol(name);
-  for (auto s : syms)
+  const elf_symbol_sptr s  = symtab()->variable_symbol_is_exported(name);
+  if (s && s->is_variable() && s->is_public())
     {
-      if (s->is_variable() && s->is_public())
-	{
-	  bool looking_at_linux_kernel_binary =
-	    (load_in_linux_kernel_mode()
-	     && elf_helpers::is_linux_kernel(elf_handle()));
+      bool looking_at_linux_kernel_binary =
+	(load_in_linux_kernel_mode()
+	 && elf_helpers::is_linux_kernel(elf_handle()));
 
-	  if (looking_at_linux_kernel_binary)
-	    {
-	      if (s->is_in_ksymtab())
-		return s;
-	    }
-	  else
+      if (looking_at_linux_kernel_binary)
+	{
+	  if (s->is_in_ksymtab())
 	    return s;
 	}
+      else
+	return s;
     }
   return elf_symbol_sptr();
 }
+
+/// Test if a name is the name of an undefined function symbol.
+///
+/// @param name the symbol name to consider.
+///
+/// @return the undefined function symbol or nil if none was found.
+elf_symbol_sptr
+reader::function_symbol_is_undefined(const string& name) const
+{return symtab()->function_symbol_is_undefined(name);}
+
+/// Test if a name is the name of an undefined variable symbol.
+///
+/// @param name the symbol name to consider.
+///
+/// @return the undefined variable symbol or nil if none was found.
+elf_symbol_sptr
+reader::variable_symbol_is_undefined(const string& name) const
+{return symtab()->variable_symbol_is_undefined(name);}
+
 /// Load the DT_NEEDED and DT_SONAME elf TAGS.
 void
 reader::load_dt_soname_and_needed()
@@ -1061,7 +964,9 @@ get_type_of_elf_file(const string& path, elf::elf_type& type)
     return false;
 
   elf_version (EV_CURRENT);
-  Elf *elf = elf_begin (fd, ELF_C_READ_MMAP, NULL);
+  // Note that the dwelf_elf_begin function supports decompressing the
+  // content of the input file, which is pretty cool.
+  Elf *elf = dwelf_elf_begin(fd);
   type = elf_file_type(elf);
   elf_end(elf);
   close(fd);

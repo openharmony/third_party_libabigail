@@ -77,6 +77,11 @@ Options
    Do not show information about where in the *second shared library*
    the respective type was changed.
 
+  * ``--btf``
+
+    When comparing binaries, extract ABI information from BTF debug
+    information, if present.
+
   * ``--ctf``
 
     When comparing binaries, extract ABI information from CTF debug

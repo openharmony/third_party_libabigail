@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2022-2023 Red Hat, Inc.
+// Copyright (C) 2022-2025 Red Hat, Inc.
 //
 // Author: Dodji Seketeli
 
@@ -43,7 +43,7 @@ protected:
   /// method to create a reader instance as this constructor is
   /// protected.
   elf_based_reader(const std::string& elf_path,
-		   const vector<char**>& debug_info_root_paths,
+		   const vector<string>& debug_info_root_paths,
 		   environment& env);
 public:
 
@@ -51,7 +51,7 @@ public:
 
   virtual void
   initialize(const std::string& elf_path,
-	     const vector<char**>& debug_info_root_paths);
+	     const vector<string>& debug_info_root_paths);
 
   virtual ir::corpus_sptr
   read_and_add_corpus_to_group(ir::corpus_group& group,
@@ -59,7 +59,7 @@ public:
 
   virtual void
   initialize(const string&		elf_path,
-	     const vector<char**>&	debug_info_root_paths,
+	     const vector<string>&	debug_info_root_paths,
 	     bool			load_all_types,
 	     bool			linux_kernel_mode) = 0;
 

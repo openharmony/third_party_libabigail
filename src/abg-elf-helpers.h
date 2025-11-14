@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- Mode: C++ -*-
 //
-// Copyright (C) 2020-2023 Google, Inc.
+// Copyright (C) 2020-2025 Google, Inc.
 
 /// @file
 ///
@@ -13,6 +13,7 @@
 #include "config.h"
 
 #include <elfutils/libdwfl.h>
+#include <elfutils/libdwelf.h>
 #include <gelf.h>
 #include <string>
 

@@ -60,14 +60,33 @@ change reports that might be considered as false positives to users.
 Options
 =======
 
-  * ``--help | -h``
+  * ``--abipkgdiff`` <path/to/abipkgdiff>
 
-    Display a short help about the command and exit.
+    Specify an alternative abipkgdiff instead of the one installed in system.
 
-  * ``--dry-run``
 
-    Don't actually perform the ABI comparison.  Details about what is
-    going to be done are emitted on standard output.
+  * ``--all-subpackages``
+
+    Instructs the tool to also compare the ABI of the binaries in the
+    sub-packages of the packages specified.
+
+
+  * ``--clean-cache``
+
+    If you want to clean cache both before and after ABI comparison,
+    ``--clean-cache`` is the convenient way for you to save typing of two
+    options at same time.
+
+
+  * ``--clean-cache-after``
+
+    Clean cache after ABI comparison.
+
+
+  * ``--clean-cache-before``
+
+    Clean cache before ABI comparison.
+
 
   * ``--debug``
 
@@ -75,20 +94,19 @@ Options
     Details about each method invocation, including input parameters
     and returned values, are emitted.
 
-  * ``--traceback``
 
-    Show traceback when an exception raised. This is useful for
-    developers of the tool itself to know more exceptional errors.
+  * ``--dry-run``
 
-  * ``--server`` <URL>
+    Don't actually perform the ABI comparison.  Details about what is
+    going to be done are emitted on standard output.
 
-    Specifies the URL of the `Koji`_ XMLRPC service the tool talks to.
-    The default value of this option is http://koji.fedoraproject.org/kojihub.
 
-  * ``--topurl`` <URL>
+  * ``--dso-only``
 
-    Specifies the URL of the package store the tool downloads RPMs
-    from.  The default value of this option is https://kojipkgs.fedoraproject.org.
+    Compares the ABI of shared libraries only.  If this option is not
+    provided, the tool compares the ABI of all ELF binaries found in
+    the packages.
+
 
   * ``--from`` <distro>
 
@@ -97,35 +115,17 @@ Options
     ``distro`` value can be any valid value of the RPM macro
     ``%{?dist}`` for `Fedora`_, for example, ``fc4``, ``fc23``, ``fc25``.
 
-  * ``--to`` <distro>
 
-    Specifies the name of the `Fedora`_ distribution in which to find
-    the `build`_ that is compared against the baseline specified by
-    option ``--from``.  The ``distro`` value could be any valid value
-    of the RPM macro ``%{?dist}`` for `Fedora`_, for example, ``fc4``,
-    ``fc23``.
+  * ``--help | -h``
 
-  * ``--all-subpackages``
-
-    Instructs the tool to also compare the ABI of the binaries in the
-    sub-packages of the packages specified.
-
-  * ``--dso-only``
-
-    Compares the ABI of shared libraries only.  If this option is not
-    provided, the tool compares the ABI of all ELF binaries found in
-    the packages.
-
-  * ``--suppressions`` <*path-to-suppresions*>
-
-    Use a :ref:`suppression specification <suppr_spec_label>` file
-    located at *path-to-suppressions*.
+    Display a short help about the command and exit.
 
 
   * ``--no-default-suppression``
 
     Do not load the :ref:`default suppression specification files
     <fedabipkgdiff_default_supprs_label>`.
+
 
   * ``--no-devel-pkg``
 
@@ -137,6 +137,20 @@ Options
     defined in public header files available from the packages being
     compared.
 
+
+  * ``--private-dso``
+
+    Compare the ABI of shared libraries that are private to the
+    packages.  If this option is not provided, shared libraries that
+    are private to the packages being considered are not compared.
+
+
+  * ``--server`` <URL>
+
+    Specifies the URL of the `Koji`_ XMLRPC service the tool talks to.
+    The default value of this option is http://koji.fedoraproject.org/kojihub.
+
+
   * ``--show-identical-binaries``
 
    Show the names of the all binaries compared, including the
@@ -144,23 +158,33 @@ Options
    not provided, only binaries with ABI changes are mentionned in the
    output.
 
-  * ``--abipkgdiff`` <path/to/abipkgdiff>
 
-    Specify an alternative abipkgdiff instead of the one installed in system.
+  * ``--suppressions`` <*path-to-suppresions*>
 
-  * ``--clean-cache-before``
+    Use a :ref:`suppression specification <suppr_spec_label>` file
+    located at *path-to-suppressions*.
 
-    Clean cache before ABI comparison.
 
-  * ``--clean-cache-after``
+  * ``--to`` <distro>
 
-    Clean cache after ABI comparison.
+    Specifies the name of the `Fedora`_ distribution in which to find
+    the `build`_ that is compared against the baseline specified by
+    option ``--from``.  The ``distro`` value could be any valid value
+    of the RPM macro ``%{?dist}`` for `Fedora`_, for example, ``fc4``,
+    ``fc23``.
 
-  * ``--clean-cache``
 
-    If you want to clean cache both before and after ABI comparison,
-    ``--clean-cache`` is the convenient way for you to save typing of two
-    options at same time.
+  * ``--topurl`` <URL>
+
+    Specifies the URL of the package store the tool downloads RPMs
+    from.  The default value of this option is https://kojipkgs.fedoraproject.org.
+
+
+  * ``--traceback``
+
+    Show traceback when an exception raised. This is useful for
+    developers of the tool itself to know more exceptional errors.
+
 
 .. _build:
 

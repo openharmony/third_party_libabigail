@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // -*- mode: C++ -*-
 //
-// Copyright (C) 2013-2023 Red Hat, Inc.
+// Copyright (C) 2013-2025 Red Hat, Inc.
 
 /// @file
 
@@ -28,10 +28,16 @@ public:
   typedef vector<string> strings_type;
 
   /// Convenience typedef for std::vector<abigail::ir::function_decl*>
-  typedef vector<function_decl*> functions;
+  typedef vector<const function_decl*> functions;
+
+  /// Convenience typedef for std::unordered_set<const function_decl*>
+  typedef std::unordered_set<const function_decl*> functions_set;
 
   ///Convenience typedef for std::vector<abigail::ir::var_decl*>
-  typedef vector<var_decl*> variables;
+  typedef vector<var_decl_sptr> variables;
+
+  /// Convenience typedef for std::unordered_set<const var_decl*>.
+  typedef std::unordered_set<var_decl_sptr> variables_set;
 
   class exported_decls_builder;
 
@@ -219,13 +225,40 @@ public:
   get_functions() const;
 
   const std::unordered_set<function_decl*>*
-  lookup_functions(const string& id) const;
+  lookup_functions(const interned_string& id) const;
+
+  const std::unordered_set<function_decl*>*
+  lookup_functions(const char* id) const;
+
+  const std::unordered_set<var_decl_sptr>*
+  lookup_variables(const interned_string& id) const;
+
+  const std::unordered_set<var_decl_sptr>*
+  lookup_variables(const char* id) const;
 
   void
   sort_functions();
 
   virtual const variables&
   get_variables() const;
+
+  const functions_set&
+  get_undefined_functions() const;
+
+  functions_set&
+  get_undefined_functions();
+
+  const functions&
+  get_sorted_undefined_functions() const;
+
+  const variables_set&
+  get_undefined_variables() const;
+
+  variables_set&
+  get_undefined_variables();
+
+  const variables&
+  get_sorted_undefined_variables() const;
 
   void
   sort_variables();
@@ -328,7 +361,7 @@ public:
   exported_functions();
 
   std::unordered_set<function_decl*>*
-  fn_id_maps_to_several_fns(function_decl*);
+  fn_id_maps_to_several_fns(const function_decl*);
 
   const variables&
   exported_variables() const;
@@ -336,11 +369,11 @@ public:
   variables&
   exported_variables();
 
-  void
+  bool
   maybe_add_fn_to_exported_fns(function_decl*);
 
-  void
-  maybe_add_var_to_exported_vars(const var_decl*);
+  bool
+  maybe_add_var_to_exported_vars(const var_decl_sptr&);
 }; //corpus::exported_decls_builder
 
 /// Abstraction of a group of corpora.
@@ -414,6 +447,8 @@ public:
   operator==(const corpus_group&) const;
 }; // end class corpus_group
 
+corpus_group_sptr
+is_corpus_group(const corpus_sptr&);
 }// end namespace ir
 }//end namespace abigail
 #endif //__ABG_CORPUS_H__
