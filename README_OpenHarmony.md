@@ -53,6 +53,6 @@ deps += [ "//third_party/libabigail:libabigail-tools_host_toolchain" ]
 
 ## License
 
-`Apache License V2.0`
+`Apache 2.0 with LLVM exception`
 
 ‍
