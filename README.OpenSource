@@ -1,7 +1,7 @@
 [
   {
     "Name": "libabigail",
-    "License": "Apache License 2.0",
+    "License": "Apache 2.0 with LLVM exception",
     "License File": "LICENSE.txt",
     "Version Number": "2.8",
     "Owner": "zhanghaibo0@huawei.com",
